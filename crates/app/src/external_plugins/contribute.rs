@@ -153,6 +153,7 @@ fn suggest(
     cx: &App,
 ) -> Option<Completed> {
     let Place {
+        community,
         channel,
         thread,
         invite_agents,
@@ -162,7 +163,7 @@ fn suggest(
     } = place;
     let entry = (
         key.to_owned(),
-        format!("{channel}/{thread:?}/{invite_agents}"),
+        format!("{community}/{channel}/{thread:?}/{invite_agents}"),
         query.to_owned(),
     );
     if let Some(known) =
@@ -187,6 +188,7 @@ fn suggest(
             "completion": id,
             "request": query_id,
             "query": query,
+            "community": community,
             "channel": channel,
             "thread": thread,
             "inviteAgents": invite_agents,
@@ -668,6 +670,10 @@ impl crate::ui::renderers::TextRenderer for Inline {
                     json!({
                         "renderer": self.id,
                         "text": piece,
+                        // The plain-text segment it was found in
+                        // (`content.text`), and where in it, in characters.
+                        "segment": text.chars().take(10_000).collect::<String>(),
+                        "start": text[..matched.start()].chars().count(),
                         "message": capabilities::message(message.row, message.profiles),
                         "reaction": reaction,
                     }),
@@ -986,10 +992,14 @@ impl MessageAction for Action {
 
     fn run(&self, row: &Arc<MessageRow>, _: &mut Window, cx: &mut App) {
         let message = message_json(row, cx);
+        // The conversation's community: the selected one, where message
+        // menus show.
+        let community = AppState::current(cx)
+            .map(|community| community.read(cx).origin.websocket().to_string());
         ExternalPlugins::notify_running(
             &self.plugin,
             "message/action",
-            json!({ "action": self.id, "message": message }),
+            json!({ "action": self.id, "message": message, "community": community }),
             cx,
         );
     }
@@ -1188,6 +1198,14 @@ impl Render for Tool {
             self.composer,
             self.context.thread.clone(),
         );
+        // The composer's community (`ComposerToolProps.scope`).
+        let community = self
+            .context
+            .community
+            .read(cx)
+            .origin
+            .websocket()
+            .to_string();
         let (disabled, invite_agents) = self
             .context
             .composer
@@ -1229,6 +1247,7 @@ impl Render for Tool {
                 "composer/tool",
                 json!({
                     "tool": id,
+                    "community": community,
                     "channel": channel,
                     "thread": thread,
                     "composer": composer,
@@ -1458,7 +1477,8 @@ pub fn insert_mentions(
     if named.is_empty() {
         return Err((protocol::INVALID_PARAMS, "pubkeys names no one".to_owned()));
     }
-    let community = AppState::current(cx).ok_or((1, "No community is selected.".to_owned()))?;
+    // Names from the composer's own community, which may not be selected.
+    let community = composer.read(cx).community().clone();
     let profiles = community.read(cx).snapshot.profiles.clone();
     let recipients: Vec<(String, SharedString, Option<String>)> = named
         .into_iter()
@@ -1921,8 +1941,10 @@ pub fn register(
                 crate::ui::emoji_picker::ReactionPicker {
                     key: tool_key,
                     order: tool.order,
-                    build: Rc::new(move |select, window, cx| {
-                        super::view::ExternalView::reaction_picker(&owner, &id, select, window, cx)
+                    build: Rc::new(move |select, community, window, cx| {
+                        super::view::ExternalView::reaction_picker(
+                            &owner, &id, select, community, window, cx,
+                        )
                     }),
                 },
                 cx,
@@ -1954,6 +1976,7 @@ pub fn register(
                     super::view::ExternalView::accessory(
                         &owner,
                         &id,
+                        &context.community,
                         &context.channel,
                         context.thread.as_deref(),
                         window,

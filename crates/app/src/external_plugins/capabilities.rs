@@ -1694,19 +1694,22 @@ pub fn attest(params: &Value, cx: &App) -> Result<Value, Failure> {
 /// `full` (a byline's hover text) or `relative` ("5 minutes ago").
 pub fn format_time(params: &Value) -> Result<Value, Failure> {
     use crate::ui::time;
-    let at = params
-        .get("at")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| invalid("at (unix seconds) is required"))?;
+    // Unix seconds, fractions as `Date.now() / 1000` gives them, and times
+    // before 1970 as 1970.
+    let seconds = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|seconds| seconds.is_finite())
+            .map(|seconds| seconds.floor().max(0.0) as u64)
+    };
+    let at = seconds("at").ok_or_else(|| invalid("at (unix seconds) is required"))?;
     // `nowSeconds`: what "today" and "ago" are counted from.
-    let now = params
-        .get("now")
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| since.as_secs())
-        });
+    let now = seconds("now").unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs())
+    });
     Ok(json!(match text(params, "style") {
         None | Some("byline") => time::byline_at(at, time::at(now)),
         Some("item") => time::item_at(at, time::at(now)),
@@ -2186,30 +2189,55 @@ pub fn contributions(cx: &App) -> Value {
             "chords": shortcut.chords,
             "enabled": shortcut.enabled,
         })).collect::<Vec<_>>(),
-        "composerTools": crate::ui::composer_tools::listed(cx).iter()
-            .filter(|(_, _, accessory)| !accessory)
-            .map(|(key, order, _)| json!({
+        // Buzz's own toolbar buttons first, as buzz-app's bundled tools.
+        "composerTools": BUNDLED_TOOLS.iter()
+            .filter(|(key, _, _)| crate::plugins::enabled_key(key))
+            .map(|&(key, order, title)| json!({
                 "key": key,
                 "order": order,
-                "title": title_of(key),
+                "title": title,
+                "reactionComponent": key == "buzz.emoji/picker",
             }))
+            .chain(crate::ui::composer_tools::listed(cx).iter()
+                .filter(|(key, _, accessory)| !accessory && crate::plugins::enabled_key(key))
+                .map(|(key, order, _)| json!({
+                    "key": key,
+                    "order": order,
+                    "title": title_of(key),
+                    "reactionComponent": crate::ui::emoji_picker::picks_reactions(key, cx),
+                })))
             .collect::<Vec<_>>(),
-        "completions": crate::ui::composer_completions::listed().iter()
-            .map(|(key, trigger, order)| json!({
+        "completions": BUNDLED_COMPLETIONS.iter()
+            .filter(|(key, _, _, _)| crate::plugins::enabled_key(key))
+            .map(|&(key, trigger, order, title)| json!({
                 "key": key,
-                "trigger": trigger.to_string(),
+                "trigger": trigger,
                 "order": order,
-                "title": title_of(key),
+                "title": title,
             }))
+            .chain(crate::ui::composer_completions::listed().iter()
+                .filter(|(key, _, _)| crate::plugins::enabled_key(key))
+                .map(|(key, trigger, order)| json!({
+                    "key": key,
+                    "trigger": trigger.to_string(),
+                    "order": order,
+                    "title": title_of(key),
+                })))
             .collect::<Vec<_>>(),
     });
-    let mut accessories: Vec<Value> = crate::ui::composer_tools::listed(cx)
+    // Buzz's own link chips, which plugins outrank by order and key.
+    lists["linkRenderers"] =
+        json!([{ "key": "buzz.links/links", "title": "Links", "order": null }]);
+    let mut accessories: Vec<Value> = vec![
+        json!({ "key": "buzz.agent-activity/activity", "placement": "message", "title": "Agent Activity", "order": 0 }),
+        json!({ "key": "buzz.agent-activity/typing-presentation", "placement": "composer", "title": "Agent typing presentation", "order": 0 }),
+    ];
+    accessories.extend(crate::ui::composer_tools::listed(cx)
         .iter()
-        .filter(|(_, _, accessory)| *accessory)
+        .filter(|(key, _, accessory)| *accessory && crate::plugins::enabled_key(key))
         .map(|(key, order, _)| {
             json!({ "key": key, "order": order, "placement": "composer", "title": title_of(key) })
-        })
-        .collect();
+        }));
     for (kind, key, title) in crate::ui::renderers::listed() {
         let (named, order) = super::contribute::titled(&key).unzip();
         if kind == "messageAccessories" {
@@ -2236,10 +2264,27 @@ pub fn contributions(cx: &App) -> Value {
     lists
 }
 
+/// Buzz's own composer tools, as `(key, order, title)`.
+const BUNDLED_TOOLS: [(&str, i32, &str); 3] = [
+    ("buzz.mentions/picker", -10, "Mentions"),
+    ("buzz.emoji/picker", 0, "Emoji"),
+    ("buzz.voice-notes/recorder", 10, "Voice Notes"),
+];
+
+/// Buzz's own completions, as `(key, trigger, order, title)`.
+const BUNDLED_COMPLETIONS: [(&str, &str, i32, &str); 3] = [
+    ("buzz.mentions/typeahead", "@", -10, "Mentions"),
+    ("buzz.channels/channel-typeahead", "#", 0, "Channel"),
+    ("buzz.emoji/typeahead", ":", 0, "Emoji"),
+];
+
 /// A contribution's title for `contributions/list`: the plugin's, or
 /// the key for Buzz's own.
 fn title_of(key: &str) -> String {
-    super::contribute::titled(key).map_or_else(|| key.to_owned(), |(title, _)| title)
+    match key {
+        "buzz.projects/resources" => "Issues and pull requests".to_owned(),
+        _ => super::contribute::titled(key).map_or_else(|| key.to_owned(), |(title, _)| title),
+    }
 }
 
 /// `community/info`: the community relay's NIP-11 document, whose `self`

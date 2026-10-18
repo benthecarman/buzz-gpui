@@ -192,12 +192,17 @@ impl ExternalView {
     pub fn accessory(
         plugin: &str,
         contribution: &str,
+        community: &Entity<Community>,
         channel: &str,
         thread: Option<&str>,
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
-        let extra = json!({ "channel": channel, "thread": thread });
+        let extra = json!({
+            "community": community.read(cx).origin.websocket(),
+            "channel": channel,
+            "thread": thread,
+        });
         Self::open(
             plugin,
             contribution,
@@ -312,14 +317,25 @@ impl ExternalView {
         plugin: &str,
         contribution: &str,
         select: crate::ui::emoji_picker::Select,
+        community: &Entity<Community>,
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
+        // Where the reaction goes (`ReactionToolProps.scope`), and whether
+        // it can be sent now: not while only the saved copy shows.
+        let community = community.read(cx);
+        let extra = json!({
+            "community": community.origin.websocket(),
+            "disabled": community.snapshot.cached,
+        });
         Self::open(
             plugin,
             contribution,
             "reactionPicker",
-            |view| view.select = Some(select),
+            |view| {
+                view.select = Some(select);
+                view.extra = extra;
+            },
             cx,
         )
         .into()

@@ -269,7 +269,8 @@ pub struct Composer {
     /// Me: no remembered-agent follow-up draft after a send.
     no_followup: bool,
     /// Plugin tools in the toolbar (`composer_tools`).
-    tools: Vec<AnyView>,
+    /// Plugin tools, each with whether it leads the toolbar.
+    tools: Vec<(bool, AnyView)>,
     /// Plugin accessories above the composer.
     accessories: Vec<AnyView>,
     /// The tool registry's [`super::composer_tools::generation`] the
@@ -572,6 +573,11 @@ impl Composer {
     /// May offer library agents not yet in the conversation.
     pub fn invite_agents(&mut self) {
         self.invite_agents = true;
+    }
+
+    /// The community this composer writes in.
+    pub fn community(&self) -> &Entity<Community> {
+        &self.community
     }
 
     pub fn invites_agents(&self) -> bool {
@@ -1539,7 +1545,9 @@ impl Composer {
                 let thread = self.thread_root.map(|root| root.to_hex());
                 let answer = super::composer_completions::get(key).and_then(|completion| {
                     let chars = |byte: usize| text[..byte.min(text.len())].chars().count();
+                    let community = self.community.read(cx).origin.websocket().to_string();
                     let place = super::composer_completions::Place {
+                        community: &community,
                         channel: &self.channel,
                         thread: thread.as_deref(),
                         invite_agents: self.invite_agents,
@@ -1551,7 +1559,9 @@ impl Composer {
                 });
                 let profiles = self.community.read(cx).snapshot.profiles.clone();
                 match answer {
-                    None => (Vec::new(), Some("Loading…".into()), None),
+                    // Nothing shows until the plugin answers or publishes,
+                    // as in buzz-app.
+                    None => (Vec::new(), None, None),
                     Some(answer) => (
                         answer
                             .items
@@ -4659,7 +4669,12 @@ impl Composer {
                         })),
                 ),
             )
-            .children(self.tools.iter().cloned())
+            .children(
+                self.tools
+                    .iter()
+                    .filter(|(leading, _)| !leading)
+                    .map(|(_, tool)| tool.clone()),
+            )
             // A plain 32px button: no hover fill, an 18px glyph. While
             // editing it stays but records nothing (`useVoiceCapture`).
             .child(
@@ -4831,6 +4846,13 @@ impl Composer {
             .when(has_recipients, |d| {
                 d.rounded_full().px(px(2.)).bg(c.affordance_subtle)
             })
+            // Plugin tools ordered below 0 lead (`renderLeading`).
+            .children(
+                self.tools
+                    .iter()
+                    .filter(|(leading, _)| *leading)
+                    .map(|(_, tool)| tool.clone()),
+            )
             .child(
                 IconButton::new("mention", IconName::At)
                     .size(IconButtonSize::Sm)

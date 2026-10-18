@@ -1420,12 +1420,13 @@ impl Render for EmojiPicker {
 
 /// Picks for a plugin's reaction picker: the emoji it chose.
 pub type Select = Rc<dyn Fn(String, &mut Window, &mut App)>;
-/// Makes a plugin's reaction picker view.
-pub type BuildReactionPicker = Rc<dyn Fn(Select, &mut Window, &mut App) -> AnyView>;
+/// Makes a plugin's reaction picker view, for reacting in `community`.
+pub type BuildReactionPicker =
+    Rc<dyn Fn(Select, &Entity<Community>, &mut Window, &mut App) -> AnyView>;
 
 /// A reaction picker a plugin adds (a composer tool's
 /// `reactionComponent`). Of these and the bundled emoji picker
-/// (`buzz.emoji/emoji` at 0), the lowest order, then the lowest key,
+/// (`buzz.emoji/picker` at 0), the lowest order, then the lowest key,
 /// picks reactions (`selectReactionTool`).
 #[derive(Clone)]
 pub struct ReactionPicker {
@@ -1451,9 +1452,15 @@ pub fn unregister_reaction_picker(key: &str, cx: &mut App) {
         .retain(|existing| existing.key != key);
 }
 
+/// Whether tool `key` also picks reactions (`reactionComponent`).
+pub fn picks_reactions(key: &str, cx: &App) -> bool {
+    cx.try_global::<ReactionPickers>()
+        .is_some_and(|pickers| pickers.0.iter().any(|picker| picker.key == key))
+}
+
 /// The plugin picker that outranks the bundled one, if any.
 fn winning_picker(cx: &App) -> Option<ReactionPicker> {
-    const BUNDLED: (i32, &str) = (0, "buzz.emoji/emoji");
+    const BUNDLED: (i32, &str) = (0, "buzz.emoji/picker");
     cx.try_global::<ReactionPickers>()?
         .0
         .iter()
@@ -1489,7 +1496,8 @@ impl EmojiPicker {
         let select: Select = Rc::new(move |emoji, _, cx| {
             let _ = picker.update(cx, |_, cx| cx.emit(Picked(Pick::Unicode(emoji))));
         });
-        let view = (winner.build)(select, window, cx);
+        let community = self.community.clone();
+        let view = (winner.build)(select, &community, window, cx);
         self.plugin_view = Some((winner.key, view.clone()));
         Some(view)
     }

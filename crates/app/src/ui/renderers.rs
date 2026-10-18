@@ -506,7 +506,7 @@ struct Emoji;
 
 impl InlineRenderer for Emoji {
     fn key(&self) -> &str {
-        "buzz.emoji/emoji"
+        "buzz.emoji/custom"
     }
 
     fn render(

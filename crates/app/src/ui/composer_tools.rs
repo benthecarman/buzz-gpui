@@ -75,13 +75,21 @@ pub fn unregister(key: &str, cx: &mut App) {
 }
 
 /// One view per registered toolbar tool for a new composer.
-pub fn build(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<AnyView> {
+/// Each with whether it leads the toolbar: tools ordered below 0 sit in
+/// the leading group, beside the recipients (`renderLeading`).
+pub fn build(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<(bool, AnyView)> {
     build_where(false, context, window, cx)
+        .into_iter()
+        .map(|(order, view)| (order < 0, view))
+        .collect()
 }
 
 /// One view per registered accessory for a new composer.
 pub fn build_accessories(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<AnyView> {
     build_where(true, context, window, cx)
+        .into_iter()
+        .map(|(_, view)| view)
+        .collect()
 }
 
 fn build_where(
@@ -89,7 +97,7 @@ fn build_where(
     context: ToolContext,
     window: &mut Window,
     cx: &mut App,
-) -> Vec<AnyView> {
+) -> Vec<(i32, AnyView)> {
     let tools = cx
         .try_global::<Tools>()
         .map(|tools| tools.0.clone())
@@ -98,7 +106,7 @@ fn build_where(
     tools
         .into_iter()
         .filter(|tool| tool.accessory == accessory && crate::plugins::enabled_key(tool.key))
-        .map(|tool| (tool.build)(context.clone(), window, cx))
+        .map(|tool| (tool.order, (tool.build)(context.clone(), window, cx)))
         .collect()
 }
 

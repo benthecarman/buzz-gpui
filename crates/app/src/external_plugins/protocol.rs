@@ -856,7 +856,7 @@ impl Contributions {
             id(&action.id)?;
             check_title(&action.id, &action.title)?;
             if let Some(pattern) = &action.pattern
-                && (pattern.len() > 500 || regex::Regex::new(pattern).is_err())
+                && (pattern.chars().count() > 500 || regex::Regex::new(pattern).is_err())
             {
                 return Err(format!(
                     "“{}” needs a pattern of at most 500 characters that compiles.",
@@ -905,14 +905,6 @@ impl Contributions {
             if one.is_none_or(|c| c.is_alphanumeric() || c.is_whitespace()) {
                 return Err(format!(
                     "“{}” needs one trigger character that is not a letter, digit or space.",
-                    completion.id
-                ));
-            }
-            // Buzz's own mentions, channels and emoji are at order 0; a
-            // plugin takes their trigger only by ranking before them.
-            if one.is_some_and(|c| "@#:".contains(c)) && completion.order >= 0 {
-                return Err(format!(
-                    "“{}” uses one of Buzz's own triggers; give it an order below 0 to take it.",
                     completion.id
                 ));
             }

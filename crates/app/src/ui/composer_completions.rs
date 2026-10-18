@@ -50,6 +50,8 @@ pub struct Answer {
 /// Where a query is typed (`CompletionContext`).
 #[derive(Clone, Copy)]
 pub struct Place<'a> {
+    /// The composer's community, as its `wss://` relay.
+    pub community: &'a str,
     pub channel: &'a str,
     /// The thread the composer replies in, as hex.
     pub thread: Option<&'a str>,
@@ -106,14 +108,29 @@ pub fn listed() -> Vec<(&'static str, char, i32)> {
     })
 }
 
-/// The triggers and the completion each opens: the first by order.
+/// Buzz's own completions on `@`, `#` and `:`, as `(order, key)`: a
+/// plugin takes one of these triggers only by ranking before it, the
+/// lower order and then the lower key (buzz-app's bundled mentions sit at
+/// -10, channels and emoji at 0).
+const BUNDLED: [(char, i32, &str); 3] = [
+    ('@', -10, "buzz.mentions/typeahead"),
+    ('#', 0, "buzz.channels/channel-typeahead"),
+    (':', 0, "buzz.emoji/typeahead"),
+];
+
+/// The triggers and the completion each opens: the first by order, then
+/// key, where it outranks Buzz's own.
 pub fn triggers() -> Vec<(char, &'static str)> {
     REGISTRY.with_borrow(|registry| {
         let mut triggers: Vec<(char, &'static str)> = Vec::new();
         for completion in registry.iter() {
-            if !triggers
-                .iter()
-                .any(|(trigger, _)| *trigger == completion.trigger)
+            let outranked = BUNDLED.iter().any(|&(trigger, order, key)| {
+                trigger == completion.trigger && (order, key) <= (completion.order, completion.key)
+            });
+            if !outranked
+                && !triggers
+                    .iter()
+                    .any(|(trigger, _)| *trigger == completion.trigger)
             {
                 triggers.push((completion.trigger, completion.key));
             }
