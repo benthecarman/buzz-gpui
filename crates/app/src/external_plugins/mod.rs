@@ -2121,6 +2121,31 @@ impl ExternalPlugins {
                     None => Err((1, "The plugin stopped.".to_owned())),
                 })
             }
+            "completion/publish" | "completion/invalidate" => {
+                let result = match cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned))
+                {
+                    Some(plugin) if method == "completion/publish" => {
+                        contribute::publish(&plugin, params)
+                    }
+                    Some(plugin) => contribute::invalidate_completion(&plugin, params),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                };
+                cx.refresh_windows();
+                Reply::Now(result)
+            }
+            "render/invalidate" => Reply::Now(
+                match cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned))
+                {
+                    Some(plugin) => contribute::invalidate(&plugin, params, cx),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                },
+            ),
             "shortcuts/run" => Reply::Now(match params.get("key").and_then(Value::as_str) {
                 Some(key) => {
                     let known = crate::shortcuts::external_list(cx)

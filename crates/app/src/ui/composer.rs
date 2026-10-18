@@ -1555,6 +1555,22 @@ impl Composer {
                             .take(50)
                             .map(|item| {
                                 if item.mentions.is_empty() {
+                                    let leading = match (&item.avatar, &item.image) {
+                                        (Some(key), _) => {
+                                            let profile = profiles.get(key);
+                                            Some((
+                                                profile.map_or_else(
+                                                    || item.label.clone(),
+                                                    |profile| profile.name.clone().into(),
+                                                ),
+                                                profile.and_then(|profile| profile.picture.clone()),
+                                            ))
+                                        }
+                                        (None, Some(image)) => {
+                                            Some((item.label.clone(), Some(image.clone())))
+                                        }
+                                        (None, None) => None,
+                                    };
                                     return Suggestion::Text {
                                         label: item.label,
                                         detail: item.detail,
@@ -1562,6 +1578,7 @@ impl Composer {
                                         disabled: item.disabled,
                                         preview: item.preview,
                                         exact: item.exact,
+                                        leading,
                                     };
                                 }
                                 // Picked as a team is: a chip for each.
@@ -3673,6 +3690,9 @@ pub(super) enum Suggestion {
         preview: Option<SharedString>,
         /// A space typed after the query picks it.
         exact: bool,
+        /// A picture before the label: the item's image, or a person's
+        /// avatar as `(name, picture)`.
+        leading: Option<(SharedString, Option<String>)>,
     },
     /// A saved team: its agents as `(key, name, picture)`, the detail line
     /// (its reason when disabled).
@@ -5301,11 +5321,24 @@ impl Composer {
                     detail,
                     disabled,
                     preview,
+                    leading,
                     ..
                 } => row
                     .min_h(px(40.))
                     .px(px(8.))
                     .when(disabled.is_some(), |row| row.opacity(0.5))
+                    .children(leading.as_ref().map(|(name, picture)| {
+                        let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Small);
+                        let image = match picture {
+                            Some(data) if data.starts_with("data:") => media::inline_image(data),
+                            Some(url) => Some(media::avatar(url, &media)),
+                            None => None,
+                        };
+                        if let Some(image) = image {
+                            avatar = avatar.image(image);
+                        }
+                        avatar
+                    }))
                     .child(
                         div()
                             .flex_1()

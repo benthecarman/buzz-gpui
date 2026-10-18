@@ -310,7 +310,18 @@ same way, per query.
 | `inline/render` | `renderer`, `text` (what the pattern matched), `message` (the message it is in), `reaction` (`{"content","emojiUrl","count","authors"}` when the text is a reaction on it, else `null`) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text. Buzz asks once per piece and message, and separately for a reaction. |
 | `names/resolve` | `policy`, `identities` (`[{"pubkey","name","isAgent","owner"}]`, at most 5,000), `viewer`, `candidates` (the keys in view, or `null` for everyone) | `{"labels": {"<pubkey>": {"name", "qualifier"}}}`. Keys left out show their public name. |
 | `service/request` | `from` (the asking plugin's id), `service`, `method`, `params` | Any JSON, handed back to the plugin that asked. An error is passed on as its error. |
-| `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel`, `thread` (the root the composer replies in, or `null`), `inviteAgents` (`true` in a new session's composer, which may offer your library agents not yet in the conversation) | `{"items", "status", "retry"}`: at most 50 items `{"label", "detail", "text", "mentions", "preview", "disabled", "exact"}`. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys) as chips that make them recipients. `preview` is a line under the label; `disabled` is why it cannot be picked; a space typed after the query picks the item marked `exact`. `status` shows a line such as "No matches", and `retry: true` adds a row that asks again. |
+| `completion/query` | `completion`, `request` (this query's id, for `completion/publish`), `query` (the text after the trigger, up to the caret), `channel`, `thread` (the root the composer replies in, or `null`), `inviteAgents` (`true` in a new session's composer, which may offer your library agents not yet in the conversation) | `{"items", "status", "retry"}`: at most 50 items `{"label", "detail", "text", "mentions", "preview", "disabled", "exact", "image", "avatar"}`. `image` (an https or `data:image/` URL) or `avatar` (a pubkey, drawn with the person's picture) shows before the label. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys) as chips that make them recipients. `preview` is a line under the label; `disabled` is why it cannot be picked; a space typed after the query picks the item marked `exact`. `status` shows a line such as "No matches", and `retry: true` adds a row that asks again. |
+
+Answers are kept, but not forever:
+
+| Request | Params | Result |
+| --- | --- | --- |
+| `render/invalidate` | `renderer` (one of yours, or an agent type's id for its summary and peek), and optionally `target` (as `render/event` gives it) or `message` (a message id) | How many answers it marked. Buzz asks again for each the next time it draws, and shows the old answer until the new one comes, as a live buzz-app component updates in place. |
+| `completion/publish` | `request` (from `completion/query`), `items`, `status`, `retry` | `true` when the query is still kept; its suggestions are replaced, such as results after a first "Searching…" answer (`publish`). |
+| `completion/invalidate` | `completion` | `null`. Every query is asked again the next time it is typed. |
+
+A request that fails or times out draws nothing and is asked again 30
+seconds later; an answer of `null` declines until it is invalidated.
 
 A renderer's tree can use every element but `input`. Its buttons and switches
 send `render/event` with `renderer`, `target` (what it drew: the URL, the
@@ -730,7 +741,9 @@ passes a function, or reaches into the app, it works differently:
   decide: link prefixes, regular expressions, channel kinds, config keys.
   Where only the plugin can decide, Buzz asks it (`message/render`,
   `names/resolve`, `agent/summary` and so on), or the plugin says when
-  something changed (`settings/visibility`, `shortcut/enable`).
+  something changed (`settings/visibility`, `shortcut/enable`,
+  `render/invalidate`, and `completion/publish` for a suggestion that can
+  no longer be picked, in place of `canSelect`).
 - **Answers come later.** Buzz draws while it waits for a plugin's answer.
   It shows the plain message, link, name or summary first, then the
   plugin's answer once it arrives, and keeps answers until what they

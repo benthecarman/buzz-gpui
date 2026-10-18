@@ -28,6 +28,10 @@ pub struct Item {
     pub preview: Option<SharedString>,
     /// The exact match a space typed after the query picks (`spaceId`).
     pub exact: bool,
+    /// A picture before the label: an https or `data:image/` URL.
+    pub image: Option<String>,
+    /// A person whose avatar shows before the label, by pubkey.
+    pub avatar: Option<String>,
 }
 
 /// A completion's answer (`CompletionResult`).

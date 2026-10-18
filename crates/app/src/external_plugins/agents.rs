@@ -535,20 +535,19 @@ impl PluginType {
         parse: fn(Value) -> Option<super::protocol::Node>,
     ) -> Option<(&'static str, String, std::rc::Rc<super::protocol::Node>)> {
         let (key, target) = self.cached(what, agent);
-        match contribute::answered(key, &target) {
-            Some(tree) => tree.map(|tree| (key, target, tree)),
-            None => {
-                contribute::ask_with(
-                    &self.requester,
-                    key,
-                    &target,
-                    &format!("agent/{what}"),
-                    json!({ "type": self.id, "agent": agent_json(agent) }),
-                    parse,
-                );
-                None
-            }
+        if contribute::due(key, &target) {
+            contribute::ask_with(
+                &self.requester,
+                key,
+                &target,
+                &format!("agent/{what}"),
+                json!({ "type": self.id, "agent": agent_json(agent) }),
+                parse,
+            );
         }
+        contribute::answered(key, &target)
+            .flatten()
+            .map(|tree| (key, target, tree))
     }
 }
 

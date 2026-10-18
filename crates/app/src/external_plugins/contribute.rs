@@ -35,9 +35,54 @@ use std::sync::Arc;
 /// Answers kept at once; the oldest go first.
 const MAX_ANSWERS: usize = 2_000;
 
+/// How long a renderer that failed to answer is left before it is
+/// asked again.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 enum Answer {
     Pending,
     Ready(Option<Rc<Node>>),
+    /// Shown, but the plugin asked to be asked again (`render/invalidate`).
+    Stale(Option<Rc<Node>>),
+    /// Asked again; the old answer shows until the new one comes.
+    Asking(Option<Rc<Node>>),
+    /// The request failed or timed out: nothing is drawn, and the plugin
+    /// is asked again after [`RETRY_AFTER`].
+    Failed(std::time::Instant),
+}
+
+/// What came back for one request.
+enum Outcome {
+    Answered(Option<Node>),
+    Failed,
+}
+
+impl Answer {
+    /// What draws now: `None` while the first answer is on its way.
+    fn shown(&self) -> Option<Option<Rc<Node>>> {
+        match self {
+            Answer::Pending => None,
+            Answer::Ready(tree) | Answer::Stale(tree) | Answer::Asking(tree) => Some(tree.clone()),
+            Answer::Failed(_) => Some(None),
+        }
+    }
+
+    /// Whether the plugin should be asked (again).
+    fn due(&self) -> bool {
+        match self {
+            Answer::Stale(_) => true,
+            Answer::Failed(at) => at.elapsed() >= RETRY_AFTER,
+            Answer::Pending | Answer::Ready(_) | Answer::Asking(_) => false,
+        }
+    }
+
+    /// The entry while a request is out.
+    fn asking(&self) -> Answer {
+        match self {
+            Answer::Stale(tree) => Answer::Asking(tree.clone()),
+            _ => Answer::Pending,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -47,7 +92,7 @@ struct Answers {
 }
 
 /// A renderer's answer for a target, on its way to the UI thread.
-type Delivered = ((String, String), Option<Node>);
+type Delivered = ((String, String), Outcome);
 
 thread_local! {
     static ANSWERS: RefCell<Answers> = RefCell::default();
@@ -69,6 +114,10 @@ thread_local! {
     static SUGGESTION_INBOX: RefCell<Option<futures::channel::mpsc::UnboundedSender<Suggested>>> =
         RefCell::default();
     static NEXT_COMPOSER: Cell<u64> = const { Cell::new(0) };
+    /// The query each `completion/query` request answers, by its
+    /// `request` id, for `completion/publish`.
+    static QUERIES: RefCell<HashMap<u64, SuggestionKey>> = RefCell::default();
+    static NEXT_QUERY: Cell<u64> = const { Cell::new(0) };
 }
 
 type SuggestionKey = (String, String, String);
@@ -108,10 +157,20 @@ fn suggest(
     }
     let connection = ExternalPlugins::running_connection(plugin, cx)?;
     let inbox = SUGGESTION_INBOX.with_borrow(Clone::clone)?;
+    let query_id = NEXT_QUERY.get() + 1;
+    NEXT_QUERY.set(query_id);
+    QUERIES.with_borrow_mut(|queries| {
+        queries.insert(query_id, entry.clone());
+        // Only queries still kept can be published to.
+        if queries.len() > MAX_ANSWERS {
+            queries.retain(|id, _| *id + MAX_ANSWERS as u64 > query_id);
+        }
+    });
     let request = connection.request(
         "completion/query",
         json!({
             "completion": id,
+            "request": query_id,
             "query": query,
             "channel": channel,
             "thread": thread,
@@ -139,6 +198,45 @@ fn suggest(
         let _ = inbox.unbounded_send((entry, items));
     });
     None
+}
+
+/// `completion/publish`: new suggestions for an earlier query, by its
+/// `request` id (`ComposerCompletionProps.publish`), such as results
+/// after a "Searching…" first answer. `false` once the query is gone.
+pub fn publish(plugin: &str, params: &Value) -> Result<Value, capabilities::Failure> {
+    let request = params
+        .get("request")
+        .and_then(Value::as_u64)
+        .ok_or((protocol::INVALID_PARAMS, "request is required".to_owned()))?;
+    let Some(entry) = QUERIES.with_borrow(|queries| queries.get(&request).cloned()) else {
+        return Ok(json!(false));
+    };
+    if !entry.0.starts_with(&format!("{plugin}/")) {
+        return Err((protocol::INVALID_PARAMS, "not your query".to_owned()));
+    }
+    let published =
+        SUGGESTIONS.with_borrow_mut(|suggestions| match suggestions.entries.get_mut(&entry) {
+            Some(slot) => {
+                *slot = Some(answer(params));
+                true
+            }
+            None => false,
+        });
+    if published {
+        composer_completions::changed();
+    }
+    Ok(json!(published))
+}
+
+/// `completion/invalidate`: asks again for completion `completion`'s
+/// queries the next time they are typed.
+pub fn invalidate_completion(plugin: &str, params: &Value) -> Result<Value, capabilities::Failure> {
+    let id = params.get("completion").and_then(Value::as_str).ok_or((
+        protocol::INVALID_PARAMS,
+        "completion is required".to_owned(),
+    ))?;
+    forget_suggestions(&format!("{plugin}/{id}"));
+    Ok(Value::Null)
 }
 
 /// Forgets completion `key`'s answers.
@@ -203,6 +301,21 @@ fn items(value: &Value) -> Vec<Item> {
                         disabled: text(item, "disabled").map(Into::into),
                         preview: text(item, "preview").map(Into::into),
                         exact: item.get("exact").and_then(Value::as_bool) == Some(true),
+                        image: item
+                            .get("image")
+                            .and_then(Value::as_str)
+                            .filter(|url| {
+                                (url.starts_with("https://") && url.len() <= 2_000)
+                                    || (url.starts_with("data:image/") && url.len() <= 64 * 1024)
+                            })
+                            .map(str::to_owned),
+                        avatar: item
+                            .get("avatar")
+                            .and_then(Value::as_str)
+                            .filter(|key| {
+                                key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                            .map(str::to_ascii_lowercase),
                     })
                 })
                 .collect()
@@ -232,11 +345,16 @@ pub fn init(cx: &mut App) {
     INBOX.with_borrow_mut(|inbox| *inbox = Some(sender));
     cx.spawn(async move |cx| {
         use futures::StreamExt;
-        while let Some((key, tree)) = answers.next().await {
-            let drawn = tree.is_some();
+        while let Some((key, outcome)) = answers.next().await {
+            let drawn = matches!(outcome, Outcome::Answered(Some(_)));
             ANSWERS.with_borrow_mut(|answers| {
                 if let Some(answer) = answers.entries.get_mut(&key) {
-                    *answer = Answer::Ready(tree.map(Rc::new));
+                    *answer = match (outcome, &*answer) {
+                        (Outcome::Answered(tree), _) => Answer::Ready(tree.map(Rc::new)),
+                        // A refresh that failed keeps what showed.
+                        (Outcome::Failed, Answer::Asking(tree)) => Answer::Ready(tree.clone()),
+                        (Outcome::Failed, _) => Answer::Failed(std::time::Instant::now()),
+                    };
                 }
             });
             if drawn && TEXT_KEYS.with_borrow(|keys| keys.contains(&key.0)) {
@@ -284,51 +402,117 @@ fn ask(
     cx: &App,
 ) -> Option<Rc<Node>> {
     let entry = (key.to_owned(), target.to_owned());
-    let known = ANSWERS.with_borrow(|answers| match answers.entries.get(&entry) {
-        Some(Answer::Ready(tree)) => Some(tree.clone()),
-        Some(Answer::Pending) => Some(None),
-        None => None,
+    let (shown, due) = ANSWERS.with_borrow(|answers| match answers.entries.get(&entry) {
+        Some(answer) => (answer.shown(), answer.due()),
+        None => (None, true),
     });
-    if let Some(tree) = known {
-        return tree;
+    if !due {
+        return shown.flatten();
     }
     let connection = ExternalPlugins::running_connection(plugin, cx)?;
     let request = connection.request(method, params());
+    begin(&entry);
+    let inbox = INBOX.with_borrow(Clone::clone)?;
+    Runtime::handle(cx).spawn(async move {
+        let outcome = match request.await {
+            Ok(Ok(Value::Null)) => Outcome::Answered(None),
+            Ok(Ok(value)) => {
+                let tree = value.get("tree").cloned().unwrap_or(value);
+                Outcome::Answered(
+                    Node::parse(tree)
+                        .inspect_err(|error| tracing::warn!(%error, "plugin renderer answer"))
+                        .ok(),
+                )
+            }
+            _ => Outcome::Failed,
+        };
+        let _ = inbox.unbounded_send((entry, outcome));
+    });
+    shown.flatten()
+}
+
+/// Marks `entry` as asked, keeping what it showed if it was stale.
+fn begin(entry: &(String, String)) {
     ANSWERS.with_borrow_mut(|answers| {
-        answers.entries.insert(entry.clone(), Answer::Pending);
-        answers.order.push_back(entry.clone());
+        let next = answers
+            .entries
+            .get(entry)
+            .map_or(Answer::Pending, Answer::asking);
+        if answers.entries.insert(entry.clone(), next).is_none() {
+            answers.order.push_back(entry.clone());
+        }
         while answers.order.len() > MAX_ANSWERS {
             if let Some(old) = answers.order.pop_front() {
                 answers.entries.remove(&old);
             }
         }
     });
-    let inbox = INBOX.with_borrow(Clone::clone)?;
-    Runtime::handle(cx).spawn(async move {
-        let tree = match request.await {
-            Ok(Ok(Value::Null)) => None,
-            Ok(Ok(value)) => {
-                let tree = value.get("tree").cloned().unwrap_or(value);
-                Node::parse(tree)
-                    .inspect_err(|error| tracing::warn!(%error, "plugin renderer answer"))
-                    .ok()
+}
+
+/// `render/invalidate`: the plugin's answers for renderer `key` (all, one
+/// `target`, or those about `message`) are asked for again the next time
+/// they draw; what they show stays until the new answer comes.
+pub fn invalidate(
+    plugin: &str,
+    params: &Value,
+    cx: &mut App,
+) -> Result<Value, capabilities::Failure> {
+    let renderer = params
+        .get("renderer")
+        .and_then(Value::as_str)
+        .ok_or((protocol::INVALID_PARAMS, "renderer is required".to_owned()))?;
+    let key = format!("{plugin}/{renderer}");
+    let target = params.get("target").and_then(Value::as_str);
+    let message = params.get("message").and_then(Value::as_str);
+    let matches = |entry_key: &str, entry_target: &str| {
+        (entry_key == key || entry_key.starts_with(&format!("{key}#")))
+            && target.is_none_or(|target| entry_target == target)
+            && message.is_none_or(|message| entry_target.starts_with(message))
+    };
+    let mut count = 0;
+    ANSWERS.with_borrow_mut(|answers| {
+        answers.entries.retain(|(entry_key, entry_target), answer| {
+            if !matches(entry_key, entry_target) {
+                return true;
             }
-            _ => None,
-        };
-        let _ = inbox.unbounded_send((entry, tree));
+            count += 1;
+            match answer {
+                Answer::Ready(tree) => {
+                    *answer = Answer::Stale(tree.clone());
+                    true
+                }
+                Answer::Failed(_) => false,
+                _ => true,
+            }
+        });
+        let entries = &answers.entries;
+        answers.order.retain(|entry| entries.contains_key(entry));
     });
-    None
+    crate::ui::renderers::text_changed();
+    cx.refresh_windows();
+    Ok(json!(count))
 }
 
 /// What a renderer answered for `target`: `None` until it has, then its
 /// tree or `None` if it declined.
 pub(super) fn answered(key: &str, target: &str) -> Option<Option<Rc<Node>>> {
-    ANSWERS.with_borrow(
-        |answers| match answers.entries.get(&(key.to_owned(), target.to_owned())) {
-            Some(Answer::Ready(tree)) => Some(tree.clone()),
-            _ => None,
-        },
-    )
+    ANSWERS.with_borrow(|answers| {
+        answers
+            .entries
+            .get(&(key.to_owned(), target.to_owned()))
+            .and_then(Answer::shown)
+    })
+}
+
+/// Whether [`ask_with`] should ask about `target` now: never asked, made
+/// stale, or failed a while ago.
+pub(super) fn due(key: &str, target: &str) -> bool {
+    ANSWERS.with_borrow(|answers| {
+        answers
+            .entries
+            .get(&(key.to_owned(), target.to_owned()))
+            .is_none_or(Answer::due)
+    })
 }
 
 /// A renderer's answer: `{"tree"}`, a bare tree, or `null`.
@@ -350,29 +534,20 @@ pub(super) fn ask_with(
     parse: fn(Value) -> Option<Node>,
 ) {
     let entry = (key.to_owned(), target.to_owned());
-    let fresh = ANSWERS.with_borrow_mut(|answers| {
-        if answers.entries.contains_key(&entry) {
-            return false;
-        }
-        answers.entries.insert(entry.clone(), Answer::Pending);
-        answers.order.push_back(entry.clone());
-        while answers.order.len() > MAX_ANSWERS {
-            if let Some(old) = answers.order.pop_front() {
-                answers.entries.remove(&old);
-            }
-        }
-        true
-    });
-    let Some(inbox) = INBOX.with_borrow(Clone::clone).filter(|_| fresh) else {
+    if !due(key, target) {
+        return;
+    }
+    begin(&entry);
+    let Some(inbox) = INBOX.with_borrow(Clone::clone) else {
         return;
     };
     let request = requester.request(method, params, std::time::Duration::from_secs(10));
     requester.runtime().spawn(async move {
-        let tree = match request.await {
-            Ok(Ok(value)) => parse(value),
-            Ok(Err(_)) | Err(_) => None,
+        let outcome = match request.await {
+            Ok(Ok(value)) => Outcome::Answered(parse(value)),
+            Ok(Err(_)) | Err(_) => Outcome::Failed,
         };
-        let _ = inbox.unbounded_send((entry, tree));
+        let _ = inbox.unbounded_send((entry, outcome));
     });
 }
 
@@ -411,10 +586,11 @@ impl crate::ui::renderers::TextRenderer for Inline {
             }
             // Answers are the plugin's for this piece in this message.
             let target = format!("{id}/{piece}");
-            match answered(self.key, &target) {
-                Some(Some(_)) => found.push(matched.range()),
-                Some(None) => {}
-                None => ask_with(
+            if let Some(Some(_)) = answered(self.key, &target) {
+                found.push(matched.range());
+            }
+            if due(self.key, &target) {
+                ask_with(
                     &self.requester,
                     self.key,
                     &target,
@@ -426,7 +602,7 @@ impl crate::ui::renderers::TextRenderer for Inline {
                         "reaction": reaction,
                     }),
                     tree_of,
-                ),
+                );
             }
         }
         found
