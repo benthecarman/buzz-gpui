@@ -470,7 +470,10 @@ impl ExternalView {
         let opening = self.opening.as_ref();
         let (agent, kind, conversation, pending) = match &self.agent {
             Some((view, kind)) => (
-                Some(super::agents::agent_json(&view.agent)),
+                Some(super::agents::agent_json(
+                    &view.agent,
+                    crate::agents2::is_hosted(&view.agent.agent_type, cx),
+                )),
                 Some(*kind),
                 view.conversation.as_ref().map(|conversation| {
                     json!({ "channel": conversation.channel_id, "root": conversation.root_id })
@@ -509,6 +512,12 @@ impl ExternalView {
                     .find(|channel| channel.id == opening.channel)
                     .map(|channel| channel.name.clone())
             );
+        }
+        // The visit that opened a page (`PageNavigation.entryId`, `focus`).
+        if self.kind == "page" {
+            let (entry, keeps_focus) = crate::ui::workspace::current_visit();
+            params["entry"] = json!(entry);
+            params["focus"] = json!(if keeps_focus { "preserve" } else { "move" });
         }
         if let Value::Object(extra) = &self.extra {
             for (key, value) in extra {
@@ -1133,10 +1142,11 @@ pub fn open_route(view: &AnyView, params: Option<&Value>, _: &mut Window, cx: &m
     };
     view.update(cx, |view, cx| {
         view.route = params.cloned();
+        let entry = crate::ui::workspace::current_visit().0;
         ExternalPlugins::notify_running(
             &view.plugin,
             "page/route",
-            json!({ "view": view.id, "route": view.route }),
+            json!({ "view": view.id, "route": view.route, "entry": entry }),
             cx,
         );
     });

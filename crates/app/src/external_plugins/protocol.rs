@@ -305,8 +305,9 @@ pub struct AgentTypeDecl {
     /// `agents/save` takes them (watches, timers, interests).
     #[serde(default)]
     pub attention: serde_json::Map<String, Value>,
-    /// How long one run may take, at most 30 minutes.
-    #[serde(default = "five_minutes")]
+    /// How long one run may take, at most 30 minutes; a minute by default,
+    /// as buzz-app's `timeoutMs`.
+    #[serde(default = "one_minute")]
     pub timeout_seconds: u64,
     /// Whether Buzz asks `agent/summary` for the line under an agent's
     /// name; without it the line is the title.
@@ -421,8 +422,8 @@ fn one() -> u32 {
     1
 }
 
-fn five_minutes() -> u64 {
-    300
+fn one_minute() -> u64 {
+    60
 }
 
 /// Suggestions after a trigger character typed in the composer
@@ -489,8 +490,9 @@ pub struct AppLauncherDecl {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LauncherPlacement {
-    #[default]
     Side,
+    /// The bottom drawer, as buzz-app's `channelPlacement` defaults to.
+    #[default]
     Bottom,
 }
 
@@ -529,6 +531,13 @@ pub struct PageDecl {
     /// the whole area, edge to edge.
     #[serde(default)]
     pub layout: PageLayout,
+    /// The visit stays opening until the page sends `page/settle`
+    /// (`handlesNavigation`).
+    #[serde(default)]
+    pub handles_navigation: bool,
+    /// Shows Buzz's companion dock beside the page (`companion`).
+    #[serde(default)]
+    pub companion: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -561,15 +570,16 @@ pub struct CardDecl {
     pub title: String,
     #[serde(default)]
     pub icon: Option<String>,
-    /// `community` (under the selected community), `administration` (its
+    /// `community` (under the selected community, the default, as a card
+    /// with no `group` or `section`), `administration` (its
     /// Administration group) or the name of an account-level group, such
     /// as `Integrations`.
-    #[serde(default = "integrations")]
+    #[serde(default = "community")]
     pub placement: String,
 }
 
-fn integrations() -> String {
-    "Integrations".into()
+fn community() -> String {
+    "community".into()
 }
 
 /// A notification category with its own switch (`notifications.register`).

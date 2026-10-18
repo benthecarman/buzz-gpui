@@ -433,6 +433,7 @@ fn removable(plugin: &str, url: &str) -> bool {
 }
 
 pub fn forget(plugin: &str) {
+    crate::shortcuts::forget_external(plugin);
     COMPOSERS.with_borrow_mut(|composers| composers.retain(|_, grant| grant.plugin != plugin));
     REMOVERS.with_borrow_mut(|removers| removers.retain(|_, owner| owner != plugin));
     let prefix = format!("{plugin}/");

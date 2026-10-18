@@ -202,6 +202,49 @@ pub fn archive_configure(params: &Value, cx: &mut App) -> Result<Value, Failure>
     Ok(archive_json(&saved, &path))
 }
 
+/// `archive/read`: one page of your agents' saved records, activity
+/// (`kind` 24200) or metrics (44200), newest first, from one `agent` and
+/// older than `before` (the page before's cursor) if given
+/// (`ArchiveHost.read`).
+pub fn archive_read(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let kind = match params.get("kind").and_then(Value::as_u64) {
+        Some(kind @ (24200 | 44200)) => kind as u16,
+        _ => return Err((INVALID_PARAMS, "kind is 24200 or 44200".to_owned())),
+    };
+    let agent = params
+        .get("agent")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let before = params.get("before").and_then(Value::as_i64);
+    let read = crate::ui::settings::archive::read_for(&community, kind, agent, before, cx)
+        .map_err(|error| (3, error))?;
+    Ok(cx.background_spawn(async move {
+        let page = read.await.map_err(|error| (3, error))?;
+        let mut agents: Vec<&str> = page
+            .records
+            .iter()
+            .map(|record| record.agent.as_str())
+            .collect();
+        agents.sort_unstable();
+        agents.dedup();
+        Ok(json!({
+            "agents": agents,
+            "records": page.records.iter().map(|record| json!({
+                "id": record.id,
+                "agent": record.agent,
+                "createdAt": record.created_at,
+                "receivedAt": record.received_at,
+                "frame": serde_json::from_str::<Value>(&record.plaintext)
+                    .unwrap_or_else(|_| Value::String(record.plaintext.clone())),
+            })).collect::<Vec<_>>(),
+            "before": page.before,
+            "skipped": page.skipped,
+            "revision": page.revision,
+        }))
+    }))
+}
+
 /// `archive/clear`: deletes saved activity (`kind` 24200), metrics
 /// (44200), or both (`ArchiveHost.clear`, buzz-app's `clearHistory`).
 pub fn archive_clear(params: &Value, cx: &mut App) -> Result<Value, Failure> {

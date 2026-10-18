@@ -1268,6 +1268,7 @@ fn session_value(what: &str, params: &Value, cx: &App) -> Result<Value, Failure>
         "sync" => super::reading::sync(false, cx)?,
         "creation" => super::channels::creation(cx)?,
         "me" => super::channels::me(cx)?,
+        "agentChoices" => super::agents::choices_now(cx)?,
         "archives" => crate::ui::archives::snapshot_json(&community, cx),
         "statuses" => {
             let keys = pubkeys(params, MAX_PROFILES)?;
@@ -1334,7 +1335,7 @@ fn session_value(what: &str, params: &Value, cx: &App) -> Result<Value, Failure>
         _ => {
             return Err(invalid(
                 "what must be channels, channelList, sidebar, me, sync, creation, statuses, \
-                 archives, profiles, typing, presence, emoji or activity",
+                 archives, agentChoices, profiles, typing, presence, emoji or activity",
             ));
         }
     })
@@ -1356,7 +1357,7 @@ pub fn watch_session(
         let keys = pubkeys(&params, MAX_PROFILES)?;
         community.read(cx).session.want_profiles(keys);
     }
-    if what == "archives" {
+    if what == "archives" || what == "agentChoices" {
         crate::ui::archives::ensure(&community, false, cx);
     }
     // Follow the statuses asked for, as `statuses.watch` does.
@@ -1391,11 +1392,19 @@ pub fn watch_session(
         let changed = changed.clone();
         move |_, cx| changed(cx)
     });
-    // The archive is read apart from the community's snapshot.
-    let archives = (kind == "archives").then(|| {
+    // The archive and the agent hosts change apart from the community's
+    // snapshot.
+    let archives = (kind == "archives" || kind == "agentChoices").then(|| {
         let changed = changed.clone();
         crate::ui::archives::observe(cx, move |cx| changed(cx))
     });
+    let hosts = match (kind.as_str(), super::agents::agents2(cx)) {
+        ("agentChoices", Ok(service)) => {
+            let changed = changed.clone();
+            Some(cx.observe(&service, move |_, cx| changed(cx)))
+        }
+        _ => None,
+    };
     // Channel creation is not part of the community's snapshot: follow
     // its own state.
     let session = community.read(cx).session.clone();
@@ -1415,7 +1424,7 @@ pub fn watch_session(
         Task::ready(())
     };
     Ok((
-        Watch::new((subscription, statuses, archives), forward),
+        Watch::new((subscription, statuses, archives, hosts), forward),
         json!({}),
     ))
 }
@@ -2286,9 +2295,10 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
     use crate::notifications::categories::{self, Submission};
     let category = text(params, "category").ok_or_else(|| invalid("category is required"))?;
     let source = text(params, "sourceKey")
-        .filter(|key| !key.is_empty() && key.len() <= 256)
-        .ok_or_else(|| invalid("sourceKey is required"))?;
-    let community = AppState::current(cx);
+        .filter(|key| !key.is_empty() && key.chars().count() <= 1024)
+        .ok_or_else(|| invalid("sourceKey is required (up to 1024 characters)"))?;
+    // The community the request reaches: one it names, or the selected.
+    let community = community(cx).ok();
     // Any place `ui/navigate` takes, or the short forms below.
     let place = match (text(params, "to"), text(params, "channel"), &community) {
         (Some(_), _, _) => place_of(params, cx)?,

@@ -90,6 +90,31 @@ pub(crate) fn settings_for(
     ))
 }
 
+/// One page of the viewer's saved records of `kind` (24200 activity or
+/// 44200 metrics) in `community`, newest first, from one `agent` and
+/// older than `before` if given (`ArchiveHost.read`), read off the UI
+/// thread.
+pub(crate) fn read_for(
+    community: &Entity<Community>,
+    kind: u16,
+    agent: Option<String>,
+    before: Option<i64>,
+    cx: &mut App,
+) -> Result<Task<Result<archive::ArchivePage, String>>, String> {
+    let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
+        return Err("You are not signed in.".into());
+    };
+    let identity = identity.clone();
+    let (_, key) = partition(community, cx);
+    let archive = open(cx)?;
+    let read = Runtime::handle(cx)
+        .spawn_blocking(move || archive.read(&identity, &key, kind, agent.as_deref(), before));
+    Ok(cx.background_spawn(async move {
+        read.await
+            .unwrap_or_else(|_| Err("The archive read stopped.".into()))
+    }))
+}
+
 /// Saves archive settings, as the card does, then captures under them.
 pub(crate) fn configure_for(
     community: &Entity<Community>,

@@ -1359,6 +1359,7 @@ impl ExternalPlugins {
                     cx,
                 );
             }
+            pages::register_behaviour(key, page.handles_navigation, page.companion, cx);
             spec.badge = Some(contribute::badge(key.key()));
             pages::register(spec, cx);
             added.push(Added::Page(key));
@@ -1644,6 +1645,7 @@ impl ExternalPlugins {
             "presence/watch" => "presence/changed",
             "inbox/watch" => "inbox/changed",
             "unread/watchTargets" => "unread/targetsChanged",
+            "agents/watchActivity" => "agents/activityChanged",
             "names/watch" => "names/changed",
             "activity/watch" => "activity/changed",
             "agents/watch" => "agents/changed",
@@ -1664,6 +1666,7 @@ impl ExternalPlugins {
             "presence/watch" => capabilities::watch_presence(params, notify, cx),
             "inbox/watch" => reading::watch_inbox(params, notify, cx),
             "unread/watchTargets" => reading::watch_targets(params, notify, cx),
+            "agents/watchActivity" => agents::watch_activity(params, notify, cx),
             "names/watch" => capabilities::watch_names(params, notify, cx),
             "activity/watch" => observed::watch(params, notify, cx),
             "agents/watch" => agents::watch(params, notify, cx),
@@ -1976,12 +1979,48 @@ impl ExternalPlugins {
                         // `false` when the visit no longer shows this page.
                         Reply::Now(Ok(json!(failed)))
                     }
-                    Some("opened") => Reply::Now(Ok(Value::Null)),
+                    Some("opened") => {
+                        let key = view.read(cx).contribution_key();
+                        let settled =
+                            crate::ui::navigation::workspace(cx).is_some_and(|workspace| {
+                                workspace
+                                    .update(cx, |workspace, cx| workspace.settle_visit(&key, cx))
+                            });
+                        // `false` when the visit was not waiting on this page.
+                        Reply::Now(Ok(json!(settled)))
+                    }
                     _ => Reply::Now(Err((
                         INVALID_PARAMS,
                         "status is opened or failed".to_owned(),
                     ))),
                 }
+            }
+            "page/resolve" => {
+                let view = params.get("view").and_then(Value::as_str).and_then(|view| {
+                    cx.global_mut::<Self>()
+                        .current(path, generation)?
+                        .views
+                        .get(view)?
+                        .upgrade()
+                });
+                let Some(view) = view.filter(|view| view.read(cx).kind() == "page") else {
+                    return Reply::Now(Err((
+                        INVALID_PARAMS,
+                        "page/resolve takes an open page view".to_owned(),
+                    )));
+                };
+                let route = params.get("params").cloned().unwrap_or(Value::Null);
+                if !view::route_valid(&route) {
+                    return Reply::Now(Err((
+                        INVALID_PARAMS,
+                        "params are not a valid route".to_owned(),
+                    )));
+                }
+                let key = view.read(cx).contribution_key();
+                let resolved = crate::ui::navigation::workspace(cx).is_some_and(|workspace| {
+                    workspace.update(cx, |workspace, cx| workspace.resolve_visit(&key, route, cx))
+                });
+                Reply::Now(Ok(json!(resolved)))
             }
             "ui/closeView" => {
                 let view = params.get("view").and_then(Value::as_str).and_then(|view| {
@@ -2056,11 +2095,15 @@ impl ExternalPlugins {
             "unread/watchTargets" => {
                 Self::watch(path, generation, "unread/watchTargets", params, cx)
             }
+            "agents/watchActivity" => {
+                Self::watch(path, generation, "agents/watchActivity", params, cx)
+            }
             "names/watch" => Self::watch(path, generation, "names/watch", params, cx),
             "activity/watch" => Self::watch(path, generation, "activity/watch", params, cx),
             "activity/observed" => Reply::Now(observed::get(params, cx)),
             "activity/history" => Reply::Now(observed::history(params, cx)),
             "archive/settings" => Reply::Now(observed::archive_settings(cx)),
+            "archive/read" => later(observed::archive_read(params, cx)),
             "archive/configure" | "archive/clear" => {
                 let allowed = cx
                     .global_mut::<Self>()
@@ -2150,6 +2193,7 @@ impl ExternalPlugins {
             | "workflows/trigger"
             | "workflows/dismiss"
             | "sessions/create"
+            | "sessions/addAgents"
             | "sidebar/star"
             | "sidebar/mute"
             | "sidebar/sort"
@@ -2183,6 +2227,7 @@ impl ExternalPlugins {
                     | "workflows/trigger"
                     | "workflows/dismiss"
                     | "sessions/create"
+                    | "sessions/addAgents"
                     | "sidebar/star"
                     | "sidebar/mute"
                     | "sidebar/sort"
@@ -2264,6 +2309,7 @@ impl ExternalPlugins {
                     "kit/save" => content::save_kit(params, cx),
                     "workflows/dismiss" => workflows::dismiss(params, cx),
                     "sessions/create" => channels::create_session(params, cx),
+                    "sessions/addAgents" => channels::add_session_agents(params, cx),
                     "archives/request" => channels::request_archive(params, cx),
                     "sidebar/star"
                     | "sidebar/mute"

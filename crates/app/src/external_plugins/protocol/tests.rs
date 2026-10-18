@@ -231,7 +231,7 @@ fn every_kind_of_contribution_is_checked() {
         "panels": [{ "id": "p", "title": "P", "menu": { "label": "Open P" } }],
     }))
     .unwrap();
-    assert_eq!(parsed.settings_cards[0].placement, "Integrations");
+    assert_eq!(parsed.settings_cards[0].placement, "community");
     assert_eq!(parsed.pages[0].placement, PagePlacement::Topbar);
     assert!(parsed.message_actions[0].mine);
     assert_eq!(parsed.composer_accessories[0].order, 2);

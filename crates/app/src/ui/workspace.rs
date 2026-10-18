@@ -33,6 +33,18 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+thread_local! {
+    /// The current visit's attempt and whether its opening control kept
+    /// the focus, for views built while the workspace is busy.
+    static VISIT: std::cell::Cell<(u64, bool)> = const { std::cell::Cell::new((0, false)) };
+}
+
+/// The current visit, as `(attempt, keeps focus)` (`PageNavigation`'s
+/// `entryId` and `focus`); readable while the workspace itself updates.
+pub fn current_visit() -> (u64, bool) {
+    VISIT.get()
+}
+
 pub struct Workspace {
     page: Page,
     /// The header toggle's choice on a wide window.
@@ -132,6 +144,9 @@ pub struct Workspace {
     page_route: Option<serde_json::Value>,
     /// Bumped by every navigation, so a stale open timeout does nothing.
     attempts: u64,
+    /// The page the current visit waits on to say it opened or failed
+    /// (`handlesNavigation`).
+    settling: Option<Page>,
     /// A link that arrived before an identity or a community was ready,
     /// with the viewer it arrived for (`deep-links.ts`).
     held: Option<(String, Option<String>)>,
@@ -220,6 +235,7 @@ impl Workspace {
             new_message: None,
             page_route: None,
             attempts: 0,
+            settling: None,
             held: None,
             outside_settings: None,
             _settings_events: None,
@@ -841,8 +857,71 @@ impl Workspace {
     pub(crate) fn visit(&self) -> (u64, bool) {
         (
             self.attempts,
-            self.resolving.is_some() || self.pending.is_some() || self.pending_listing,
+            self.resolving.is_some()
+                || self.pending.is_some()
+                || self.pending_listing
+                || self.settling.is_some(),
         )
+    }
+
+    /// The page showing the current visit says it opened
+    /// (`PageNavigation.complete({status: "opened"})`); `false` when the
+    /// visit does not wait on page `key`.
+    pub(crate) fn settle_visit(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if self.settling.is_none_or(|page| page.key() != key) {
+            return false;
+        }
+        self.settling = None;
+        cx.notify();
+        true
+    }
+
+    /// The page the current visit waits on picks its route itself
+    /// (`PageNavigation.resolve`): the entry shows `params` without
+    /// another visit. `false` when the visit does not wait on page `key`.
+    pub(crate) fn resolve_visit(
+        &mut self,
+        key: &str,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(page) = self.settling.filter(|page| page.key() == key) else {
+            return false;
+        };
+        let Some(current) = self.history.current().cloned() else {
+            return false;
+        };
+        self.history.replace(Target {
+            community: current.community,
+            place: Place::Route {
+                page,
+                params: params.clone(),
+            },
+        });
+        self.page_route = Some(params);
+        cx.notify();
+        true
+    }
+
+    /// Fails a visit its page never settled within the open timeout.
+    fn arm_settle_timeout(&mut self, cx: &mut Context<Self>) {
+        let attempt = self.attempts;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(channel_states::OPEN_TIMEOUT)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.attempts == attempt && this.settling.take().is_some() {
+                    this.failure = Some(Failed {
+                        target: this.history.current().cloned(),
+                        reason: Reason::Timeout,
+                        ingress: false,
+                    });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// The page showing the current visit says it cannot
@@ -864,6 +943,7 @@ impl Workspace {
         if !shown {
             return false;
         }
+        self.settling = None;
         self.failure = Some(super::channel_states::Failed {
             target,
             reason,
@@ -1039,6 +1119,14 @@ impl Workspace {
         self.resolving = None;
         self.failure = None;
         self.attempts += 1;
+        VISIT.set((self.attempts, self.keep_focus));
+        self.settling = match &target.place {
+            Place::Page(page) | Place::Route { page, .. } if pages::settles(*page, cx) => {
+                self.arm_settle_timeout(cx);
+                Some(*page)
+            }
+            _ => None,
+        };
         if let Some(origin) = &target.community {
             let state = cx.global::<AppState>();
             let index = state

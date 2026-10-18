@@ -66,6 +66,8 @@ fn filters(params: &Value, extended: bool) -> Result<Vec<Map<String, Value>>, Fa
                     "search_mode" if extended => {
                         matches!(value.as_str(), Some("prefix" | "fulltext"))
                     }
+                    // A read the relay must answer from its primary.
+                    "consistency" if extended => value.as_str() == Some("strong"),
                     "page" | "depth_limit" | "thread_cursor" if extended => {
                         value.as_u64().is_some()
                     }
@@ -108,8 +110,7 @@ pub fn matches(filter: &Map<String, Value>, event: &Event) -> bool {
         "until" => value
             .as_u64()
             .is_none_or(|until| event.created_at.as_secs() <= until),
-        "limit" => true,
-        tag => {
+        tag if tag.starts_with('#') => {
             let name = &tag[1..];
             event.tags.iter().any(|t| {
                 let t = t.as_slice();
@@ -117,6 +118,8 @@ pub fn matches(filter: &Map<String, Value>, event: &Event) -> bool {
                     && t.get(1).is_some_and(|tag_value| has(value, tag_value))
             })
         }
+        // `limit` and the relay's read extensions decide nothing here.
+        _ => true,
     })
 }
 
@@ -132,6 +135,12 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
             .query_raw(&filters)
             .await
             .map_err(|error| (2, error.to_string()))?;
+        // Only signed events that check out, as `session.read` verifies.
+        let verifier = buzz_relay_client::Verifier::new(4);
+        events.retain(|value| {
+            serde_json::from_value::<Event>(value.clone())
+                .is_ok_and(|event| verifier.verify(event).is_ok())
+        });
         // Your own events still on their way count too, as `session.read`
         // merges what the outbox holds.
         if let Some(outbox) = session.outbox().await {

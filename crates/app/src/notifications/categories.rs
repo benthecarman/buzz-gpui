@@ -7,7 +7,13 @@
 use super::{Notifications, plain_text, short_text, show};
 use crate::ui::navigation::Target;
 use gpui_kit::{App, Global};
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// How long a source key keeps a repeat from notifying (`FRESH_MS`).
+const FRESH: Duration = Duration::from_secs(120);
+/// The most source keys remembered at once.
+const MAX_SEEN: usize = 2048;
 
 /// A category a plugin registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,9 +28,10 @@ struct Categories(Vec<CategorySpec>);
 
 impl Global for Categories {}
 
-/// Source keys already shown, so each notifies once.
+/// Source keys shown lately, by community, category and key, with when
+/// each may notify again.
 #[derive(Default)]
-struct Seen(HashSet<(String, String)>);
+struct Seen(HashMap<(String, String, String), Instant>);
 
 impl Global for Seen {}
 
@@ -54,7 +61,8 @@ pub fn all(cx: &App) -> Vec<CategorySpec> {
 
 /// One plugin notification.
 pub struct Submission {
-    /// Unique per thing notified about; repeats are dropped.
+    /// Unique per thing notified about; a repeat within two minutes is
+    /// dropped.
     pub source_key: String,
     pub title: String,
     pub body: String,
@@ -90,9 +98,35 @@ pub fn submit(key: &str, submission: Submission, cx: &mut App) -> bool {
     if !preferences.enabled || preferences.categories.get(key) == Some(&false) {
         return false;
     }
-    let seen = (key.to_owned(), submission.source_key.clone());
-    if !cx.default_global::<Seen>().0.insert(seen) {
+    // Signed out, nothing notifies.
+    if !matches!(
+        cx.global::<crate::community::AppState>().identity,
+        crate::community::IdentityState::Ready(_)
+    ) {
         return false;
+    }
+    let scope = submission
+        .target
+        .community
+        .clone()
+        .unwrap_or_else(|| "local".to_owned());
+    let seen = (scope, key.to_owned(), submission.source_key.clone());
+    let now = Instant::now();
+    let remembered = &mut cx.default_global::<Seen>().0;
+    remembered.retain(|_, until| *until > now);
+    if remembered.contains_key(&seen) {
+        return false;
+    }
+    remembered.insert(seen, now + FRESH);
+    while remembered.len() > MAX_SEEN {
+        let Some(oldest) = remembered
+            .iter()
+            .min_by_key(|(_, until)| **until)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        remembered.remove(&oldest);
     }
     let (title, body) = text(&submission, spec.label);
     let shown = show(title, body, submission.target, None, cx);

@@ -430,6 +430,13 @@ pub fn unregister_external(key: &str) {
     EXTERNAL.with_borrow_mut(|external| external.retain(|existing| existing.key != key));
 }
 
+/// Forgets which of `plugin`'s shortcuts it turned off, as its run ends:
+/// `when` is the running plugin's own state.
+pub fn forget_external(plugin: &str) {
+    let prefix = format!("{plugin}/");
+    EXTERNAL_OFF.with_borrow_mut(|off| off.retain(|key| !key.starts_with(&prefix)));
+}
+
 /// A plugin shortcut as `shortcuts.snapshot()` lists it.
 pub struct Listed {
     pub key: &'static str,
@@ -598,7 +605,12 @@ pub fn rows(overrides: &Overrides, desktop: bool) -> Vec<Row> {
             override_,
             effective,
         };
-        ((shortcut.plugin, 100), row)
+        // By the plugin's order (`Shortcut.order`, which may be below 0),
+        // then key: flipping the sign bit keeps the order as unsigned.
+        (
+            (shortcut.plugin, (shortcut.order as u32) ^ 0x8000_0000),
+            row,
+        )
     }));
     rows.sort_by(|(a, x), (b, y)| a.cmp(b).then(x.key.cmp(y.key)).then(x.title.cmp(y.title)));
     rows.into_iter().map(|(_, row)| row).collect()

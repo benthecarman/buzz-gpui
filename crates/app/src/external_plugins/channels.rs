@@ -466,6 +466,42 @@ pub fn archive_consent(params: &Value, cx: &App) -> Result<Task<Result<Value, Fa
     }))
 }
 
+/// `sessions/addAgents`: adds your `agents` to a channel or work session,
+/// and to a session's parent first (`workSessions.addAgents`).
+pub fn add_session_agents(
+    params: &Value,
+    cx: &App,
+) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let agents: Vec<String> = params
+        .get("agents")
+        .and_then(Value::as_array)
+        .filter(|agents| !agents.is_empty() && agents.len() <= 32)
+        .ok_or_else(|| invalid("agents must list 1 to 32 of your agents"))?
+        .iter()
+        .map(|key| {
+            key.as_str()
+                .map(str::to_ascii_lowercase)
+                .ok_or_else(|| invalid("agents must be pubkeys"))
+        })
+        .collect::<Result<_, _>>()?;
+    let rules = crate::ui::me::recipients::rules(&community, cx);
+    if let Some(stranger) = agents.iter().find(|key| !rules.selectable.contains(key)) {
+        return Err(invalid(format!(
+            "{stranger} is not one of your agents here"
+        )));
+    }
+    let session = community.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .add_agents(&channel, &agents, &rules)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
 /// `sessions/create`: a new private work session titled `title`, under
 /// `parent` if given, with `agents` (your agents in this community)
 /// added. Answers with its channel id once the relay lists it.

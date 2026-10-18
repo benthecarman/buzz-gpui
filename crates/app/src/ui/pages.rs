@@ -133,6 +133,41 @@ struct Images(std::collections::HashMap<Page, ImageSource>);
 
 impl Global for Images {}
 
+/// Pages that say when a visit to them has opened or failed
+/// (`Page.handlesNavigation`), and pages shown without the companion dock
+/// (a plugin page that does not opt in to `companion`).
+#[derive(Default)]
+struct Behaviour {
+    settles: std::collections::HashSet<Page>,
+    solo: std::collections::HashSet<Page>,
+}
+
+impl Global for Behaviour {}
+
+/// Marks `page` as settling its own visits, and as showing the companion
+/// dock or not.
+pub fn register_behaviour(page: Page, settles: bool, companion: bool, cx: &mut App) {
+    let behaviour = cx.default_global::<Behaviour>();
+    if settles {
+        behaviour.settles.insert(page);
+    }
+    if !companion {
+        behaviour.solo.insert(page);
+    }
+}
+
+/// Whether a visit to `page` stays opening until the page settles it.
+pub fn settles(page: Page, cx: &App) -> bool {
+    cx.try_global::<Behaviour>()
+        .is_some_and(|behaviour| behaviour.settles.contains(&page))
+}
+
+/// Whether `page` shows without the companion dock.
+pub fn solo(page: Page, cx: &App) -> bool {
+    cx.try_global::<Behaviour>()
+        .is_some_and(|behaviour| behaviour.solo.contains(&page))
+}
+
 /// Draws `page` with `image` wherever it shows its icon.
 pub fn register_image(page: Page, image: ImageSource, cx: &mut App) {
     cx.default_global::<Images>().0.insert(page, image);
@@ -195,6 +230,9 @@ pub fn register(spec: PageSpec, cx: &mut App) {
 pub fn clear_extras(page: Page, cx: &mut App) {
     cx.default_global::<Routes>().0.remove(&page);
     cx.default_global::<Images>().0.remove(&page);
+    let behaviour = cx.default_global::<Behaviour>();
+    behaviour.settles.remove(&page);
+    behaviour.solo.remove(&page);
 }
 
 /// Removes the page `page`, as when the plugin that added it stops.
@@ -202,8 +240,7 @@ pub fn unregister(page: Page, cx: &mut App) {
     cx.default_global::<Pages>()
         .0
         .retain(|existing| existing.page != page);
-    cx.default_global::<Routes>().0.remove(&page);
-    cx.default_global::<Images>().0.remove(&page);
+    clear_extras(page, cx);
 }
 
 /// A registered page whose plugin is on.

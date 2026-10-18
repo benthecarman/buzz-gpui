@@ -206,6 +206,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // A plugin page shows the dock only when it opts in.
+        if pages::solo(self.page, cx) {
+            return page;
+        }
         let companion = self.companion_panel(window, cx);
         let weak = cx.entity().downgrade();
         Dock {

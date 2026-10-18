@@ -494,14 +494,10 @@ fn models_of(value: &Value) -> Option<registry::Models> {
     })
 }
 
-/// An agent as a plugin sees it.
-pub(super) fn agent_json(agent: &Agent) -> Value {
-    json!({
-        "pubkey": agent.pubkey,
-        "name": agent.name,
-        "owner": agent.owner,
-        "config": agent.config,
-    })
+/// An agent as a plugin sees it: the whole record, as `agents/list`
+/// gives it (`AgentViewProps.agent`).
+pub(super) fn agent_json(agent: &Agent, hosted: bool) -> Value {
+    entry_at(agent, hosted)
 }
 
 /// A summary answer, `{"text"}`, as a text tree for the answer cache.
@@ -520,7 +516,9 @@ impl PluginType {
     fn cached(&self, what: &str, agent: &Agent) -> (&'static str, String) {
         use std::hash::{DefaultHasher, Hash, Hasher};
         let mut hasher = DefaultHasher::new();
-        (&agent.name, agent.config.to_string()).hash(&mut hasher);
+        agent_json(agent, self.decl.hosted)
+            .to_string()
+            .hash(&mut hasher);
         (
             intern(format!("{}/{}#{what}", self.plugin, self.id)),
             format!("{}:{:x}", agent.pubkey, hasher.finish()),
@@ -541,7 +539,7 @@ impl PluginType {
                 key,
                 &target,
                 &format!("agent/{what}"),
-                json!({ "type": self.id, "agent": agent_json(agent) }),
+                json!({ "type": self.id, "agent": agent_json(agent, self.decl.hosted) }),
                 parse,
             );
         }
@@ -719,7 +717,7 @@ impl AgentType for PluginType {
         }
         let request = self.requester.request(
             "agent/models",
-            json!({ "type": self.id, "agent": agent_json(agent) }),
+            json!({ "type": self.id, "agent": agent_json(agent, self.decl.hosted) }),
             Duration::from_secs(30),
         );
         Some(cx.background_spawn(async move {
@@ -941,7 +939,7 @@ fn entry_at(agent: &Agent, hosted: bool) -> Value {
         "owner": agent.owner,
         "relay": agent.relay,
         "picture": agent.picture,
-        "place": if hosted { "hosted" } else { "local" },
+        "place": if hosted { "hosted" } else { "here" },
         "config": agent.config,
         "attentionEnabled": agent.attention_enabled,
         "attention": serde_json::to_value(&*agent.attention).unwrap_or(Value::Null),
@@ -950,7 +948,7 @@ fn entry_at(agent: &Agent, hosted: bool) -> Value {
     })
 }
 
-fn agents2(cx: &App) -> Result<Entity<crate::agents2::Agents2>, Failure> {
+pub(super) fn agents2(cx: &App) -> Result<Entity<crate::agents2::Agents2>, Failure> {
     crate::agents2::Agents2::global(cx).ok_or((1, "Agents are not available.".to_owned()))
 }
 
@@ -1009,10 +1007,16 @@ pub fn list(cx: &App) -> Result<Value, Failure> {
 /// relay, and `selectable`, those minus the ones the community archived,
 /// with the archive read that decided it.
 pub fn choices(cx: &mut App) -> Result<Value, Failure> {
+    let community = super::capabilities::community(cx)?;
+    crate::ui::archives::ensure(&community, false, cx);
+    choices_now(cx)
+}
+
+/// [`choices`] as they stand, without asking for the archive.
+pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
     use crate::agents2::Status;
     use crate::ui::archives;
     let community = super::capabilities::community(cx)?;
-    archives::ensure(&community, false, cx);
     let origin = community.read(cx).origin.clone();
     let (status, error) = match agents2(cx)?.read(cx).status() {
         Status::Unavailable => ("unavailable", None),
@@ -1269,11 +1273,32 @@ pub fn activity(cx: &App) -> Value {
     };
     let mut work: Vec<_> = local.work().iter().cloned().collect();
     work.sort_by_key(|work| std::cmp::Reverse(work.started_at));
+    // Each row's community, by its scope.
+    let communities: Vec<(String, String)> = cx
+        .global::<crate::community::AppState>()
+        .communities
+        .iter()
+        .map(|community| {
+            let community = community.read(cx);
+            (
+                crate::agent_activity::local::scope(
+                    &community.origin.http(),
+                    community.session.viewer(),
+                ),
+                community.origin.websocket().to_string(),
+            )
+        })
+        .collect();
     Value::Array(
         work.iter()
             .take(200)
             .map(|work| {
                 json!({
+                    "community": communities
+                        .iter()
+                        .find(|(scope, _)| *scope == work.scope)
+                        .map(|(_, relay)| relay),
+                    "dismissed": work.dismissed,
                     "agent": work.agent,
                     "channel": work.channel_id,
                     "message": work.message_id,
@@ -1286,6 +1311,34 @@ pub fn activity(cx: &App) -> Value {
             })
             .collect(),
     )
+}
+
+/// `agents/watchActivity`: sends `agents/activityChanged` with what
+/// `agents/activity` gives, now and whenever it changes.
+pub fn watch_activity(
+    _params: &Value,
+    notify: impl Fn(Value, &mut App) + 'static,
+    cx: &mut App,
+) -> Result<(super::capabilities::Watch, Value), Failure> {
+    let Some(local) = cx.try_global::<crate::agent_activity::local::LocalActivity>() else {
+        return Err((1, "No agents run on this device.".to_owned()));
+    };
+    let mut changes = local.subscribe();
+    let forward = cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        let mut last = Value::Null;
+        loop {
+            let now = cx.update(|cx| activity(cx));
+            if now != last {
+                cx.update(|cx| notify(json!({ "activity": now.clone() }), cx));
+                last = now;
+            }
+            if changes.next().await.is_none() {
+                return;
+            }
+        }
+    });
+    Ok((super::capabilities::Watch::new((), forward), json!({})))
 }
 
 /// `agent/current`: whether a run's trigger should still run, asked now
