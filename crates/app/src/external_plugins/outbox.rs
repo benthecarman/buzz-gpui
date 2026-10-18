@@ -35,7 +35,95 @@ fn operation(operation: &Operation) -> Value {
         "delivery": delivery(operation.delivery),
         "error": operation.error,
         "acknowledged": operation.acknowledged,
+        "createdAt": operation.event.created_at.as_secs(),
+        "content": operation.event.content,
+        "tags": operation.event.tags.iter().map(|tag| tag.as_slice()).collect::<Vec<_>>(),
     })
+}
+
+/// `outbox/send`: queues an event of yours as Buzz's own writes are
+/// (`outbox.send`): signed once, retried, and followed by `outbox/get`
+/// and `outbox/watch` until the relay shows it back. Answers its `id`.
+pub fn send(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    use buzz_relay_client::messages::Draft;
+    let kind = params
+        .get("kind")
+        .and_then(Value::as_u64)
+        .and_then(|kind| u16::try_from(kind).ok())
+        .ok_or((INVALID_PARAMS, "kind is required".to_owned()))?;
+    let content = params
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let tags: Vec<Vec<String>> = match params.get("tags") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(tags) => serde_json::from_value(tags.clone()).map_err(|_| {
+            (
+                INVALID_PARAMS,
+                "tags must be a list of lists of strings".to_owned(),
+            )
+        })?,
+    };
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let outbox = outbox_of(session).await?;
+        outbox
+            .send(
+                Draft {
+                    kind,
+                    content,
+                    tags,
+                },
+                Default::default(),
+            )
+            .map(|id| json!({ "id": id.to_hex() }))
+            .map_err(|error| (3, error.to_string()))
+    }))
+}
+
+/// `outbox/acknowledge`: says the outcome of a queued event was checked,
+/// releasing what it holds for recovery (`outbox.acknowledge`).
+pub fn acknowledge(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|hex| EventId::from_hex(hex).ok())
+        .ok_or((INVALID_PARAMS, "id is not an event id".to_owned()))?;
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let outbox = outbox_of(session).await?;
+        outbox
+            .acknowledge(&id)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error.to_string()))
+    }))
+}
+
+/// `outbox/supports`: whether this connection can sign and send events
+/// of `kind` (`outbox.supports`).
+pub fn supports(params: &Value, cx: &App) -> Result<Value, Failure> {
+    let kind = params
+        .get("kind")
+        .and_then(Value::as_u64)
+        .and_then(|kind| u16::try_from(kind).ok())
+        .ok_or((INVALID_PARAMS, "kind is required".to_owned()))?;
+    let identity = match &cx.global::<crate::community::AppState>().identity {
+        crate::community::IdentityState::Ready(identity) => identity.clone(),
+        _ => return Ok(json!(false)),
+    };
+    // App data (NIP-78) is signed apart from what shows in conversations.
+    let purpose = if kind == 30078 {
+        buzz_identity::Purpose::AppData
+    } else {
+        buzz_identity::Purpose::Content
+    };
+    Ok(json!(
+        identity
+            .template(purpose, kind, 0, Vec::new(), String::new())
+            .is_ok()
+    ))
 }
 
 fn pending(outbox: &Outbox) -> Value {

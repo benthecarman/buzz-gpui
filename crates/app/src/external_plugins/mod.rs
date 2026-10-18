@@ -1946,6 +1946,8 @@ impl ExternalPlugins {
             "reminders/list" => Reply::Now(channels::list(cx)),
             "reminders/watch" => Self::watch(path, generation, "reminders/watch", params, cx),
             "outbox/watch" => Self::watch(path, generation, "outbox/watch", params, cx),
+            "outbox/acknowledge" => later(outbox::acknowledge(params, cx)),
+            "outbox/supports" => Reply::Now(outbox::supports(params, cx)),
             "navigation/watch" => Self::watch(path, generation, "navigation/watch", params, cx),
             "presence/watch" => Self::watch(path, generation, "presence/watch", params, cx),
             "inbox/watch" => Self::watch(path, generation, "inbox/watch", params, cx),
@@ -1996,6 +1998,7 @@ impl ExternalPlugins {
             | "messages/delete"
             | "files/upload"
             | "events/publish"
+            | "outbox/send"
             | "agents/create"
             | "agents/save"
             | "agents/remove"
@@ -2028,7 +2031,7 @@ impl ExternalPlugins {
             | "sidebar/removeGroup"
             | "archives/request" => {
                 let permission = match method {
-                    "events/publish" => Permission::PublishEvents,
+                    "events/publish" | "outbox/send" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
                     | "teams/remove" | "agents/retype" | "agents/port" | "agents/attest"
                     | "agents/presence" => Permission::ManageAgents,
@@ -2088,6 +2091,7 @@ impl ExternalPlugins {
                     "messages/dismiss" => capabilities::retry(true, params, cx),
                     "files/upload" => capabilities::upload(&plugin_id, params, cx),
                     "events/publish" => events::publish(params, cx),
+                    "outbox/send" => outbox::send(params, cx),
                     "agents/create" => agents::create(params, cx),
                     "agents/save" => agents::save(params, cx),
                     "agents/remove" => agents::remove(params, cx),
