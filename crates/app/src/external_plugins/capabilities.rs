@@ -1548,7 +1548,14 @@ pub fn navigate(params: &Value, cx: &mut App) -> Result<Value, Failure> {
         community: scope(params, cx)?,
         place: place_of(params, cx)?,
     };
-    if params.get("replace").and_then(Value::as_bool) == Some(true) {
+    let replace = params.get("replace").and_then(Value::as_bool) == Some(true);
+    if text(params, "focus") == Some("preserve") {
+        navigation::with_workspace(cx, move |workspace, window, cx| {
+            workspace.navigate_keeping_focus(target, replace, window, cx)
+        });
+        return Ok(Value::Null);
+    }
+    if replace {
         navigation::with_workspace(cx, move |workspace, window, cx| {
             workspace.navigate_replacing(target, window, cx)
         });

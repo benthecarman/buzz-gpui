@@ -59,8 +59,8 @@ use std::time::Duration;
 pub use protocol::Manifest;
 pub use view::ExternalView;
 
-/// Most channels one plugin follows at once.
-const MAX_WATCHES: usize = 16;
+/// Most watches one plugin holds at once, of every kind.
+const MAX_WATCHES: usize = 64;
 /// A request the plugin has not been allowed to make.
 const FORBIDDEN: i64 = 4;
 
@@ -437,6 +437,32 @@ impl ExternalPlugins {
                 })
                 .collect(),
         )
+    }
+
+    /// `community/client` (`communityReader.snapshot`): who is signed in,
+    /// the personal profile new communities start from, and the
+    /// communities joined.
+    fn client(cx: &App) -> Value {
+        use crate::community::IdentityState;
+        let state = cx.global::<AppState>();
+        let (status, viewer, error) = match &state.identity {
+            IdentityState::Loading => ("loading", None, None),
+            IdentityState::Ready(identity) => ("ready", Some(identity.pubkey_hex()), None),
+            IdentityState::Missing => ("unavailable", None, None),
+            IdentityState::Error(error) => ("unavailable", None, Some(error.clone())),
+        };
+        let profile = crate::ui::settings::default_profile(cx);
+        json!({
+            "status": status,
+            "viewer": viewer,
+            "error": error,
+            "profile": {
+                "name": profile.name,
+                "picture": profile.picture,
+                "about": profile.about,
+            },
+            "communities": Self::community_list(cx),
+        })
     }
 
     fn current_community(cx: &App) -> Value {
@@ -1449,7 +1475,7 @@ impl ExternalPlugins {
         if plugin.watches.len() >= MAX_WATCHES {
             return Reply::Now(Err((
                 1,
-                format!("A plugin can follow at most {MAX_WATCHES} channels."),
+                format!("A plugin can hold at most {MAX_WATCHES} watches; unwatch one first."),
             )));
         }
         plugin.next_watch += 1;
@@ -1661,6 +1687,20 @@ impl ExternalPlugins {
                     .get("target")
                     .and_then(Value::as_str)
                     .map(|target| json!(channel_panels::resolve(target, cx).is_some()))
+                    .ok_or_else(|| (INVALID_PARAMS, "target is required".to_owned())),
+            ),
+            "panel/resolve" => Reply::Now(
+                params
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .map(|target| match channel_panels::resolve(target, cx) {
+                        Some(panel) => json!({
+                            "key": panel.key,
+                            "title": panel.title,
+                            "order": panel.order,
+                        }),
+                        None => Value::Null,
+                    })
                     .ok_or_else(|| (INVALID_PARAMS, "target is required".to_owned())),
             ),
             "panel/open" | "panel/push" => {
@@ -2067,6 +2107,7 @@ impl ExternalPlugins {
             }
             "community/current" => Ok(Self::current_community(cx)),
             "community/list" => Ok(Self::community_list(cx)),
+            "community/client" => Ok(Self::client(cx)),
             "community/retry" => {
                 if let Ok(community) = capabilities::community(cx) {
                     community.read(cx).session.retry();

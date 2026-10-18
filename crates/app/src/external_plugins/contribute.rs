@@ -757,6 +757,7 @@ pub fn set_card_visibility(plugin: &str, params: &Value, cx: &mut App) {
     let state = match params.get("visibility").and_then(Value::as_str) {
         Some("hidden") => CardVisibility::Hidden,
         Some("pending") => CardVisibility::Pending,
+        Some("error") => CardVisibility::Error,
         _ => CardVisibility::Visible,
     };
     CARD_STATES.with_borrow_mut(|states| states.insert(format!("{plugin}/{card}"), state));

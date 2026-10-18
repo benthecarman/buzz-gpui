@@ -52,6 +52,9 @@ pub struct Workspace {
     /// A topbar tab is opening its page, whose content keeps from taking
     /// the focus.
     preserve_focus: bool,
+    /// A plugin opens a page and keeps the focus where it is
+    /// (`focus: "preserve"`).
+    keep_focus: bool,
     /// Each channel's tab pane, per community, kept across visits.
     tab_states: HashMap<(EntityId, String), TabState>,
     /// The open channel's tab views, made on this visit.
@@ -173,6 +176,7 @@ impl Workspace {
             toggle_focus: cx.focus_handle(),
             main_focus: cx.focus_handle(),
             preserve_focus: false,
+            keep_focus: false,
             tab_states: HashMap::new(),
             tab_views: HashMap::new(),
             tab_strip: ScrollHandle::new(),
@@ -452,7 +456,7 @@ impl Workspace {
             page.live_status = true;
             page
         });
-        if !self.preserve_focus {
+        if !self.preserve_focus && !self.keep_focus {
             let composer = page.read(cx).composer();
             composer.update(cx, |state, cx| state.focus(window, cx));
         }
@@ -542,7 +546,9 @@ impl Workspace {
         // Focus moves to the page, as buzz-app's `#main-content` does; the
         // channel page focuses its composer instead, unless a topbar tab
         // opened it.
-        if page != Page::MESSAGES || self.channel.is_none() || self.preserve_focus {
+        if !self.keep_focus
+            && (page != Page::MESSAGES || self.channel.is_none() || self.preserve_focus)
+        {
             window.focus(&self.main_focus, cx);
         }
         cx.notify();
@@ -831,6 +837,24 @@ impl Workspace {
     }
 
     /// Goes to `target` as a new visit.
+    /// Opens `target` without moving the focus, for a plugin control
+    /// that keeps it (`focus: "preserve"`).
+    pub fn navigate_keeping_focus(
+        &mut self,
+        target: Target,
+        replace: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.keep_focus = true;
+        if replace {
+            self.navigate_replacing(target, window, cx);
+        } else {
+            self.navigate(target, window, cx);
+        }
+        self.keep_focus = false;
+    }
+
     pub fn navigate(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_outside_settings(&target);
         self.history.push(target.clone());
