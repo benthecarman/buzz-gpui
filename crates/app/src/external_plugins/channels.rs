@@ -54,6 +54,22 @@ pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
         .filter(|name| !name.is_empty())
         .ok_or_else(|| invalid("name is required"))?
         .to_owned();
+    // At most 8, as the relay takes (`MAX_CHANNEL_LABELS`); more is refused.
+    let labels: Vec<String> = match params.get("labels").filter(|labels| !labels.is_null()) {
+        None => Vec::new(),
+        Some(labels) => labels
+            .as_array()
+            .filter(|labels| labels.len() <= 8)
+            .ok_or_else(|| invalid("labels must be a list of at most 8"))?
+            .iter()
+            .map(|label| {
+                label
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| invalid("labels must be text"))
+            })
+            .collect::<Result<_, _>>()?,
+    };
     let channel = NewChannel {
         name,
         description: text(params, "description").unwrap_or_default().to_owned(),
@@ -62,18 +78,7 @@ pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
             .and_then(Value::as_bool)
             .unwrap_or(false),
         ttl: params.get("ttlSeconds").and_then(Value::as_u64),
-        labels: params
-            .get("labels")
-            .and_then(Value::as_array)
-            .map(|labels| {
-                labels
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .take(16)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default(),
+        labels,
     };
     // What a template adds (`setup`): a Canvas, agents, a sidebar group.
     let setup = match params.get("setup").filter(|setup| !setup.is_null()) {
@@ -437,12 +442,22 @@ pub fn request_archive(params: &Value, cx: &App) -> Result<Task<Result<Value, Fa
         crate::community::IdentityState::Ready(identity) => identity.clone(),
         _ => return Err((1, "You are not signed in.".to_owned())),
     };
-    let session = community(cx)?.read(cx).session.clone();
-    Ok(on_tokio(cx, async move {
+    let community = community(cx)?;
+    let session = community.read(cx).session.clone();
+    let request = on_tokio(cx, async move {
         crate::agents2::cleanup::set_archived(&session, &owner, &target, archive)
             .await
             .map(|()| Value::Null)
             .map_err(|error| (3, error))
+    });
+    // Then read the archive Buzz shows again (`request` ends with
+    // `refresh()`), so its filters and `archives/get` see the change.
+    Ok(cx.spawn(async move |cx| {
+        let done = request.await;
+        if done.is_ok() {
+            cx.update(|cx| crate::ui::archives::ensure(&community, true, cx));
+        }
+        done
     }))
 }
 
@@ -569,7 +584,7 @@ pub fn member_of(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
             .member_channels(&pubkey)
             .await
             .map(|channels| json!(channels))
-            .map_err(|error| (3, error))
+            .map_err(|error| (2, error))
     }))
 }
 
@@ -893,7 +908,7 @@ pub fn members(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
         let state = session
             .channel_state(&channel)
             .await
-            .map_err(|error| (3, error))?;
+            .map_err(|error| (2, error))?;
         let members: Vec<Value> = state
             .roles
             .iter()
@@ -932,8 +947,8 @@ pub fn lifecycle(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
             session.channel_permissions(&channel)
         );
         let (state, can) = (
-            state.map_err(|error| (3, error))?,
-            can.map_err(|error| (3, error))?,
+            state.map_err(|error| (2, error))?,
+            can.map_err(|error| (2, error))?,
         );
         Ok(json!({
             "channel": channel,

@@ -99,7 +99,7 @@ pub fn canvas_read(params: &Value, cx: &App) -> Result<Task<Result<Value, Failur
         let head = session
             .canvas_read(&channel, strong)
             .await
-            .map_err(|error| (3, error.to_string()))?;
+            .map_err(|error| (2, error.to_string()))?;
         Ok(head.as_ref().map_or(Value::Null, revision))
     }))
 }
@@ -125,7 +125,7 @@ pub fn canvas_history(params: &Value, cx: &App) -> Result<Task<Result<Value, Fai
         let page = session
             .canvas_history(&channel, cursor)
             .await
-            .map_err(|error| (3, error.to_string()))?;
+            .map_err(|error| (2, error.to_string()))?;
         Ok(json!({
             "revisions": page.revisions.iter().map(revision).collect::<Vec<_>>(),
             "next": page.next.map(|next| json!({
@@ -152,7 +152,8 @@ pub fn canvas_save(params: &Value, cx: &App) -> Result<Task<Result<Value, Failur
     Ok(on_tokio(cx, async move {
         match session.canvas_save(&channel, &content, expected).await {
             Ok(saved) => Ok(revision(&saved)),
-            Err(error) if error.is_conflict() => Err((4, error.to_string())),
+            // The Canvas changed since `expected` (code 5, not 4).
+            Err(error) if error.is_conflict() => Err((5, error.to_string())),
             Err(error) => Err((3, error.to_string())),
         }
     }))
@@ -179,7 +180,7 @@ pub fn details(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
         let details = session
             .channel_details(&channel)
             .await
-            .map_err(|error| (3, error))?;
+            .map_err(|error| (2, error))?;
         let attempt = session.details_attempt(&channel);
         Ok(json!({
             "channel": details.channel,

@@ -167,6 +167,9 @@ pub struct Plugin {
     services: Vec<String>,
     /// The services this run hears events from, as `(plugin, service)`.
     subscriptions: std::collections::HashSet<(String, String)>,
+    /// The agent types this run registered, by run: one unchanged by
+    /// `contributions/update` stays, so its runs go on.
+    agent_types: (u64, Vec<protocol::AgentTypeDecl>),
 }
 
 impl Plugin {
@@ -188,6 +191,7 @@ impl Plugin {
             next_watch: 0,
             services: Vec::new(),
             subscriptions: Default::default(),
+            agent_types: Default::default(),
         }
     }
 
@@ -1154,15 +1158,34 @@ impl ExternalPlugins {
         let before = std::mem::take(&mut plugin.added);
         let offered = plugin.services.clone();
         let requester = plugin.connection.as_ref().map(Connection::requester);
+        // Types this run already registered as declared now stay as they
+        // are, so their runs in flight are not cancelled.
+        let kept: Vec<protocol::AgentTypeDecl> = match &plugin.agent_types {
+            (run, types) if *run == generation => contributions
+                .agent_types
+                .iter()
+                .filter(|decl| types.contains(decl))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        plugin.agent_types = (generation, contributions.agent_types.clone());
         let mut added = Self::register(id, name, contributions, requester.clone(), cx);
+        added.extend(kept.iter().map(|decl| {
+            Added::Agent(agents::AgentAdded::Type(intern(format!(
+                "{id}/{}",
+                decl.id
+            ))))
+        }));
         if let Some(requester) = requester {
-            let (agents, errors) = agents::register(
-                id,
-                &contributions.agent_tools,
-                &contributions.agent_types,
-                requester,
-                cx,
-            );
+            let changed: Vec<protocol::AgentTypeDecl> = contributions
+                .agent_types
+                .iter()
+                .filter(|decl| !kept.contains(decl))
+                .cloned()
+                .collect();
+            let (agents, errors) =
+                agents::register(id, &contributions.agent_tools, &changed, requester, cx);
             added.extend(agents.into_iter().map(Added::Agent));
             if !errors.is_empty() {
                 toasts::show(

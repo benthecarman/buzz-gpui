@@ -1215,10 +1215,12 @@ pub fn search_public(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
             .search_public_channel_page(&query, exact)
             .await
             .map_err(|error| (2, error))?;
-        let keep = limit.unwrap_or(usize::MAX).min(page.channels.len());
+        // 8 unless `limit` says otherwise, as buzz-app keeps; `partial`
+        // says only that the relay's page was full.
+        let keep = limit.unwrap_or(8).min(page.channels.len());
         Ok(json!({
             "channels": page.channels[..keep].iter().map(channel_json).collect::<Vec<_>>(),
-            "partial": page.partial || keep < page.channels.len(),
+            "partial": page.partial,
         }))
     }))
 }
@@ -1260,7 +1262,7 @@ pub fn resolve_channels(params: &Value, cx: &App) -> Result<Task<Result<Value, F
         let found = session
             .resolve_channels(ids)
             .await
-            .map_err(|error| (3, error))?;
+            .map_err(|error| (2, error))?;
         Ok(Value::Array(found.iter().map(channel_json).collect()))
     }))
 }
@@ -1325,14 +1327,9 @@ fn session_value(what: &str, params: &Value, cx: &App) -> Result<Value, Failure>
                 .map(|(key, state)| (key.clone(), json!(state.as_str())))
                 .collect(),
         ),
-        "emoji" => Value::Array(
-            snapshot
-                .emoji
-                .entries
-                .iter()
-                .map(|emoji| json!({ "shortcode": emoji.shortcode, "url": emoji.url }))
-                .collect(),
-        ),
+        // The whole catalog, with its read state and your own set
+        // (`emoji.subscribe`), as `emoji/catalog` gives it.
+        "emoji" => emoji_catalog(cx)?,
         "activity" => {
             let channel = channel.ok_or_else(|| invalid("activity takes a channel"))?;
             // As `threads/activity` answers.
@@ -1741,16 +1738,9 @@ pub fn agent_presence(params: &Value, cx: &App) -> Result<Task<Result<Value, Fai
         Some(status @ ("online" | "offline")) => status.to_owned(),
         _ => return Err(invalid("status must be online or offline")),
     };
+    // Any keys, as buzz-app sends them: the relay keeps only the agents
+    // you own, hosted and elsewhere ones included.
     let agents = pubkeys(params, 32)?;
-    let owned = crate::agents2::Agents2::global(cx).is_some_and(|service| {
-        let service = service.read(cx);
-        agents
-            .iter()
-            .all(|key| service.agents().iter().any(|agent| agent.pubkey == *key))
-    });
-    if !owned {
-        return Err(invalid("pubkeys must all be your agents"));
-    }
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         session
@@ -2314,10 +2304,11 @@ pub fn contributions(cx: &App) -> Value {
             }));
             continue;
         }
+        // Buzz's own renderers by buzz-app's titles; Diffs sits at 0.
         let entry = json!({
             "key": key,
-            "title": title.or(named).unwrap_or_else(|| key.clone()),
-            "order": order.flatten(),
+            "title": title.or(named).unwrap_or_else(|| title_of(&key)),
+            "order": order.flatten().or((key == "buzz.diffs/diff").then_some(0)),
         });
         if let Some(list) = lists[kind].as_array_mut() {
             list.push(entry);
@@ -2348,6 +2339,9 @@ const BUNDLED_COMPLETIONS: [(&str, &str, i32, &str); 3] = [
 fn title_of(key: &str) -> String {
     match key {
         "buzz.projects/resources" => "Issues and pull requests".to_owned(),
+        "buzz.diffs/diff" => "Code diff".to_owned(),
+        "buzz.voice-notes/player" => "Voice note".to_owned(),
+        "buzz.emoji/custom" => "Custom emoji".to_owned(),
         _ => super::contribute::titled(key).map_or_else(|| key.to_owned(), |(title, _)| title),
     }
 }
@@ -2428,7 +2422,18 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
         text(params, "channel"),
         text(params, "page"),
     ) {
-        (Some(_), _, _) => place_of(params, cx)?,
+        (Some(_), _, _) => {
+            let place = place_of(params, cx)?;
+            // A conversation must be one you are in, in that community
+            // (`notificationAuthorized`).
+            if let Place::Conversation { channel, .. } = &place {
+                let community = community
+                    .as_ref()
+                    .ok_or_else(|| invalid("a conversation needs a community"))?;
+                self::channel(&json!({ "channel": channel }), community.read(cx))?;
+            }
+            place
+        }
         (None, Some(channel), _) => {
             let community = community
                 .as_ref()

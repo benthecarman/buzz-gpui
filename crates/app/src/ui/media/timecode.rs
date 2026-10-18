@@ -123,10 +123,14 @@ fn clock(text: &str, fraction: bool) -> Option<Clock> {
 /// A row's text: its Markdown body, after a time chip when it is a
 /// timecoded reply. `None` when there is nothing to show.
 pub fn body(row: &Arc<MessageRow>, rows: &Rows, cx: &App) -> Option<AnyElement> {
+    // A renderer that takes the row draws it whole, time prefix and all.
+    if let Some(custom) = renderers::custom_body(row, &rows.directory, cx) {
+        return Some(custom);
+    }
     let reply = row.diff.is_none().then(|| parse(&row.content)).flatten();
     let Some(reply) = reply else {
         return (!row.content.trim().is_empty() || row.diff.is_some())
-            .then(|| renderers::message_body(row, &rows.directory, cx));
+            .then(|| crate::ui::markdown::body(row, &rows.directory, cx));
     };
     // The body is a suffix of the content; seams move with it.
     let cut = row.content.len() - reply.content.len();
@@ -141,7 +145,7 @@ pub fn body(row: &Arc<MessageRow>, rows: &Rows, cx: &App) -> Option<AnyElement> 
         ..(**row).clone()
     });
     let text = (!shown.content.trim().is_empty())
-        .then(|| renderers::message_body(&shown, &rows.directory, cx));
+        .then(|| crate::ui::markdown::body(&shown, &rows.directory, cx));
     let chip = chip(row, &reply, rows, cx);
     let media = &rows.media;
     Some(if media.inline_time {

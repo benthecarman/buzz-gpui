@@ -26,6 +26,9 @@ struct Entry {
     /// When the last read finished (ms), and why it failed.
     read_at: Option<u64>,
     error: Option<String>,
+    /// The session generation it was read in: a retry or cache clear
+    /// reads it again, as buzz-app clears it then.
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -42,11 +45,15 @@ fn key(community: &Entity<Community>, cx: &App) -> String {
 /// read; `again` reads it anyway.
 pub fn ensure(community: &Entity<Community>, again: bool, cx: &mut App) {
     let key = key(community, cx);
+    let generation = community.read(cx).session.generation();
     let current = cx
         .try_global::<Archives>()
         .and_then(|archives| archives.0.get(&key))
-        .map(|entry| entry.status);
-    if current == Some(Status::Loading) || (current.is_some() && !again) {
+        .map(|entry| (entry.status, entry.generation));
+    let stale = current.is_some_and(|(_, read)| read != generation);
+    if current.is_some_and(|(status, _)| status == Status::Loading)
+        || (current.is_some() && !again && !stale)
+    {
         return;
     }
     let (origin, authority) = {
@@ -90,6 +97,7 @@ pub fn ensure(community: &Entity<Community>, again: bool, cx: &mut App) {
             snapshot,
             read_at,
             error,
+            generation,
         },
     );
     let http = relay::lane(&origin, identity);
@@ -107,6 +115,7 @@ pub fn ensure(community: &Entity<Community>, again: bool, cx: &mut App) {
                     snapshot: ArchiveSnapshot::default(),
                     read_at: None,
                     error: None,
+                    generation,
                 });
             entry.read_at = Some(
                 std::time::SystemTime::now()

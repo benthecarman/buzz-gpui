@@ -654,8 +654,18 @@ fn full(
     if !row.attachments.is_empty() {
         body = body.child(media::attachments(row, rows, cx));
     }
+    // Plugins' message accessories sit beside the reactions too, around
+    // Agent Activity's by order then key.
+    let (before, after): (Vec<_>, Vec<_>) = super::renderers::message_accessories(row, cx)
+        .into_iter()
+        .partition(|(before, _)| *before);
+    for (_, accessory) in before {
+        // Sized to what it shows, not the row.
+        body = body.child(div().flex().child(accessory));
+    }
     // Agent work on this exact message sits beside its reactions.
     if let Some(bubbles) = &rows.bubbles
+        && crate::plugins::enabled("buzz.agent-activity")
         && let Some(works) = bubbles.works.get(&row.id)
     {
         let open = rows.actions.on_open_thread.clone().map(|open| {
@@ -672,9 +682,7 @@ fn full(
             cx,
         ));
     }
-    // Plugins' message accessories sit beside the reactions too.
-    for accessory in super::renderers::message_accessories(row, cx) {
-        // Sized to what it shows, not the row.
+    for (_, accessory) in after {
         body = body.child(div().flex().child(accessory));
     }
     if let Some(reactions) = reactions(row, rows, cx) {
@@ -1318,16 +1326,19 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
             }
         }
         let (rows, target) = (rows.clone(), row.id);
-        bar = bar.child(
-            button("add-reaction", IconName::SmileyPlus)
-                .shape(IconButtonShape::Round)
-                .disabled(busy)
-                .selected(open == Some(Popup::Picker { from_bar: true }))
-                .tooltip("Add reaction")
-                .on_click(move |_, window, cx| {
-                    rows.popup(Some((target, Popup::Picker { from_bar: true })), window, cx)
-                }),
-        );
+        // A reaction picker is the Emoji plugin's, or a plugin's.
+        if super::emoji_picker::reactions_available(cx) {
+            bar = bar.child(
+                button("add-reaction", IconName::SmileyPlus)
+                    .shape(IconButtonShape::Round)
+                    .disabled(busy)
+                    .selected(open == Some(Popup::Picker { from_bar: true }))
+                    .tooltip("Add reaction")
+                    .on_click(move |_, window, cx| {
+                        rows.popup(Some((target, Popup::Picker { from_bar: true })), window, cx)
+                    }),
+            );
+        }
     }
     if rows.actions.on_command.is_some() {
         let unavailable = !delivered
@@ -2091,7 +2102,7 @@ fn reactions(row: &Arc<MessageRow>, rows: &Rc<Rows>, cx: &App) -> Option<AnyElem
             ))
         })));
     }
-    if can && !row.reactions.is_empty() {
+    if can && !row.reactions.is_empty() && super::emoji_picker::reactions_available(cx) {
         let open = rows.interaction.open == Some((row.id, Popup::Picker { from_bar: false }));
         let (popup_rows, target) = (rows.clone(), row.id);
         let button = div()

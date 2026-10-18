@@ -74,7 +74,6 @@ pub fn unregister(key: &str, cx: &mut App) {
     tools.1 += 1;
 }
 
-/// One view per registered toolbar tool for a new composer.
 /// Where a plugin tool sits among Buzz's own toolbar buttons, which are
 /// the Mentions (-10), Emoji (0) and Voice Notes (10) plugins' tools: by
 /// order, then key. Tools ordered below 0 lead, beside the recipients
@@ -100,28 +99,46 @@ impl Slot {
     }
 }
 
-/// One view per registered tool for a new composer, with its slot.
-pub fn build(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<(Slot, AnyView)> {
-    build_where(false, context, window, cx)
+/// A tool's or accessory's view in one composer, by key and by the
+/// registration that made it (a re-registered tool builds anew).
+pub type Built = (&'static str, usize, AnyView);
+
+/// One view per registered tool for a composer, with its slot. Views in
+/// `kept` whose tool is still registered stay, so another plugin coming
+/// or going does not reset them (or revoke what they were handed).
+pub fn build(
+    context: ToolContext,
+    kept: &[(Slot, Built)],
+    window: &mut Window,
+    cx: &mut App,
+) -> Vec<(Slot, Built)> {
+    let kept: Vec<Built> = kept.iter().map(|(_, built)| built.clone()).collect();
+    build_where(false, context, &kept, window, cx)
         .into_iter()
-        .map(|(order, key, view)| (Slot::of(order, key), view))
+        .map(|(order, built)| (Slot::of(order, built.0), built))
         .collect()
 }
 
-/// One view per registered accessory for a new composer.
-pub fn build_accessories(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<AnyView> {
-    build_where(true, context, window, cx)
+/// One view per registered accessory for a composer, keeping `kept`.
+pub fn build_accessories(
+    context: ToolContext,
+    kept: &[Built],
+    window: &mut Window,
+    cx: &mut App,
+) -> Vec<Built> {
+    build_where(true, context, kept, window, cx)
         .into_iter()
-        .map(|(_, _, view)| view)
+        .map(|(_, built)| built)
         .collect()
 }
 
 fn build_where(
     accessory: bool,
     context: ToolContext,
+    kept: &[Built],
     window: &mut Window,
     cx: &mut App,
-) -> Vec<(i32, &'static str, AnyView)> {
+) -> Vec<(i32, Built)> {
     let tools = cx
         .try_global::<Tools>()
         .map(|tools| tools.0.clone())
@@ -131,11 +148,13 @@ fn build_where(
         .into_iter()
         .filter(|tool| tool.accessory == accessory && crate::plugins::enabled_key(tool.key))
         .map(|tool| {
-            (
-                tool.order,
-                tool.key,
-                (tool.build)(context.clone(), window, cx),
-            )
+            let registration = Rc::as_ptr(&tool.build) as *const () as usize;
+            let view = kept
+                .iter()
+                .find(|(key, made, _)| *key == tool.key && *made == registration)
+                .map(|(_, _, view)| view.clone())
+                .unwrap_or_else(|| (tool.build)(context.clone(), window, cx));
+            (tool.order, (tool.key, registration, view))
         })
         .collect()
 }

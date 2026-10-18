@@ -68,10 +68,19 @@ impl Permission {
     /// How Settings describes it.
     pub fn describe(self) -> &'static str {
         match self {
-            Permission::SendMessages => "Send, edit, react to and delete messages as you",
-            Permission::PublishEvents => "Publish other events as you",
-            Permission::ManageAgents => "Create, change and remove your agents",
-            Permission::ManageChannels => "Start DMs and create, join and leave channels",
+            Permission::SendMessages => {
+                "Send, edit, react to and delete messages, upload files and set reminders as you"
+            }
+            Permission::PublishEvents => {
+                "Publish other events as you, such as your status, emoji and Git tokens"
+            }
+            Permission::ManageAgents => {
+                "Create, change and remove your agents and teams, and their archive"
+            }
+            Permission::ManageChannels => {
+                "Start DMs; create, join, leave, archive and delete channels; change members, \
+                 details, workflows, your sidebar and Me"
+            }
         }
     }
 }

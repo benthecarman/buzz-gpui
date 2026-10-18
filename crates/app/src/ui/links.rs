@@ -383,9 +383,23 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             &c,
         );
     }
-    // A contributed link renderer outranks the bundled one.
-    if let Some(custom) = super::renderers::link(url, authored.as_deref(), cx) {
+    // A contributed link renderer outranks the bundled one. It draws the
+    // chip's content; Buzz keeps the anchor, its menu and hover cards.
+    let custom = super::renderers::link(url, authored.as_deref(), cx);
+    // Links Buzz does not draw itself, such as `buzz://` entities, are
+    // plain unless a renderer took them.
+    let Some(kind) = kind else {
+        let Some(custom) = custom else {
+            return plain_anchor(
+                chip.id,
+                url,
+                authored.unwrap_or_else(|| url.to_string()),
+                chip.line_height,
+                &c,
+            );
+        };
         let target = url.to_string();
+        let middle = target.clone();
         return div()
             .id(chip.id)
             .cursor_pointer()
@@ -393,23 +407,18 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             .child(custom)
             .on_click(move |event, window, cx| {
                 if target.starts_with("buzz:") {
-                    navigation::open_url(&target, window, cx)
+                    navigation::try_open_url(&target, window, cx);
                 } else {
                     navigation::open_web_link(&target, event.modifiers(), window, cx)
                 }
             })
+            .on_mouse_down(MouseButton::Middle, move |_, window, cx| {
+                if middle.starts_with("buzz:") {
+                    cx.stop_propagation();
+                    navigation::try_open_url(&middle, window, cx);
+                }
+            })
             .into_any_element();
-    }
-    // Links Buzz does not draw itself, such as `buzz://` entities, are
-    // plain unless a renderer took them.
-    let Some(kind) = kind else {
-        return plain_anchor(
-            chip.id,
-            url,
-            authored.unwrap_or_else(|| url.to_string()),
-            chip.line_height,
-            &c,
-        );
     };
     let link = parse_buzz_link(url);
     let directory = chip.directory;
@@ -478,6 +487,17 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     } else {
         chip.label.clone()
     };
+    // Buzz's chips are the Links plugin's: off, a link is a plain anchor
+    // with its label, `#channel` or URL.
+    if custom.is_none() && !crate::plugins::enabled("buzz.links") {
+        return plain_anchor(
+            chip.id,
+            url,
+            display.clone().unwrap_or_else(|| url.to_string()),
+            chip.line_height,
+            &c,
+        );
+    }
     let label_text = label(url, kind, authored.as_deref(), display.as_deref());
     let icon_size = f32::from(chip.font_size);
     let icon = Icon::new(icon(kind, kind == LinkKind::Channel && private_channel))
@@ -489,7 +509,9 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         LinkKind::Channel | LinkKind::Message | LinkKind::Thread
     );
     let gap = if kind == LinkKind::Channel { 0. } else { 3. };
-    let body: AnyElement = if session_chip {
+    let body: AnyElement = if let Some(custom) = custom {
+        custom
+    } else if session_chip {
         let channel = link.as_ref().map(|l| short(&l.channel)).unwrap_or_default();
         div()
             .flex()

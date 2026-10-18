@@ -1458,6 +1458,12 @@ pub fn picks_reactions(key: &str, cx: &App) -> bool {
         .is_some_and(|pickers| pickers.0.iter().any(|picker| picker.key == key))
 }
 
+/// Whether any reaction picker is on: Emoji's own or a plugin's. With
+/// neither, messages offer no "Add reaction".
+pub fn reactions_available(cx: &App) -> bool {
+    crate::plugins::enabled("buzz.emoji") || winning_picker(cx).is_some()
+}
+
 /// The plugin picker that outranks the bundled one, if any.
 fn winning_picker(cx: &App) -> Option<ReactionPicker> {
     const BUNDLED: (i32, &str) = (0, "buzz.emoji/picker");

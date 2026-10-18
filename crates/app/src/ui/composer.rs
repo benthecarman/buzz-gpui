@@ -270,9 +270,9 @@ pub struct Composer {
     no_followup: bool,
     /// Plugin tools in the toolbar (`composer_tools`).
     /// Plugin tools, each with its place among Buzz's own buttons.
-    tools: Vec<(super::composer_tools::Slot, AnyView)>,
+    tools: Vec<(super::composer_tools::Slot, super::composer_tools::Built)>,
     /// Plugin accessories above the composer.
-    accessories: Vec<AnyView>,
+    accessories: Vec<super::composer_tools::Built>,
     /// The tool registry's [`super::composer_tools::generation`] the
     /// tools were made at; a plugin adding one rebuilds them.
     tools_generation: u64,
@@ -485,8 +485,8 @@ impl Composer {
             thread: thread_root.map(|root| root.to_hex()),
             composer: cx.weak_entity(),
         };
-        let tools = super::composer_tools::build(context.clone(), window, cx);
-        let accessories = super::composer_tools::build_accessories(context, window, cx);
+        let tools = super::composer_tools::build(context.clone(), &[], window, cx);
+        let accessories = super::composer_tools::build_accessories(context, &[], window, cx);
         let mut composer = Self {
             community,
             channel,
@@ -3622,6 +3622,9 @@ fn find_query(text: &str, caret: usize, plugins: &[(char, &'static str)]) -> Opt
     };
     // What the text after the current character still allows.
     let (mut channel, mut emoji, mut plugin) = (true, true, true);
+    // An `@` inside a word (an address) ends Buzz's own triggers, not a
+    // plugin's query such as `/user@host`.
+    let mut own = true;
     for (length, (index, c)) in before.char_indices().rev().enumerate() {
         if length > 160 || matches!(c, '\n' | '\r' | '\t') {
             return None;
@@ -3635,12 +3638,14 @@ fn find_query(text: &str, caret: usize, plugins: &[(char, &'static str)]) -> Opt
             return Some(query(Trigger::Plugin(key), index));
         }
         match c {
-            '@' if boundary(index) => return Some(query(Trigger::Mention, index)),
-            '#' if channel && boundary(index) => return Some(query(Trigger::Channel, index)),
-            ':' if emoji && boundary(index) && (2..=64).contains(&(caret - index - 1)) => {
+            '@' if own && boundary(index) => return Some(query(Trigger::Mention, index)),
+            '#' if own && channel && boundary(index) => {
+                return Some(query(Trigger::Channel, index));
+            }
+            ':' if own && emoji && boundary(index) && (2..=64).contains(&(caret - index - 1)) => {
                 return Some(query(Trigger::Emoji, index));
             }
-            '@' => return None,
+            '@' => own = false,
             _ => {}
         }
         if plugin
@@ -4773,7 +4778,7 @@ impl Composer {
         self.tools
             .iter()
             .filter(|(at, _)| *at == slot)
-            .map(|(_, tool)| tool.clone())
+            .map(|(_, (_, _, tool))| tool.clone())
             .collect()
     }
 
@@ -5639,8 +5644,9 @@ impl Render for Composer {
                 thread: self.thread_root.map(|root| root.to_hex()),
                 composer: cx.weak_entity(),
             };
-            self.tools = super::composer_tools::build(context.clone(), window, cx);
-            self.accessories = super::composer_tools::build_accessories(context, window, cx);
+            self.tools = super::composer_tools::build(context.clone(), &self.tools, window, cx);
+            self.accessories =
+                super::composer_tools::build_accessories(context, &self.accessories, window, cx);
         }
         let c = *cx.colors();
         self.sync_uploads(cx);
@@ -5875,7 +5881,7 @@ impl Render for Composer {
                         .flex()
                         .flex_col()
                         .gap(px(4.))
-                        .children(self.accessories.iter().cloned()),
+                        .children(self.accessories.iter().map(|(_, _, view)| view.clone())),
                 )
             })
             .when(editing, |d| d.child(self.edit_header(cx)))

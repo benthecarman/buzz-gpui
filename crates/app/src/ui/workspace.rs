@@ -940,11 +940,10 @@ impl Workspace {
         .detach();
     }
 
-    /// The page showing the current visit says it cannot
+    /// The page the current visit waits on says it cannot
     /// (`PageNavigation.complete({status: "failed"})`): the visit fails,
-    /// kept for Retry navigation.
-    /// Only while the current visit shows page `key`; `false` otherwise,
-    /// so a page closed or replaced cannot fail another visit.
+    /// kept for Retry navigation. Only while the visit waits on page `key`
+    /// (`handlesNavigation`); `false` otherwise.
     pub(crate) fn fail_visit(
         &mut self,
         key: &str,
@@ -952,11 +951,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let target = self.history.current().cloned();
-        let shown = target.as_ref().is_some_and(|target| match &target.place {
-            Place::Page(page) | Place::Route { page, .. } => page.key() == key,
-            _ => false,
-        });
-        if !shown {
+        // Only while the visit still waits on this page: a visit that
+        // opened stays opened (`complete` refuses once it is not pending).
+        if self.settling.is_none_or(|page| page.key() != key) {
             return false;
         }
         self.settling = None;

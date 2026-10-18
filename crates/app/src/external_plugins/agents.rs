@@ -910,9 +910,8 @@ pub fn register(
     (done, errors)
 }
 
-/// One of the owner's agents for `agents/list`.
-/// One of the owner's agents; `place` is `hosted` for a hosted type's
-/// and `local` for one this device runs.
+/// One of the owner's agents for `agents/list`; `place` is `hosted` for
+/// a hosted type's and `here` for one this device runs.
 fn agent_entry(agent: &Agent, cx: &App) -> Value {
     entry_at(agent, crate::agents2::is_hosted(&agent.agent_type, cx))
 }
@@ -1724,9 +1723,11 @@ pub fn open_agent(plugin: &str, params: &Value, cx: &App) -> Result<Value, Failu
     let service = agents2(cx)?;
     let service = service.read(cx);
     let prefix = format!("{plugin}/");
+    // In any community: the selected one's, or running anywhere here.
     let ours = service
         .agents()
         .iter()
+        .chain(service.running().iter())
         .any(|agent| agent.pubkey == pubkey && agent.agent_type.starts_with(&prefix));
     if !ours {
         return Err((
@@ -1767,6 +1768,9 @@ pub fn close_agent(plugin: &str, params: &Value) -> Result<Value, Failure> {
 /// Drops every handle a plugin opened, as it stops.
 pub fn close_all(plugin: &str) {
     opened(|opened| opened.retain(|_, (owner, _)| owner != plugin));
+    // What a provider said holds only while its plugin runs.
+    let prefix = format!("{plugin}/");
+    READINESS.with_borrow_mut(|readiness| readiness.retain(|key, _| !key.starts_with(&prefix)));
 }
 
 #[cfg(test)]

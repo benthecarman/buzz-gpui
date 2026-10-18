@@ -8,7 +8,7 @@
 //! registration first on ties. A renderer that declines (`None`) or
 //! panics leaves the host rendering in place (`ContributionBoundary`).
 
-use super::markdown::{self, Directory};
+use super::markdown::Directory;
 use super::media;
 use buzz_relay_client::Media;
 use buzz_relay_client::fold::{Attachment, CustomEmoji, MessageRow};
@@ -187,12 +187,17 @@ pub fn register_message_accessory(accessory: Rc<dyn MessageAccessory>) {
 }
 
 /// What the message accessories show beside `row`'s reactions.
-pub fn message_accessories(row: &Arc<MessageRow>, cx: &App) -> Vec<AnyElement> {
+/// Each with whether it comes before Agent Activity's own bubble
+/// (`buzz.agent-activity/activity` at 0), by order then key.
+pub fn message_accessories(row: &Arc<MessageRow>, cx: &App) -> Vec<(bool, AnyElement)> {
     let accessories = REGISTRY.with_borrow(|r| r.accessories.clone());
     accessories
         .into_iter()
         .filter(|accessory| on(accessory.key()))
-        .filter_map(|accessory| guarded(accessory.key(), || accessory.render(row, cx)))
+        .filter_map(|accessory| {
+            let before = (accessory.order(), accessory.key()) < (0, "buzz.agent-activity/activity");
+            guarded(accessory.key(), || accessory.render(row, cx)).map(|element| (before, element))
+        })
         .collect()
 }
 
@@ -323,8 +328,9 @@ fn resolve<T: ?Sized>(
     found.into_iter().map(|(_, _, e)| e).collect()
 }
 
-/// A row's body: the winning message renderer, else Markdown.
-pub fn message_body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElement {
+/// The winning message renderer's body for the whole row, if one draws
+/// it (`MessageBody` sees the row as it is, time prefix and all).
+pub fn custom_body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> Option<AnyElement> {
     let candidates = REGISTRY.with_borrow(|r| {
         resolve(
             &r.messages,
@@ -333,12 +339,9 @@ pub fn message_body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> A
             |m| m.key().to_owned(),
         )
     });
-    for renderer in candidates {
-        if let Some(element) = guarded(renderer.key(), || renderer.render(row, directory, cx)) {
-            return element;
-        }
-    }
-    markdown::body(row, directory, cx)
+    candidates
+        .into_iter()
+        .find_map(|renderer| guarded(renderer.key(), || renderer.render(row, directory, cx)))
 }
 
 /// A contributed link chip, when one outranks the bundled links.
@@ -360,7 +363,11 @@ pub fn link(url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement> {
         Some(super::links::LinkKind::Web) => 100,
         Some(_) => 0,
         // Buzz entity links, such as issues, are Links' at 0 too.
-        None if url.starts_with("buzz:") => 0,
+        None if url::Url::parse(url)
+            .is_ok_and(|parsed| parsed.scheme() == "buzz" && parsed.host_str().is_some()) =>
+        {
+            0
+        }
         None => i32::MAX,
     };
     // Only the one that ranks first, if it outranks Buzz's own: declining
