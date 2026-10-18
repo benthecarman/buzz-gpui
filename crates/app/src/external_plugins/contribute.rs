@@ -22,7 +22,7 @@ use crate::ui::renderers::{
     AttachmentRenderer, InMessage, LinkRenderer, MessageAction, MessageRenderer,
 };
 use buzz_relay_client::Media;
-use buzz_relay_client::fold::{Attachment, MessageRow};
+use buzz_relay_client::fold::{Attachment, AttachmentKind, MessageRow};
 use buzz_ui::{Badge, BadgeTone, Icon, IconButton, IconButtonSize, IconName};
 use gpui_kit::*;
 use serde_json::{Value, json};
@@ -642,10 +642,26 @@ impl AttachmentRenderer for AttachmentView {
                     "renderer": self.id,
                     "attachment": {
                         "url": attachment.url,
+                        "kind": match attachment.kind {
+                            AttachmentKind::Image => "image",
+                            AttachmentKind::Video => "video",
+                            AttachmentKind::Audio => "audio",
+                            AttachmentKind::File => "file",
+                        },
                         "mime": attachment.mime,
                         "name": attachment.name,
                         "size": attachment.size,
+                        "duration": attachment.duration,
+                        "waveform": attachment.waveform,
+                        "voiceNote": attachment.voice_note,
+                        "dimensions": attachment.dimensions.map(|size| json!({
+                            "width": size.width,
+                            "height": size.height,
+                        })),
+                        "blurhash": attachment.blurhash,
+                        "previewUrl": attachment.preview_url,
                     },
+                    "removable": crate::ui::renderers::is_removable(&attachment.url),
                 })
             },
             cx,

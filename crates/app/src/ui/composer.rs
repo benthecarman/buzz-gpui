@@ -4836,6 +4836,15 @@ impl Composer {
         };
         let busy = item.status.busy();
         let (remove_id, retry_id) = (id.clone(), id.clone());
+        if !disabled {
+            let (composer, id) = (cx.entity().downgrade(), id.clone());
+            super::renderers::removable(
+                &voice.key,
+                std::rc::Rc::new(move |cx: &mut App| {
+                    let _ = composer.update(cx, |this, cx| this.remove_attachment(&id, cx));
+                }),
+            );
+        }
         div()
             .id(SharedString::from(format!("voice-draft-{id}")))
             .relative()

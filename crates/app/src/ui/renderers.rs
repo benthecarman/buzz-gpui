@@ -119,8 +119,14 @@ struct Registry {
     actions: Vec<Rc<dyn MessageAction>>,
 }
 
+/// Removes a draft attachment (`AttachmentRendererProps.onRemove`).
+pub type Remove = Rc<dyn Fn(&mut App)>;
+
 thread_local! {
     static REGISTRY: RefCell<Registry> = RefCell::new(bundled());
+    /// Drafts a renderer may remove, by attachment URL.
+    static REMOVERS: RefCell<std::collections::HashMap<String, Remove>> =
+        RefCell::new(std::collections::HashMap::new());
     /// Changes when prose may draw differently: a text renderer was added
     /// or removed, or found something new to draw.
     static TEXT_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -350,6 +356,34 @@ pub fn inline(text: &str, emoji: &[CustomEmoji], media: &Media, cx: &App) -> Opt
         .into_iter()
         .filter(|renderer| on(renderer.key()))
         .find_map(|renderer| guarded(renderer.key(), || renderer.render(text, emoji, media, cx)))
+}
+
+/// Whether an attachment renderer would draw `attachment`.
+pub fn takes_attachment(attachment: &Attachment) -> bool {
+    REGISTRY.with_borrow(|r| {
+        r.attachments
+            .iter()
+            .any(|renderer| on(renderer.key()) && renderer.matches(attachment))
+    })
+}
+
+/// Lets a renderer drawing the draft at `url` remove it.
+pub fn removable(url: &str, remove: Remove) {
+    REMOVERS.with_borrow_mut(|removers| removers.insert(url.to_owned(), remove));
+}
+
+/// Whether the attachment at `url` is a draft a renderer may remove.
+pub fn is_removable(url: &str) -> bool {
+    REMOVERS.with_borrow(|removers| removers.contains_key(url))
+}
+
+/// Removes the draft at `url`; `false` when it is not one.
+pub fn remove(url: &str, cx: &mut App) -> bool {
+    let Some(remove) = REMOVERS.with_borrow_mut(|removers| removers.remove(url)) else {
+        return false;
+    };
+    remove(cx);
+    true
 }
 
 /// An attachment through the attachment renderers, if one takes it.

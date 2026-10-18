@@ -2015,6 +2015,10 @@ impl ExternalPlugins {
                     None => Err((1, "The plugin stopped.".to_owned())),
                 })
             }
+            "attachment/remove" => Reply::Now(match params.get("url").and_then(Value::as_str) {
+                Some(url) => Ok(json!(crate::ui::renderers::remove(url, cx))),
+                None => Err((INVALID_PARAMS, "url is required".to_owned())),
+            }),
             "agents/dismissError" => Reply::Now(agents::dismiss_error(params, cx)),
             "agents/clearActivity" => Reply::Now(agents::clear_activity(params, cx)),
             "agents/portable" => later(agents::portable(cx)),

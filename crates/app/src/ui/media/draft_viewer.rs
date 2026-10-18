@@ -280,26 +280,64 @@ impl DraftViewer {
             return Some(attachment(item, uploaded));
         }
         let key = format!("draft-audio:{}", item.id);
-        if !self.sounds.contains(&key) {
-            self.sounds.push(key.clone());
-            let (source, local) = (item.source.clone(), key.clone());
-            let read = cx.background_executor().spawn(async move {
-                match source {
-                    Source::Path(path) => std::fs::read(path).ok().map(Arc::<[u8]>::from),
-                    Source::Bytes(bytes) => Some(bytes),
-                }
-            });
-            cx.spawn(async move |this, cx| {
-                if let Some(bytes) = read.await {
-                    let _ = this.update(cx, |_, cx| {
-                        super::set_local(&local, bytes, cx);
-                        cx.notify();
-                    });
-                }
-            })
-            .detach();
-        }
+        self.hold(&key, item, cx);
         Some(local(key, item))
+    }
+
+    /// Holds `item`'s bytes in memory under `key` until the viewer closes.
+    fn hold(&mut self, key: &str, item: &DraftFile, cx: &mut Context<Self>) {
+        if self.sounds.iter().any(|held| held == key) {
+            return;
+        }
+        self.sounds.push(key.to_owned());
+        let (source, local) = (item.source.clone(), key.to_owned());
+        let read = cx.background_executor().spawn(async move {
+            match source {
+                Source::Path(path) => std::fs::read(path).ok().map(Arc::<[u8]>::from),
+                Source::Bytes(bytes) => Some(bytes),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            if let Some(bytes) = read.await {
+                let _ = this.update(cx, |_, cx| {
+                    super::set_local(&local, bytes, cx);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// An image, video or file a plugin's attachment renderer draws, as
+    /// `ComposerAttachmentViewer` offers every draft: by its relay URL
+    /// once uploaded, else by a key `media/get` reads from memory.
+    fn plugin_slide(&mut self, item: &DraftFile, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let kind = match item.preview() {
+            Preview::Image => AttachmentKind::Image,
+            Preview::Video => AttachmentKind::Video,
+            Preview::Audio => return None,
+            Preview::File => AttachmentKind::File,
+        };
+        let attachment = match &item.uploaded {
+            Some(uploaded) => attachment(item, uploaded),
+            None => Attachment {
+                kind,
+                ..local(format!("draft-file:{}", item.id), item)
+            },
+        };
+        if !crate::ui::renderers::takes_attachment(&attachment) {
+            return None;
+        }
+        if item.uploaded.is_none() {
+            self.hold(&attachment.url, item, cx);
+        }
+        let media = self.draft.read(cx).media().clone();
+        crate::ui::renderers::attachment(
+            &attachment,
+            SharedString::from(format!("draft-file-plugin-{}", item.id)),
+            &media,
+            cx,
+        )
     }
 
     /// One file's slide (`DraftMedia`).
@@ -322,6 +360,16 @@ impl DraftViewer {
                 .child(text.to_string())
                 .into_any_element()
         };
+        if let Some(custom) = self.plugin_slide(item, cx) {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(24.))
+                .child(custom)
+                .into_any_element();
+        }
         match item.preview() {
             Preview::Image => match self.picture(item, window, cx) {
                 Some(Ok(image)) => {

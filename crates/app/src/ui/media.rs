@@ -21,7 +21,9 @@ mod timecode;
 mod video;
 
 pub use attachments::{RowMedia, attachments, thread_media};
-pub use audio::{audio_attachment, forget_local, pause_audio, set_local, voice_draft, voice_note};
+pub use audio::{
+    audio_attachment, forget_local, local_bytes, pause_audio, set_local, voice_draft, voice_note,
+};
 // The composer's draft thumbnails use this.
 pub use engine::probe_file;
 pub use review::{dismiss_review, review_overlay};

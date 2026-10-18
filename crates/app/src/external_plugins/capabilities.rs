@@ -1362,6 +1362,11 @@ pub fn media(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
     let url = text(params, "url")
         .ok_or_else(|| invalid("url is required"))?
         .to_owned();
+    // A draft not sent yet, held in memory under the key
+    // `attachment/render` gave.
+    if let Some(bytes) = crate::ui::media::local_bytes(&url, cx) {
+        return Ok(Task::ready(local_media(&url, bytes, params)));
+    }
     let media = community(cx)?.read(cx).session.media().clone();
     if !media.is_relay_media(&url) {
         return Err(invalid(
@@ -1396,6 +1401,32 @@ pub fn media(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
             "size": bytes.len(),
             "mime": buzz_relay_client::upload::mime_type(&url, &bytes),
         }))
+    }))
+}
+
+/// `media/get` for a draft's bytes in memory.
+fn local_media(url: &str, bytes: Arc<[u8]>, params: &Value) -> Result<Value, Failure> {
+    use base64::Engine;
+    if let Some(directory) = text(params, "directory") {
+        let directory = std::path::PathBuf::from(directory);
+        if !directory.is_dir() {
+            return Err(invalid("directory is not a folder"));
+        }
+        let name = text(params, "name").unwrap_or("draft");
+        let name = std::path::Path::new(name)
+            .file_name()
+            .ok_or_else(|| invalid("name is not a file name"))?;
+        let path = directory.join(name);
+        std::fs::write(&path, &bytes).map_err(|error| (3, error.to_string()))?;
+        return Ok(json!({ "path": path }));
+    }
+    if bytes.len() > MAX_MEDIA {
+        return Err((3, "The file is larger than 8 MiB.".to_owned()));
+    }
+    Ok(json!({
+        "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "size": bytes.len(),
+        "mime": buzz_relay_client::upload::mime_type(url, &bytes),
     }))
 }
 

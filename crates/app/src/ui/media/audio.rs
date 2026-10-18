@@ -139,6 +139,12 @@ pub fn set_local(key: &str, bytes: Arc<[u8]>, cx: &mut App) {
     });
 }
 
+/// A draft's bytes from [`set_local`], for a plugin that draws it.
+pub fn local_bytes(key: &str, cx: &App) -> Option<Arc<[u8]>> {
+    cx.try_global::<AudioGlobal>()
+        .and_then(|audio| audio.0.read(cx).local.get(key).cloned())
+}
+
 /// Forgets a draft from [`set_local`], stopping it if it plays.
 pub fn forget_local(key: &str, cx: &mut App) {
     let Some(audio) = cx.try_global::<AudioGlobal>().map(|audio| audio.0.clone()) else {
