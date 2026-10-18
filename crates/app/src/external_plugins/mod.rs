@@ -841,8 +841,13 @@ impl ExternalPlugins {
         plugin.watches.clear();
         plugin.subscriptions.clear();
         plugin.generation += 1;
+        let offered = plugin.status == Status::Running && !plugin.services.is_empty();
         plugin.status = Status::Starting;
         let generation = plugin.generation;
+        agents::close_all(&manifest.id);
+        if offered {
+            Self::services_changed(cx);
+        }
         // A signed folder is checked before every start, off this thread.
         let folder = path.to_path_buf();
         let id = manifest.id.clone();
@@ -955,6 +960,7 @@ impl ExternalPlugins {
         plugin.subscriptions.clear();
         plugin.generation += 1;
         let off = status == Status::Off;
+        let offered = plugin.status == Status::Running && !plugin.services.is_empty();
         plugin.status = status;
         if let Some(id) = plugin.id() {
             contribute::forget(id);
@@ -963,6 +969,9 @@ impl ExternalPlugins {
         if off {
             let added = std::mem::take(&mut plugin.added);
             take_away(added, cx);
+        }
+        if offered {
+            Self::services_changed(cx);
         }
         cx.refresh_windows();
     }
@@ -1044,8 +1053,12 @@ impl ExternalPlugins {
             .iter()
             .map(|service| service.id.clone())
             .collect();
+        let offers = !plugin.services.is_empty();
         // Views open before this run ask the new run for their trees.
         let views: Vec<_> = plugin.views.values().cloned().collect();
+        if offers {
+            Self::services_changed(cx);
+        }
         for view in views {
             if let Some(view) = view.upgrade() {
                 let params = view.read(cx).open_params();
@@ -1258,6 +1271,37 @@ impl ExternalPlugins {
                 Err(error) => Err((3, error.to_string())),
             }
         }))
+    }
+
+    /// The services running plugins offer, as `services/list` answers.
+    fn service_list(&self) -> Value {
+        Value::Array(
+            self.plugins
+                .iter()
+                .filter(|plugin| plugin.status == Status::Running)
+                .flat_map(|plugin| {
+                    let id = plugin.id().unwrap_or_default().to_owned();
+                    plugin
+                        .services
+                        .iter()
+                        .map(move |service| json!({ "plugin": id, "service": service }))
+                })
+                .collect(),
+        )
+    }
+
+    /// Tells running plugins the services on offer changed, as a Cordis
+    /// `inject` learns a service came or went.
+    fn services_changed(cx: &App) {
+        let state = cx.global::<Self>();
+        let params = json!({ "services": state.service_list() });
+        for plugin in &state.plugins {
+            if plugin.status == Status::Running
+                && let Some(connection) = &plugin.connection
+            {
+                connection.notify("services/changed", params.clone());
+            }
+        }
     }
 
     /// Sends a notification to plugin `id` if it runs.
@@ -1928,20 +1972,7 @@ impl ExternalPlugins {
             "projects/git" => later(content::git(params, cx)),
             "events/query" => later(events::query(params, cx)),
             "agents/list" => Reply::Now(agents::list(cx)),
-            "services/list" => Reply::Now(Ok(Value::Array(
-                cx.global::<Self>()
-                    .plugins
-                    .iter()
-                    .filter(|plugin| plugin.status == Status::Running)
-                    .flat_map(|plugin| {
-                        let id = plugin.id().unwrap_or_default().to_owned();
-                        plugin
-                            .services
-                            .iter()
-                            .map(move |service| json!({ "plugin": id, "service": service }))
-                    })
-                    .collect(),
-            ))),
+            "services/list" => Reply::Now(Ok(cx.global::<Self>().service_list())),
             "services/subscribe" | "services/unsubscribe" => {
                 let target = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
                 let (Some(target), Some(service)) = (target("plugin"), target("service")) else {
