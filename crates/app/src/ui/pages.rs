@@ -140,14 +140,24 @@ impl Global for Images {}
 struct Behaviour {
     settles: std::collections::HashSet<Page>,
     solo: std::collections::HashSet<Page>,
+    edge_to_edge: std::collections::HashSet<Page>,
 }
 
 impl Global for Behaviour {}
 
 /// Marks `page` as settling its own visits, and as showing the companion
 /// dock or not.
-pub fn register_behaviour(page: Page, settles: bool, companion: bool, cx: &mut App) {
+pub fn register_behaviour(
+    page: Page,
+    settles: bool,
+    companion: bool,
+    edge_to_edge: bool,
+    cx: &mut App,
+) {
     let behaviour = cx.default_global::<Behaviour>();
+    if edge_to_edge {
+        behaviour.edge_to_edge.insert(page);
+    }
     if settles {
         behaviour.settles.insert(page);
     }
@@ -160,6 +170,12 @@ pub fn register_behaviour(page: Page, settles: bool, companion: bool, cx: &mut A
 pub fn settles(page: Page, cx: &App) -> bool {
     cx.try_global::<Behaviour>()
         .is_some_and(|behaviour| behaviour.settles.contains(&page))
+}
+
+/// Whether `page` fills the area edge to edge (`layout: "workspace"`).
+pub fn edge_to_edge(page: Page, cx: &App) -> bool {
+    cx.try_global::<Behaviour>()
+        .is_some_and(|behaviour| behaviour.edge_to_edge.contains(&page))
 }
 
 /// Whether `page` shows without the companion dock.
@@ -233,6 +249,7 @@ pub fn clear_extras(page: Page, cx: &mut App) {
     let behaviour = cx.default_global::<Behaviour>();
     behaviour.settles.remove(&page);
     behaviour.solo.remove(&page);
+    behaviour.edge_to_edge.remove(&page);
 }
 
 /// Removes the page `page`, as when the plugin that added it stops.

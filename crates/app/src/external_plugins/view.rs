@@ -49,6 +49,8 @@ pub struct ExternalView {
     accept: Option<Accept>,
     /// A page's route params, from `ui/navigate`.
     route: Option<Value>,
+    /// Whether the plugin has heard `view/open` for it yet.
+    opened: bool,
     /// A panel's earlier targets, newest last, which Back returns to
     /// (`PanelContext.push`).
     back: Vec<String>,
@@ -460,6 +462,7 @@ impl ExternalView {
                 change: None,
                 accept: None,
                 route: None,
+                opened: false,
                 back: Vec::new(),
                 edge_to_edge: false,
                 tree: None,
@@ -475,8 +478,23 @@ impl ExternalView {
             setup(&mut view);
             view
         });
-        let params = view.read(cx).open_params(cx);
-        ExternalPlugins::open_view(plugin, &id, view.downgrade(), params, cx);
+        // A page hears `view/open` once the visit has handed it its
+        // route, so the route is in it.
+        let weak = view.downgrade();
+        let (plugin, deferred) = (plugin.to_owned(), kind == "page");
+        let open = move |cx: &mut App| {
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            view.update(cx, |view, _| view.opened = true);
+            let params = view.read(cx).open_params(cx);
+            ExternalPlugins::open_view(&plugin, &id, weak, params, cx);
+        };
+        if deferred {
+            cx.defer(open);
+        } else {
+            open(cx);
+        }
         view
     }
 
@@ -534,6 +552,12 @@ impl ExternalView {
             let community = opening.community.read(cx);
             params["community"] = json!(community.origin.websocket());
             params["viewer"] = json!(community.session.viewer().to_string());
+            // ChannelPanelContext's `scope`: the relay and you.
+            params["scope"] = json!(format!(
+                "{}#{}",
+                community.origin.websocket(),
+                community.session.viewer()
+            ));
             params["channelName"] = json!(
                 community
                     .snapshot
@@ -1172,6 +1196,10 @@ pub fn open_route(view: &AnyView, params: Option<&Value>, _: &mut Window, cx: &m
     };
     view.update(cx, |view, cx| {
         view.route = params.cloned();
+        // Before `view/open`, which carries the route itself.
+        if !view.opened {
+            return;
+        }
         let entry = crate::ui::workspace::current_visit().0;
         ExternalPlugins::notify_running(
             &view.plugin,

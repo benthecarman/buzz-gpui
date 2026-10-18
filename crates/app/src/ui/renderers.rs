@@ -442,6 +442,11 @@ pub fn removable(url: &str, remove: Remove) {
     REMOVERS.with_borrow_mut(|removers| removers.insert(url.to_owned(), remove));
 }
 
+/// The draft at `url` can no longer be removed, as while it sends.
+pub fn not_removable(url: &str) {
+    REMOVERS.with_borrow_mut(|removers| removers.remove(url));
+}
+
 /// Whether the attachment at `url` is a draft a renderer may remove.
 pub fn is_removable(url: &str) -> bool {
     REMOVERS.with_borrow(|removers| removers.contains_key(url))

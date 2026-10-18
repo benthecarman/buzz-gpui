@@ -569,6 +569,11 @@ pub fn mark(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
         .get("through")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // A thread is marked up to a message; without one this would mark
+    // the whole channel.
+    if (through || root.is_some()) && message.is_none() {
+        return Err(invalid("through and root take a message"));
+    }
     Ok(on_tokio(cx, async move {
         let done = match (message, read, through) {
             (None, true, _) => session.mark_channel_read(&channel).await,

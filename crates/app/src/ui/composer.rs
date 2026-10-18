@@ -3633,6 +3633,7 @@ fn find_query(text: &str, caret: usize, plugins: &[(char, &'static str)]) -> Opt
         if "@#:".contains(c)
             && plugin
             && boundary(index)
+            && caret - index <= 65
             && let Some((_, key)) = plugins.iter().find(|(trigger, _)| *trigger == c)
         {
             return Some(query(Trigger::Plugin(key), index));
@@ -4949,6 +4950,9 @@ impl Composer {
                     let _ = composer.update(cx, |this, cx| this.remove_attachment(&id, cx));
                 }),
             );
+        } else {
+            // Sending: plugins may no longer remove it (`onRemove` goes).
+            super::renderers::not_removable(&voice.key);
         }
         div()
             .id(SharedString::from(format!("voice-draft-{id}")))

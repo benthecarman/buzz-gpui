@@ -111,6 +111,8 @@ thread_local! {
     /// Captures a tool started, by the composer number it was handed: they
     /// end when the tool goes (`capture` lives as long as the tool).
     static CAPTURING: RefCell<HashMap<u64, WeakEntity<Composer>>> = RefCell::default();
+    /// How each composer tool was last declared, by key.
+    static DECLARED: RefCell<HashMap<&'static str, String>> = RefCell::default();
     /// Draft attachments a plugin's renderer was offered to remove, by url.
     static REMOVERS: RefCell<HashMap<String, String>> = RefCell::default();
     /// Settings cards a plugin hid or marked pending, by key.
@@ -452,8 +454,10 @@ fn removable(plugin: &str, url: &str) -> bool {
 pub fn forget(plugin: &str) {
     crate::shortcuts::forget_external(plugin);
     COMPOSERS.with_borrow_mut(|composers| composers.retain(|_, grant| grant.plugin != plugin));
-    REMOVERS.with_borrow_mut(|removers| removers.retain(|_, owner| owner != plugin));
+    // A new run builds its tools anew, with grants of its own.
     let prefix = format!("{plugin}/");
+    DECLARED.with_borrow_mut(|declared| declared.retain(|key, _| !key.starts_with(&prefix)));
+    REMOVERS.with_borrow_mut(|removers| removers.retain(|_, owner| owner != plugin));
     ANSWERS.with_borrow_mut(|answers| {
         answers
             .entries
@@ -928,7 +932,9 @@ impl AttachmentRenderer for AttachmentView {
         _: &Media,
         cx: &App,
     ) -> Option<AnyElement> {
-        let target = attachment.url.clone();
+        // Asked again when it stops (or starts) being removable.
+        let removable = removable(&self.plugin, &attachment.url);
+        let target = format!("{}#removable={removable}", attachment.url);
         let tree = ask(
             &self.plugin,
             self.key,
@@ -958,7 +964,7 @@ impl AttachmentRenderer for AttachmentView {
                         "blurhash": attachment.blurhash,
                         "previewUrl": attachment.preview_url,
                     },
-                    "removable": removable(&self.plugin, &attachment.url),
+                    "removable": removable,
                 })
             },
             cx,
@@ -1773,6 +1779,19 @@ pub fn take_away(added: Added, cx: &mut App) {
     }
 }
 
+/// Whether composer tool `key` is registered as `declared` already, so
+/// registering it again would only rebuild its views. Notes `declared`.
+fn unchanged(key: &'static str, declared: &str, cx: &App) -> bool {
+    let registered = crate::ui::composer_tools::listed(cx)
+        .iter()
+        .any(|(listed, _, _)| *listed == key);
+    DECLARED.with_borrow_mut(|known| {
+        let same = registered && known.get(key).is_some_and(|known| known == declared);
+        known.insert(key, declared.to_owned());
+        same
+    })
+}
+
 /// Registers everything in `contributions` but pages and panels.
 pub fn register(
     plugin: &str,
@@ -1953,6 +1972,15 @@ pub fn register(
     }
     for tool in &contributions.composer_tools {
         let tool_key = key(&tool.id);
+        // Unchanged and still registered: it stays, so its composer views
+        // (and what they were handed) do too.
+        if unchanged(tool_key, &format!("{tool:?}"), cx) {
+            added.push(Added::Tool(tool_key));
+            if tool.reaction_picker {
+                added.push(Added::ReactionPicker(tool_key));
+            }
+            continue;
+        }
         let (owner, id, title, icon) = (
             plugin.to_owned(),
             tool.id.clone(),
@@ -2041,6 +2069,10 @@ pub fn register(
                 kinds: accessory.kinds.clone(),
             }));
             added.push(Added::Renderer(accessory_key));
+            continue;
+        }
+        if unchanged(accessory_key, &format!("{accessory:?}"), cx) {
+            added.push(Added::Tool(accessory_key));
             continue;
         }
         let (owner, id) = (plugin.to_owned(), accessory.id.clone());

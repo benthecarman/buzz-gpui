@@ -1049,7 +1049,27 @@ pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
         .filter(|(key, _, _)| seen.insert(key.clone()))
         .map(|(key, name, _)| (key, name))
         .collect();
-    let choice = |(pubkey, name): &(String, String)| json!({ "pubkey": pubkey, "name": name, "managed": true, "managedName": name });
+    // Each with its picture, as the library rows carry it (`avatar`).
+    let service = agents2(cx)?;
+    let service = service.read(cx);
+    let avatar = |pubkey: &str| {
+        service
+            .agents()
+            .iter()
+            .chain(service.running().iter())
+            .find(|agent| agent.pubkey == pubkey)
+            .and_then(|agent| agent.picture.clone())
+            .filter(|picture| !picture.is_empty())
+    };
+    let choice = |(pubkey, name): &(String, String)| {
+        json!({
+            "pubkey": pubkey,
+            "name": name,
+            "avatar": avatar(pubkey),
+            "managed": true,
+            "managedName": name,
+        })
+    };
     Ok(json!({
         "status": status,
         "error": error,

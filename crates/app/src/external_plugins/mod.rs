@@ -492,6 +492,9 @@ impl ExternalPlugins {
                     Status::Failed(_) => "failed",
                 },
                 "active": plugin.status == Status::Running,
+                // Changes with each start, so a quick restart still shows
+                // (`revision`).
+                "run": plugin.generation,
             }))
         });
         let built_in = cx
@@ -506,6 +509,7 @@ impl ExternalPlugins {
                     "builtIn": true,
                     "status": if row.enabled { "running" } else { "off" },
                     "active": row.enabled,
+                    "run": 0,
                 })
             });
         Value::Array(built_in.chain(added).collect())
@@ -1384,7 +1388,13 @@ impl ExternalPlugins {
                     cx,
                 );
             }
-            pages::register_behaviour(key, page.handles_navigation, page.companion, cx);
+            pages::register_behaviour(
+                key,
+                page.handles_navigation,
+                page.companion,
+                edge_to_edge,
+                cx,
+            );
             spec.badge = Some(contribute::badge(key.key()));
             pages::register(spec, cx);
             added.push(Added::Page(key));
@@ -1395,6 +1405,14 @@ impl ExternalPlugins {
                 .map(Added::Other),
         );
         added
+    }
+
+    /// Whether added plugin `id` is starting: its contributions are on
+    /// their way.
+    pub fn starting(id: &str, cx: &App) -> bool {
+        cx.try_global::<Self>()
+            .and_then(|plugins| plugins.by_id(id))
+            .is_some_and(|plugin| plugin.status == Status::Starting)
     }
 
     /// The connection of plugin `id` while it runs.
@@ -1595,7 +1613,16 @@ impl ExternalPlugins {
                 let reply = capabilities::in_community(&params, cx, |cx| {
                     Self::answer(path, generation, &method, &params, cx)
                 })
-                .unwrap_or_else(|failure| Reply::Now(Err(failure)));
+                .unwrap_or_else(|failure| match (method.as_str(), failure) {
+                    // An unjoined community fails the open, not the
+                    // request (`OpenResult` `invalid-target`).
+                    ("ui/navigate", (INVALID_PARAMS, error)) => Reply::Now(Ok(json!({
+                        "status": "failed",
+                        "reason": "invalid-target",
+                        "error": error,
+                    }))),
+                    (_, failure) => Reply::Now(Err(failure)),
+                });
                 match reply {
                     Reply::Now(result) => Self::respond(path, generation, &id, result, cx),
                     Reply::Later(task) => {
@@ -1723,6 +1750,7 @@ impl ExternalPlugins {
             "emoji/list" => Reply::Now(capabilities::emoji(cx)),
             "emoji/catalog" => Reply::Now(capabilities::emoji_catalog(cx)),
             "typing/get" => Reply::Now(capabilities::typing(params, cx)),
+            "typing/all" => Reply::Now(capabilities::typing_all(cx)),
             "people/search" => later(capabilities::search_people(params, cx)),
             "ui/openConversation" => Reply::Now(capabilities::open_conversation(params, cx)),
             "composer/insert"

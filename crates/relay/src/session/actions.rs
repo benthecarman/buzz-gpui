@@ -679,7 +679,24 @@ impl Session {
         exact: bool,
     ) -> Result<PublicChannels, String> {
         let (ops, query) = (self.ops(), query.to_owned());
-        self.run(async move { ops.public_channels(&query, exact).await })
+        self.run(async move {
+            ops.public_channels(&query, exact, PUBLIC_CHANNEL_MATCHES)
+                .await
+        })
+        .await
+    }
+
+    /// As [`Self::search_public_channel_page`], keeping up to `limit`
+    /// matches (`searchPublic`'s `limit`; at most 100).
+    pub async fn search_public_channel_page_up_to(
+        &self,
+        query: &str,
+        exact: bool,
+        limit: usize,
+    ) -> Result<PublicChannels, String> {
+        let (ops, query) = (self.ops(), query.to_owned());
+        let limit = limit.clamp(1, 100);
+        self.run(async move { ops.public_channels(&query, exact, limit).await })
             .await
     }
 
@@ -1129,7 +1146,12 @@ impl Ops {
         .await
     }
 
-    async fn public_channels(&self, query: &str, exact: bool) -> Result<PublicChannels, String> {
+    async fn public_channels(
+        &self,
+        query: &str,
+        exact: bool,
+        limit: usize,
+    ) -> Result<PublicChannels, String> {
         let needle = query.trim().trim_start_matches('#').to_lowercase();
         if needle.is_empty() {
             return Ok(PublicChannels::default());
@@ -1186,7 +1208,7 @@ impl Ops {
             })
             .collect();
         candidates.sort();
-        candidates.truncate(PUBLIC_CHANNEL_MATCHES);
+        candidates.truncate(limit);
         let ids: Vec<String> = candidates.into_iter().map(|(_, _, id)| id).collect();
         let mut channels: Vec<ChannelSummary> = self
             .resolve(&ctx, ids.clone())

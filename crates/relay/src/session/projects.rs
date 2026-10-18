@@ -143,6 +143,17 @@ impl Projects {
         }
     }
 
+    /// `authorizeGit`: the repository's canonical URL and its token
+    /// ([`Self::git_authorization`]), `None` for a repository this
+    /// community does not serve, or an error when signing fails.
+    pub fn authorize_git(&self, repository: &str) -> Result<Option<(String, String)>, String> {
+        let Some(canonical) = community_git_repository(&self.origin.http(), repository) else {
+            return Ok(None);
+        };
+        let token = self.git_authorization(&canonical)?;
+        Ok(Some((canonical, token)))
+    }
+
     /// `relay_git_authorization`: the base64 NIP-98 token, after
     /// `Authorization: Nostr `, for one repository of this community. The
     /// relay accepts it for 60 seconds on every Git route of that

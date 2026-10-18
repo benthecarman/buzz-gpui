@@ -293,8 +293,10 @@ fn profile(key: &str, profile: Option<&Arc<Profile>>) -> Value {
             "isAgent": profile.is_agent,
             // An agent's attested owner (NIP-OA), if its profile names one.
             "owner": profile.owner_pubkey,
-            // Read from the relay, named or not.
+            // Read from the relay, named or not; a profile with no usable
+            // name shows its key prefix (`nameIsFallback`).
             "loaded": true,
+            "nameIsFallback": profile.name_is_fallback,
         }),
         None => json!({
             "pubkey": key,
@@ -305,6 +307,7 @@ fn profile(key: &str, profile: Option<&Arc<Profile>>) -> Value {
             "isAgent": false,
             "owner": null,
             "loaded": false,
+            "nameIsFallback": true,
         }),
     }
 }
@@ -1212,7 +1215,7 @@ pub fn search_public(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         let page = session
-            .search_public_channel_page(&query, exact)
+            .search_public_channel_page_up_to(&query, exact, limit.unwrap_or(8))
             .await
             .map_err(|error| (2, error))?;
         // 8 unless `limit` says otherwise, as buzz-app keeps; `partial`
@@ -1672,16 +1675,17 @@ fn identity(cx: &App) -> Result<Arc<buzz_identity::Identity>, Failure> {
 /// routes for 60 seconds (`authorizeGit`).
 pub fn git_authorization(params: &Value, cx: &App) -> Result<Value, Failure> {
     let repository = text(params, "repository").ok_or_else(|| invalid("repository is required"))?;
-    let token = community(cx)?
+    // The canonical URL and token; `null` for a repository this community
+    // does not serve, an error when signing fails (`authorizeGit`).
+    let authorized = community(cx)?
         .read(cx)
         .session
         .projects()
-        .git_authorization(repository);
-    // `null` for a repository this community does not serve, as
-    // `authorizeGit` answers.
-    Ok(match token {
-        Ok(token) => json!({ "repository": repository, "token": token }),
-        Err(_) => Value::Null,
+        .authorize_git(repository)
+        .map_err(|error| (3, error))?;
+    Ok(match authorized {
+        Some((repository, token)) => json!({ "repository": repository, "token": token }),
+        None => Value::Null,
     })
 }
 
@@ -1968,6 +1972,18 @@ pub fn typing(params: &Value, cx: &App) -> Result<Value, Failure> {
     Ok(json!(people.unwrap_or_default()))
 }
 
+/// `typing/all`: who is typing anywhere in the community
+/// (`typing.snapshot()`): at each channel's top level, and in each
+/// thread by its root.
+pub fn typing_all(cx: &App) -> Result<Value, Failure> {
+    let community = community(cx)?;
+    let snapshot = &community.read(cx).snapshot;
+    Ok(json!({
+        "channels": *snapshot.typing,
+        "threads": *snapshot.thread_typing,
+    }))
+}
+
 /// `people/search`: people in the community whose profile matches
 /// `query`, a page at a time.
 pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
@@ -2011,6 +2027,80 @@ pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
 /// `reason`, or `superseded` by another visit. Back and Forward answer
 /// at once.
 pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    // A settings card opens only while it shows: a pending check is waited
+    // for, and a hidden or failed one fails the visit as `unavailable`.
+    if text(params, "to") == Some("settings")
+        && let Some(card) =
+            text(params, "section").and_then(|key| crate::ui::settings::cards::get(key, cx))
+    {
+        use crate::ui::settings::cards::CardVisibility;
+        let params = params.clone();
+        let key = card.key;
+        // Run the checks meanwhile, as Settings does while it shows.
+        let held = crate::ui::settings::cards::retain_visibility(cx);
+        return Ok(cx.spawn(async move |cx| {
+            let _held = held;
+            for _ in 0..150 {
+                let shown = cx.update(|cx| {
+                    crate::ui::settings::cards::get(key, cx).map(|card| card.visibility(cx))
+                });
+                match shown {
+                    Some(CardVisibility::Visible) => {
+                        let opened = cx.update(|cx| open_now(&params, cx));
+                        return match opened {
+                            Ok(task) => task.await,
+                            Err(failure) => Err(failure),
+                        };
+                    }
+                    Some(CardVisibility::Pending) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(100))
+                            .await;
+                    }
+                    _ => break,
+                }
+            }
+            Ok(json!({ "status": "failed", "reason": "unavailable" }))
+        }));
+    }
+    // A page of a plugin still starting is waited for, as buzz-app waits
+    // while its owner activates.
+    if text(params, "to") == Some("page")
+        && let Some(key) = text(params, "page").map(str::to_owned)
+        && !crate::ui::pages::all(cx)
+            .iter()
+            .any(|spec| spec.page.key() == key)
+        && super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
+    {
+        let params = params.clone();
+        return Ok(cx.spawn(async move |cx| {
+            for _ in 0..150 {
+                let waiting = cx.update(|cx| {
+                    super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
+                });
+                if !waiting {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
+            match cx.update(|cx| open_now(&params, cx)) {
+                Ok(task) => task.await,
+                Err((INVALID_PARAMS, error)) => Ok(json!({
+                    "status": "failed",
+                    "reason": "invalid-target",
+                    "error": error,
+                })),
+                Err(failure) => Err(failure),
+            }
+        }));
+    }
+    open_now(params, cx)
+}
+
+/// [`navigate`] without waiting on a settings card.
+fn open_now(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let before = navigation::workspace(cx).map(|workspace| workspace.read(cx).visit().0);
     let tracked = match start_navigation(params, cx) {
         Ok(tracked) => tracked,
@@ -2192,6 +2282,11 @@ pub fn contributions(cx: &App) -> Value {
                 Placement::Hidden => "hidden",
             },
             "routes": crate::ui::pages::routes(spec.page, cx).map(|routes| routes.version),
+            "icon": format!("{:?}", spec.icon),
+            "layout": if crate::ui::pages::edge_to_edge(spec.page, cx) { "workspace" } else { "document" },
+            "companion": !crate::ui::pages::solo(spec.page, cx),
+            "handlesNavigation": crate::ui::pages::settles(spec.page, cx),
+            "primary": !matches!(spec.placement, Placement::Hidden),
         })).collect::<Vec<_>>(),
         "panels": crate::ui::channel_panels::all(cx).iter().map(|panel| json!({
             "key": panel.key,

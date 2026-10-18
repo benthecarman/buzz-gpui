@@ -73,7 +73,7 @@ async fn read(
     workflows: &Workflows,
     channel: String,
 ) -> Result<(Vec<WorkflowDefinition>, Value), Failure> {
-    read_in(workflows, vec![channel]).await
+    read_in(workflows, vec![channel], false).await
 }
 
 /// The workflows of `channels`: one channel, or a batch of up to 128 read
@@ -81,8 +81,8 @@ async fn read(
 async fn read_in(
     workflows: &Workflows,
     channels: Vec<String>,
+    aggregate: bool,
 ) -> Result<(Vec<WorkflowDefinition>, Value), Failure> {
-    let aggregate = channels.len() > 1;
     let view = workflows
         .definitions(channels, aggregate)
         .map_err(|error| (2, error))?;
@@ -131,6 +131,8 @@ fn named(
 /// workflow definitions.
 pub fn list(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
+    // A `channels` list, even of one, is read to the end.
+    let aggregate = params.get("channels").is_some_and(Value::is_array);
     let channels = match params.get("channels").and_then(Value::as_array) {
         Some(channels) => {
             let community = community.read(cx);
@@ -144,7 +146,7 @@ pub fn list(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
     let workflows = community.read(cx).session.workflows().clone();
     Ok(on_tokio(cx, async move {
         let available = availability(workflows.availability());
-        let (_, mut answer) = read_in(&workflows, channels).await?;
+        let (_, mut answer) = read_in(&workflows, channels, aggregate).await?;
         answer["available"] = available;
         Ok(answer)
     }))

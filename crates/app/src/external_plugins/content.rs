@@ -233,13 +233,17 @@ pub fn save_details(params: &Value, cx: &App) -> Result<Task<Result<Value, Failu
                 .collect(),
         ),
     };
+    // The whole draft, as buzz-app validates it: a missing field would
+    // clear the description or make a private channel public.
     let draft = DetailsDraft {
         name: name.to_owned(),
-        description: text(given, "description").unwrap_or_default().to_owned(),
+        description: text(given, "description")
+            .ok_or_else(|| invalid("details.description is required (empty clears it)"))?
+            .to_owned(),
         private: given
             .get("private")
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .ok_or_else(|| invalid("details.private is required"))?,
         ttl: given.get("ttlSeconds").and_then(Value::as_u64),
         labels,
     };
