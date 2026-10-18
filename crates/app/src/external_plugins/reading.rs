@@ -29,11 +29,7 @@ fn counts(unread: &UnreadCounts) -> Value {
                     "threads": channel.threads,
                     "manual": channel.manual != Default::default(),
                     // Which mark: this device's, or one synced from another.
-                    "manualKind": match channel.manual {
-                        buzz_relay_client::unread::Manual::None => "none",
-                        buzz_relay_client::unread::Manual::LocalOnly => "local-only",
-                        buzz_relay_client::unread::Manual::Remote => "remote",
-                    },
+                    "manualKind": manual(channel.manual),
                     "latestAt": unread.latest.get(id),
                     "preview": unread.previews.get(id),
                     "stale": channel.stale,
@@ -353,6 +349,89 @@ pub fn watch_inbox(
         }
     });
     Ok((Watch::new((), forward), json!({})))
+}
+
+fn manual(manual: buzz_relay_client::unread::Manual) -> &'static str {
+    match manual {
+        buzz_relay_client::unread::Manual::None => "none",
+        buzz_relay_client::unread::Manual::LocalOnly => "local-only",
+        buzz_relay_client::unread::Manual::Remote => "remote",
+    }
+}
+
+/// `unread/watchTargets`: sends `unread/targetsChanged` with the unread
+/// state of some threads and messages of one channel, as a view showing
+/// them sees it (`unread.snapshot` and `subscribe` for thread and
+/// message targets), now and whenever it changes.
+pub fn watch_targets(
+    params: &Value,
+    notify: impl Fn(Value, &mut App) + 'static,
+    cx: &mut App,
+) -> Result<(Watch, Value), Failure> {
+    const MAX_TARGETS: usize = 500;
+    let community = community(cx)?;
+    let channel = channel(params, community.read(cx))?;
+    let ids = |key: &str| -> Result<Vec<EventId>, Failure> {
+        let Some(list) = params.get(key).filter(|list| !list.is_null()) else {
+            return Ok(Vec::new());
+        };
+        let list = list
+            .as_array()
+            .filter(|list| list.len() <= MAX_TARGETS)
+            .ok_or_else(|| invalid(format!("{key} is a list of at most {MAX_TARGETS} ids")))?;
+        list.iter()
+            .map(|id| {
+                id.as_str()
+                    .and_then(|hex| EventId::from_hex(hex).ok())
+                    .ok_or_else(|| invalid(format!("{key} holds event ids")))
+            })
+            .collect()
+    };
+    let (threads, messages) = (ids("threads")?, ids("messages")?);
+    let watch = community.read(cx).session.watch_unread(&channel);
+    watch.set(threads, messages);
+    let mut receiver = watch.snapshot.clone();
+    let (sender, mut changes) = futures::channel::mpsc::unbounded::<Value>();
+    let json_channel = channel.clone();
+    crate::runtime::Runtime::handle(cx).spawn(async move {
+        loop {
+            let detail = receiver.borrow_and_update().clone();
+            let mut unread: Vec<String> = detail.unread.iter().map(EventId::to_hex).collect();
+            let mut forced: Vec<String> = detail.forced.iter().map(EventId::to_hex).collect();
+            unread.sort();
+            forced.sort();
+            let threads: serde_json::Map<String, Value> = detail
+                .threads
+                .iter()
+                .map(|(root, thread)| {
+                    (
+                        root.to_hex(),
+                        json!({
+                            "manual": manual(thread.manual),
+                            "observed": thread.observed,
+                            "stale": thread.stale,
+                        }),
+                    )
+                })
+                .collect();
+            let value = json!({
+                "channel": json_channel,
+                "threads": threads,
+                "unread": unread,
+                "forced": forced,
+            });
+            if sender.unbounded_send(value).is_err() || receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    });
+    let forward = cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        while let Some(value) = changes.next().await {
+            cx.update(|cx| notify(value, cx));
+        }
+    });
+    Ok((Watch::new(watch, forward), json!({ "channel": channel })))
 }
 
 /// What a saved read mark answers (`ReadMutationResult`): it is saved

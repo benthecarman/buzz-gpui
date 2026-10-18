@@ -607,6 +607,12 @@ pub struct ActionDecl {
     /// Only messages in these channels.
     #[serde(default)]
     pub channels: Vec<String>,
+    /// Only messages by these people (pubkeys), such as your agents.
+    #[serde(default)]
+    pub authors: Vec<String>,
+    /// Only messages with (`true`) or without (`false`) reactions.
+    #[serde(default)]
+    pub reactions: Option<bool>,
 }
 
 /// Draws link chips for URLs with these prefixes.
@@ -844,6 +850,16 @@ impl Contributions {
             {
                 return Err(format!(
                     "“{}” needs a pattern of at most 500 characters that compiles.",
+                    action.id
+                ));
+            }
+            if action.authors.len() > 500
+                || action.authors.iter().any(|author| {
+                    author.len() != 64 || !author.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            {
+                return Err(format!(
+                    "“{}”'s authors must be at most 500 pubkeys.",
                     action.id
                 ));
             }

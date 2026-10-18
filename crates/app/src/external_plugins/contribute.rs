@@ -921,6 +921,9 @@ struct Action {
     replies: Option<bool>,
     pattern: Option<regex::Regex>,
     channels: Vec<String>,
+    /// Lowercase pubkeys.
+    authors: Vec<String>,
+    reactions: Option<bool>,
 }
 
 impl MessageAction for Action {
@@ -954,6 +957,10 @@ impl MessageAction for Action {
                     .channels
                     .iter()
                     .any(|channel| **channel == *row.channel))
+            && (self.authors.is_empty() || self.authors.contains(&row.author.to_hex()))
+            && self
+                .reactions
+                .is_none_or(|wanted| wanted == !row.reactions.is_empty())
     }
 
     fn run(&self, row: &Arc<MessageRow>, _: &mut Window, cx: &mut App) {
@@ -1740,6 +1747,12 @@ pub fn register(
                 .as_deref()
                 .and_then(|pattern| regex::Regex::new(pattern).ok()),
             channels: action.channels.clone(),
+            authors: action
+                .authors
+                .iter()
+                .map(|author| author.to_ascii_lowercase())
+                .collect(),
+            reactions: action.reactions,
         }));
         added.push(Added::Renderer(action_key));
     }

@@ -154,7 +154,7 @@ The rest of the result can list:
 | --- | --- | --- |
 | `settingsCards` | `id`, `title`, `icon`, `placement`: `community`, `administration` or a group name (default `Integrations`) | A Settings section. It is a view with `kind` `settings`; its `view/open` carries the selected `community`'s relay. |
 | `notifications` | `id`, `label` | A category with its own switch in Settings → Notifications. Send with `notifications/submit`. |
-| `messageActions` | `id`, `title`, `icon`, `kinds` (default chat messages), and filters in place of buzz-app's `matches(message)`: `mine`, `attachments` (`true` or `false`), `replies` (`true` for thread replies, `false` for top-level messages), `pattern` (a regular expression the text must match, up to 500 characters), `channels` (channel ids) | An item in a message's More menu, on the messages every filter allows. Choosing it sends `message/action`. |
+| `messageActions` | `id`, `title`, `icon`, `kinds` (default chat messages), and filters in place of buzz-app's `matches(message)`: `mine`, `attachments` (`true` or `false`), `replies` (`true` for thread replies, `false` for top-level messages), `pattern` (a regular expression the text must match, up to 500 characters), `channels` (channel ids), `authors` (up to 500 pubkeys, such as your agents), `reactions` (`true` or `false`) | An item in a message's More menu, on the messages every filter allows. Choosing it sends `message/action`. |
 | `linkRenderers` | `id`, `title` (optional), `matches` (link prefixes), `order` | Draws the chip of matching links in messages. Buzz asks with `link/render`. |
 | `messageRenderers` | `id`, `title` (optional), `kinds` (default chat messages), `prefix` (optional), `order` | Draws the body of matching messages. Buzz asks with `message/render`, once per message and edit; answer `null` to leave a message to Buzz, as a buzz-app `matches()` that declines. Without a `prefix` it is asked about every message of its kinds. |
 | `attachmentRenderers` | `id`, `title` (optional), `mime` (MIME type prefixes) | Draws matching attachments, as buzz-app does: audio hosted by the community in messages, in place of the audio player; a voice note being recorded into the composer; and any draft in its preview. A draft not uploaded yet has a local `url` (`draft-audio:`, `voice-draft:` or `draft-file:`) that `media/get` reads. Buzz asks with `attachment/render`. Images, videos and files in messages keep Buzz's own views, and voice notes keep the Voice Notes plugin's card while it is on. |
@@ -468,7 +468,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `channels/resolve` | `ids` (1 to 50) | The channels you may read among `ids`, joined or not (`channels.get`, `resolve`, `describe`). |
 | `channels/members` | `channel` | `{"channel","version","canManage","members"}`: each member `{"pubkey","role","canManage","canRemove"}`, read fresh from the relay-signed roster. `role` is `owner`, `admin`, `member`, `guest`, `bot` or `unknown`, the `expected` that `channels/changeMember` takes; `canRemove` also covers your own agents. |
 | `channels/lifecycle` | `channel` | `{"channelType","canArchive","canUnarchive","canDelete","canLeave","canHide","leaveReason","deleteUnavailable"}`: what you may do to the channel as a whole (`channelLifecycle.load`), read fresh, with its `channelType` (`stream`, `forum` or `dm`). |
-| `session/watch` | `what`: `channels`, `channelList`, `sidebar`, `sync`, `creation`, `presence`, `emoji`, `profiles` (with `pubkeys`, at most 500, read if not loaded), or `typing` (with a `channel`, and a `root` for one thread) or `activity` with a `channel` | `{"watch"}`. Buzz then sends `session/changed` with `what` and `value` (as `community/channels`, `channels/list`, `sidebar/get`, `unread/sync`, `channels/creation`, `presence/get`, `emoji/list`, `profiles/get`, `typing/get` with `channel` and `anywhere` or a thread's `thread`, or `threads/activity`), now and whenever it changes. Stop with `session/unwatch`. |
+| `session/watch` | `what`: `channels`, `channelList`, `sidebar`, `sync`, `creation`, `archives`, `statuses` (with `pubkeys`, at most 500, followed as `statuses.watch` does), `presence`, `emoji`, `profiles` (with `pubkeys`, at most 500, read if not loaded), or `typing` (with a `channel`, and a `root` for one thread) or `activity` with a `channel` | `{"watch"}`. Buzz then sends `session/changed` with `what` and `value` (as `community/channels`, `channels/list`, `sidebar/get`, `unread/sync`, `channels/creation`, `agents/choices`'s `archives`, `statuses/get`, `presence/get`, `emoji/list`, `profiles/get`, `typing/get` with `channel` and `anywhere` or a thread's `thread`, or `threads/activity`), now and whenever it changes. Stop with `session/unwatch`. |
 | `channel/messages` | `channel`, `limit` (default 50, at most 200), `membership` (optional: include join, leave and removal rows, each with `membership` `{"type","actor","target"}`) | `{"channel","messages","hasMore","status","loadingOlder","historyLimited","restored","stale","error"}`, the newest messages, oldest first (`ChannelWindow`). `status` is `loading`, `ready` or `error`; `loadingOlder` says older history is on its way; `historyLimited` that the relay keeps no more; `restored` that the rows came from this device. `stale` is true when the relay has not yet confirmed rows saved on this device. For older history, use `events/query` with `until`. |
 | `thread/messages` | `channel`, `root` (or `message`, any message in the thread), `exact` (optional: fold the thread around `message` on its own evidence, as a link to one reply does) | `{"channel","root","replies","hasMore","limited","status","direction","readKind","target","targetStatus","error"}`: `status` is `idle`, `loading`, `ready` or `error`; `direction` how the loaded range grows (`older`, newest first, or `forward`, oldest first); `readKind` the read in flight or that last failed (`older` or `refresh`); `limited` when more exists than a view holds; with `exact`, `target` is that message and `targetStatus` `loading`, `ready`, `unavailable` or `error` |
 | `channel/watch` | `channel`, `limit`, `membership` | `{"watch","channel"}`. Buzz then sends `channel/changed` (below). `watch/more` loads older history into it. |
@@ -477,7 +477,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `watch/more` | `watch` (a channel or thread watch) | `true` when it asked for more: older messages for a channel watch, whose `limit` also grows by 50 (to 1,000), or the rest of a thread (`loadMore`, `loadOlder`); `false` for a watch with nothing to load. |
 | `events/watch` | `filters` (as `events/query` takes, without the read extensions) | `{"watch"}`. Buzz then sends `events/live` with `events`, the live events that match, from now on, and `channel`, the channel whose live route brought them (`null` for others). |
 | `channel/unwatch`, `thread/unwatch`, `events/unwatch` | `watch` | `null`. A plugin holds at most 64 watches of every kind in all. |
-| `events/query` | `filters`: 1 to 10 NIP-01 filters of `ids`, `authors`, `kinds`, `#<letter>` tags, `since`, `until` and `limit`, plus the relay's read extensions: `search` with `search_mode` (`prefix` or `fulltext`), `page`, `feed_types`, `top_level`, `include_aux`, `include_summaries`, `before_id`, `thread_window`, `depth_limit`, `thread_cursor` and `thread_cursor_id` | The matching signed events, at most 500, read from the community as you Your own events still in the outbox that match are included, as `session.read` merges them. |
+| `events/query` | `filters`: 1 to 10 NIP-01 filters of `ids`, `authors`, `kinds`, `#<letter>` tags, `since`, `until` and `limit`, plus the relay's read extensions: `search` with `search_mode` (`prefix` or `fulltext`), `page`, `feed_types`, `top_level`, `include_aux`, `include_summaries`, `before_id`, `thread_window`, `depth_limit`, `thread_cursor` and `thread_cursor_id` | The matching signed events, at most 500, read from the community as you. Your own events still in the outbox that match are included, as `session.read` merges them. |
 | `community/info` | none | The community relay's NIP-11 document. Its `self` key signs what the relay publishes, such as rosters and the archive. |
 | `contributions/list` | none | What Buzz and its plugins added, each by its `plugin/id` `key`: `pages` (`title`, `placement`, `routes`: the route version or `null`), `panels` (`title`, `order`, `launcher`), `settings` (`title`, `visibility`: `visible`, `hidden`, `pending` or `error`), `accountActions` (`title`), `shortcuts` (plugins' only: `plugin`, `title`, `chords` as shown, `enabled`), `composerTools` and `completions` (`order`; completions also `trigger`), `accessories` (`placement`), `inlineRenderers`, `messageRenderers`, `linkRenderers`, `attachmentRenderers` and `messageActions` (with `title`). Every entry also has its `title` (the key for Buzz's own, and for a renderer that declares none) and, where it has one, its `order`. Buzz sends `contributions/changed` with the same fields when any of them changes. |
 | `contributions/update` | everything `initialize` answers (pages, panels, renderers, tools, agent types and the rest) | `null`. Replaces what the plugin contributes without restarting it: what is new is added, what is gone is taken away, and the rest stays, open views included. buzz-app plugins register and dispose contributions at any time; this is how a plugin here adds a page once it learns it needs one. |
@@ -510,9 +510,9 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `ui/openConversation` | `channel`, `message` (optional), `thread` (optional), `members` (optional, `true` to open its members) | `null`. Buzz shows the conversation. |
 | `presence/get` | `pubkeys` (at most 500) | `{"<pubkey>": "online" | "away" | "offline" | null}`, for people Buzz already follows; `null` for others |
 | `presence/watch` | `pubkeys` (at most 64) | `{"watch"}`. Buzz follows their presence, shown or not, and sends `presence/changed` with `presence` (as `presence/get` gives it) now and whenever it changes. Stop with `presence/unwatch`. |
-| `media/get` | `url` (the community's media, or a draft's local `url` from `attachment/render`), and optionally `directory` (with `name`) | `{"data","size","mime"}`: the file as base64, at most 8 MiB, fetched as you; with `directory`, `{"path"}` of the file saved there, any size. Other URLs, fetch yourself. |
+| `media/get` | `url` (the community's media, or a draft's local `url` from `attachment/render`), and optionally `size: "small"` (the relay's thumbnail, as avatars use) or `directory` (with `name`) | `{"data","size","mime"}`: the file as base64, at most 8 MiB, fetched as you; with `directory`, `{"path"}` of the file saved there, any size. Other URLs, fetch yourself. |
 | `attachment/remove` | `url` (a draft `attachment/render` called `removable`) | `true` when the draft was removed from its composer |
-| `media/url` | `url` (the community's media) | A loopback `http://127.0.0.1` URL to fetch or stream it from, any size, with ranges (`session.media`), or `null` when Buzz cannot serve it so |
+| `media/url` | `url` (the community's media), `size` (optional, `small`) | A loopback `http://127.0.0.1` URL to fetch or stream it from, any size, with ranges (`session.media`), or `null` when Buzz cannot serve it so |
 | `sidebar/get` | none | `{"status","error","loaded","cached","writable","starWritable","sortWritable","muteWritable","removeGroupWritable","starred","muted","sort","groups","assignments","sortErrors","moves","hiddenDms","meChannels"}`: your starred and muted channels, each group's sort, your saved groups `{"id","name","icon","order"}`, which group each channel is in, what can be saved now, sorts that failed `{"group","mode","error"}`, moves still saving or failed `{"channel","to","pending","error"}`, and the DMs and Me conversations the sidebar leaves out |
 | `sidebar/retryMove` | `channel` | `null`, after trying a failed move again. Needs `manage-channels`. |
 | `sidebar/dismiss` | `channel` (a failed move) or `group` (a failed sort) | `null`. Forgets the failure. |
@@ -534,6 +534,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agent/save` | `view` (an open `agentTab`), `config` (an object, the whole config) | `null` once saved |
 | `unread/get` | none | `{"channels", "mentions", "direct", "observed"}`. `channels` maps each channel with something unread to `{"unread","count","attention","mentions","threads","manual","manualKind","latestAt","preview","stale","threadsStale"}`, `manualKind` being `none`, `local-only` (this device's mark) or `remote` (synced from another device). Counts are sampled, not exact. |
 | `unread/watch` | none | `{"watch"}`. Buzz then sends `unread/changed` with the same fields, now and whenever they change. Stop with `unread/unwatch`. |
+| `unread/watchTargets` | `channel`, `threads` (roots) and `messages` (each up to 500 ids) | `{"watch","channel"}`. Buzz then sends `unread/targetsChanged` with `{"channel","threads","unread","forced"}`, now and whenever it changes: each thread's `{"manual","observed","stale"}` by root (`manual` as `manualKind`; `observed` its unread replies, `null` without evidence), the messages among `messages` that are unread, and those marked unread for this visit (`unread.snapshot` for thread and message targets). Stop with `unread/unwatch`. |
 | `unread/message` | `channel`, `message` | Whether that loaded message shows as unread now |
 | `unread/attention` | `channel`, `message` | That loaded message's attention under the badges' policy (`unread.attention`): `{"status","category","mentioned","root","pending","unread","forced","viewing"}`, `status` being `unknown`, `ineligible` or `eligible` and `category` `mention`, `direct`, `thread` or `null`; `null` before read state loads |
 | `unread/sync` | none | `{"capability","status","completeness","error"}` (`capability` `unsupported`, `read-only` or `frontier-sync`; `completeness` `unknown`, `snapshot` or `bounded`, also sent as `complete`): how read marks sync to the relay, or `null` before it is known. `unread/retrySync` tries again after a failure. |
@@ -549,12 +550,14 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `outbox/acknowledge` | `id` | `null`. Says you checked the outcome of a delivered event (`outbox.acknowledge`). |
 | `outbox/supports` | `kind` | Whether events of that kind can be signed and sent here (`outbox.supports`). |
 | `archives/get` | `refresh` (optional) | `{"archived"}`: the identities the community archived, which Buzz leaves out of mentions, member choices and search |
+| `archives/consent` | `pubkey` | How you may archive or unarchive it here (`archives.consent`): `{"auth"}` with the owner attestation of one of your agents, `{"admin":true}` by your relay role, or `null` when you may not. |
 | `archives/request` | `action` (`archive` or `unarchive`), `pubkey` | `null` once the archive shows it. Allowed for one of your agents (its owner attestation is the consent) or with a relay owner or admin role. Needs `manage-channels`. |
 | `sessions/create` | `title`, `parent` (optional session), `agents` (optional: your agents in this community) | `{"channel"}`: a new private work session, as Me starts, once the relay lists it with the agents added. Needs `manage-channels`. |
 | `sessions/memberOf` | `pubkey` | The ids of the channels that list them as a member |
 | `agents/list` | none | `{"status","error","agents","running","elsewhere","teams","types"}`: `status` is `loading`, `ready`, `error` (with `error`) or `unavailable` (no agent host), so an empty list can be told from one not read yet; the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","place","config","attentionEnabled","attention","skipped","timers"}` (`place` is `local` or `hosted`; `skipped` holds attention objects that could not be read, by slug, with the `problem`; `timers` is each timer's `armedAt`, `nextDue` and `used`); agents listed as running elsewhere (`place` `elsewhere`); your teams `{"id","name","instructions","members"}`; and the agent types `{"type","title","description","hosted"}` |
+| `agents/choices` | none | `{"status","error","pending","complete","identities","selectable","archives"}`: the agents you may pick in the selected community (`agentChoices`). `identities` are your agents its hosts run for this relay, each `{"pubkey","name","managed","managedName"}`; `selectable` leaves out the ones the community archived, and `archives` is the archive read that decided it, `{"status","archived"}`. |
 | `agents/watch` | none | `{"watch"}`. Buzz then sends `agents/changed` with what `agents/list` gives, now and whenever it changes. Stop with `agents/unwatch`. |
-| `activity/observed` | `agent` (optional) | `{"status","turns","typing","records","history","hasOlder","workingChannels"}`: what the community's activity feed shows of agents anywhere, of one agent or all. `turns` are `{"agent","turn","channel","at","state","requests"}`, and `records` (newest 200) the decrypted transcript frames of your own agents, `{"id","agent","kind","createdAt","receivedAt","historical","channels","frame"}`. |
+| `activity/observed` | `agent` (optional) | `{"status","turns","typing","records","history","hasOlder","historyOlder","historySkipped","historyAgents","trimmed","capture","workingChannels"}`: what the community's activity feed shows of agents anywhere, of one agent or all. `turns` are `{"agent","turn","channel","at","state","requests"}`, and `records` (newest 200) the decrypted transcript frames of your own agents, `{"id","agent","kind","createdAt","receivedAt","historical","channels","frame"}`. `typing` is each working agent's `{"agent","channel","root","since","expiresAt","working"}`. `historyOlder` says an older page than the newest is shown, `historySkipped` how many records it could not read and `historyAgents` whose records it holds; `trimmed` counts what left the live window, and `capture` (`unknown`, `saving`, `off` or `error`) whether the archive saves new frames. |
 | `activity/history` | `agent` (optional), `older` (optional) | `null`. Reads saved records from the archive: an agent's, older ones with `older: true`, or everyone's newest. They arrive through `activity/watch`. |
 | `archive/settings` | none | What this device saves of your agents' activity in the selected community (`ArchiveHost.settings`): `{"observer","metrics","observerDays","revision","location","path","bytes"}`. |
 | `archive/configure` | `observer`, `metrics`, `observerDays` (1 to 90), `revision` (the one read) | The saved settings, as the Settings card saves them; capture follows them. Needs `manage-agents`. |
@@ -787,11 +790,29 @@ passes a function, or reaches into the app, it works differently:
   `catchUp`) marks messages read as a plugin shows them. Here only Buzz
   draws messages, so its own views do this, including a thread a plugin
   embeds; `read/mark` covers explicit marks.
-- **Reads are snapshots.** Agent memories, workflows, runs and project
-  reads answer once rather than handing out live views. Ask again to
-  refresh, or watch the channel, thread, unread counts, Inbox, names,
-  presence, events or outbox where a change needs to be seen as it
-  happens.
+- **Reads are snapshots.** Agent memories, workflows and their runs and
+  operations, project reads, the channel kit, channel details' save
+  attempts and member changes (`pending`, `uncertain`) answer once rather
+  than handing out live views. Ask again to refresh, or watch the
+  channel, thread, unread counts, Inbox, names, presence, events, outbox
+  or a `session/watch` value where a change needs to be seen as it
+  happens. `events/query` is a read from the relay with your outbox's
+  pending events added; it does not fold in live events that arrived
+  meanwhile or your pending edits and deletions, as `session.read` does,
+  so a plugin that needs those follows `events/watch` and the outbox.
+- **Element slots in place of components.** The embedded composer and
+  message take Buzz's own controls only: there are no React slots
+  (`trailingTool`, `replyContext`, `label`, `quickControls`,
+  `overflowItems`). A plugin draws its own elements around them, and its
+  message actions show in the message's menu. Links open as everywhere
+  else in Buzz (no `onOpenLink`), the embedded composer saves its draft
+  under its `draftKey` (no `onDraftSaved` or `recoveredDraft`), and
+  editing your last message with the up arrow needs the conversation's
+  own views. An embedded message has no `alignViewer` or `day` options.
+- **Action filters are declared.** Message actions pick messages by kind,
+  author, attachments, reactions, replies, text and channel; a test that
+  needs more of the session, such as the channel's kind, goes in the
+  plugin's handling of `message/action`.
 - **Services are announced, not injected.** A buzz-app plugin `inject`s
   the services it needs and starts once they exist. Here a plugin always
   starts; `services/list` and `services/changed` say which are offered.
@@ -806,6 +827,16 @@ passes a function, or reaches into the app, it works differently:
 - There is no embedded browser (`host.browser` is `false`).
 - A plugin cannot take a community offline (`relay.disconnect`); Buzz owns
   its connections. `community/retry` and `community/clearCache` remain.
+- Some session state is not modelled: a channel list has no `coverage`,
+  `asOf` or `activityStatus`, the sidebar never reports `unsupported`,
+  read marks carry no `operationId`, and there are no agent or team
+  catalogs (NIP-AP), so `outbox/send` takes no `supersedes` and
+  `agents/choices` no `definitions` or `templates`.
+- Messages are deleted one kind-5 event each, as the relay refuses a
+  deletion that names more than one; `messages/delete` with `messages`
+  answers for each.
+- `outbox/watch` sees each send once it is queued, in place of
+  `observeSend`.
 - Some buzz-app members are other requests here: what can be written is
   `outbox/supports` for its kind (`statuses.writable`, `archives.writable`),
   a newly opened DM shows in the `channels` watch (`subscribeOpened`), a

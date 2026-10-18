@@ -720,7 +720,17 @@ fn progress_sender(cx: &App) -> Progress {
 pub fn media_url(params: &Value, cx: &App) -> Result<Value, Failure> {
     let url = text(params, "url").ok_or_else(|| invalid("url is required"))?;
     let media = community(cx)?.read(cx).session.media().clone();
-    Ok(json!(media.stream_url(url)))
+    let url = small(params, &media, url);
+    Ok(json!(media.stream_url(&url)))
+}
+
+/// With `size: "small"`, the relay's thumbnail of its own media, as
+/// avatars use (`media(url, "small")`); otherwise `url` itself.
+fn small(params: &Value, media: &buzz_relay_client::Media, url: &str) -> String {
+    match text(params, "size") {
+        Some("small") => media.thumbnail(url).unwrap_or_else(|| url.to_owned()),
+        _ => url.to_owned(),
+    }
 }
 
 /// `messages/send`'s `attachments`, as `files/upload` answered them.
@@ -1233,6 +1243,35 @@ fn session_value(what: &str, params: &Value, cx: &App) -> Result<Value, Failure>
         "sidebar" => super::channels::sidebar(cx)?,
         "sync" => super::reading::sync(false, cx)?,
         "creation" => super::channels::creation(cx)?,
+        "archives" => {
+            use crate::ui::archives::{self, Status};
+            json!({
+                "status": archives::status(&community, cx).map(|status| match status {
+                    Status::Loading => "loading",
+                    Status::Ready => "ready",
+                    Status::Error => "error",
+                }),
+                "archived": archives::archived(&community, cx),
+            })
+        }
+        "statuses" => {
+            let keys = pubkeys(params, MAX_PROFILES)?;
+            Value::Object(
+                keys.into_iter()
+                    .map(|key| {
+                        let status = snapshot.statuses.get(&key).map(|status| {
+                            json!({
+                                "text": status.text,
+                                "emoji": status.emoji,
+                                "updatedAt": status.updated_at,
+                                "expiresAt": status.expires_at,
+                            })
+                        });
+                        (key, json!(status))
+                    })
+                    .collect(),
+            )
+        }
         "profiles" => {
             let keys = pubkeys(params, MAX_PROFILES)?;
             Value::Array(
@@ -1279,8 +1318,8 @@ fn session_value(what: &str, params: &Value, cx: &App) -> Result<Value, Failure>
         }
         _ => {
             return Err(invalid(
-                "what must be channels, channelList, sidebar, sync, creation, profiles, typing, \
-                 presence, emoji or activity",
+                "what must be channels, channelList, sidebar, sync, creation, statuses, archives, \
+                 profiles, typing, presence, emoji or activity",
             ));
         }
     })
@@ -1302,6 +1341,19 @@ pub fn watch_session(
         let keys = pubkeys(&params, MAX_PROFILES)?;
         community.read(cx).session.want_profiles(keys);
     }
+    if what == "archives" {
+        crate::ui::archives::ensure(&community, false, cx);
+    }
+    // Follow the statuses asked for, as `statuses.watch` does.
+    let statuses = match what.as_str() {
+        "statuses" => Some(
+            community
+                .read(cx)
+                .session
+                .watch_statuses(&pubkeys(&params, MAX_PROFILES)?),
+        ),
+        _ => None,
+    };
     let first = session_value(&what, &params, cx)?;
     let last = std::rc::Rc::new(std::cell::RefCell::new(first.clone()));
     let notify = std::rc::Rc::new(notify);
@@ -1322,6 +1374,11 @@ pub fn watch_session(
     let subscription = cx.observe(&community, {
         let changed = changed.clone();
         move |_, cx| changed(cx)
+    });
+    // The archive is read apart from the community's snapshot.
+    let archives = (kind == "archives").then(|| {
+        let changed = changed.clone();
+        crate::ui::archives::observe(cx, move |cx| changed(cx))
     });
     // Channel creation is not part of the community's snapshot: follow
     // its own state.
@@ -1344,7 +1401,10 @@ pub fn watch_session(
     } else {
         Task::ready(())
     };
-    Ok((Watch::new(subscription, forward), json!({})))
+    Ok((
+        Watch::new((subscription, statuses, archives), forward),
+        json!({}),
+    ))
 }
 
 /// `names/get`: names as Buzz shows them, through the naming policy,
@@ -1685,6 +1745,10 @@ pub fn media(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
             "url is not the community's media; fetch it yourself",
         ));
     }
+    let url = match text(params, "directory") {
+        Some(_) => url,
+        None => small(params, &media, &url),
+    };
     // Into a folder, any size, under the sender's file name.
     if let Some(directory) = text(params, "directory") {
         let directory = std::path::PathBuf::from(directory);

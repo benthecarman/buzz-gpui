@@ -6,7 +6,7 @@ use super::capabilities::{Failure, Watch, community};
 use super::protocol::INVALID_PARAMS;
 use crate::agent_activity::observer;
 use crate::agent_activity::turns::TurnState;
-use crate::agent_activity::{FeedStatus, HistoryStatus, Snapshot};
+use crate::agent_activity::{Capture, FeedStatus, HistoryStatus, Snapshot};
 use gpui_kit::*;
 use serde_json::{Value, json};
 
@@ -43,6 +43,9 @@ fn state(snapshot: &Snapshot, agent: Option<&str>) -> Value {
             "channel": typing.channel_id,
             "root": typing.thread_root,
             "since": typing.started_at,
+            "expiresAt": typing.expires_at,
+            // Only working typing evidence is kept.
+            "working": true,
         })).collect::<Vec<_>>(),
         "records": records[start..].iter().map(|record| json!({
             "id": record.id,
@@ -62,6 +65,20 @@ fn state(snapshot: &Snapshot, agent: Option<&str>) -> Value {
             HistoryStatus::Error => "error",
         },
         "hasOlder": snapshot.has_older,
+        // A page other than the newest is shown, how many records it could
+        // not read, and whose records it holds.
+        "historyOlder": snapshot.history_older,
+        "historySkipped": snapshot.history_skipped,
+        "historyAgents": snapshot.history_agents,
+        // Records and turn states that left the live window.
+        "trimmed": snapshot.trimmed,
+        // Whether the archive saves new frames.
+        "capture": match snapshot.capture {
+            Capture::Unknown => "unknown",
+            Capture::Saving => "saving",
+            Capture::Off => "off",
+            Capture::Error => "error",
+        },
         "workingChannels": snapshot.working_channels,
     })
 }

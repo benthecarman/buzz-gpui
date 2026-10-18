@@ -449,6 +449,26 @@ pub fn request_archive(params: &Value, cx: &App) -> Result<Task<Result<Value, Fa
     }))
 }
 
+/// `archives/consent`: how you may archive or unarchive `pubkey` here
+/// (`archives.consent`): `{"auth"}`, the owner attestation of one of your
+/// agents, `{"admin": true}` by your relay role, or `null` when you may not.
+pub fn archive_consent(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let target = text(params, "pubkey")
+        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| invalid("pubkey is required"))?
+        .to_ascii_lowercase();
+    let owner = match &cx.global::<crate::community::AppState>().identity {
+        crate::community::IdentityState::Ready(identity) => identity.clone(),
+        _ => return Err((1, "You are not signed in.".to_owned())),
+    };
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        crate::agents2::cleanup::archive_consent(&session, &owner, &target)
+            .await
+            .map_err(|error| (2, error))
+    }))
+}
+
 /// `sessions/create`: a new private work session titled `title`, under
 /// `parent` if given, with `agents` (your agents in this community)
 /// added. Answers with its channel id once the relay lists it.

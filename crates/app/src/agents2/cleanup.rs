@@ -315,6 +315,32 @@ async fn request(
 
 /// Archives or unarchives `target` in `session`'s community as `owner`,
 /// which needs its owner attestation or a relay owner or admin role.
+/// How `owner` may archive or unarchive `target` in the community
+/// (`archives.consent`): `{"auth"}` with its owner attestation, `{"admin":
+/// true}` by a relay role, or `null` with no path.
+pub(crate) async fn archive_consent(
+    session: &Session,
+    owner: &Arc<Identity>,
+    target: &str,
+) -> Result<serde_json::Value, String> {
+    let authority = session
+        .snapshot()
+        .borrow()
+        .relay
+        .as_ref()
+        .map(|relay| relay.authority.clone())
+        .filter(|authority| !authority.is_empty())
+        .ok_or("This community has no archive.")?;
+    let http = RelayHttp::new(session.origin().clone(), owner.clone());
+    Ok(
+        match consent(&http, &owner.pubkey_hex(), &authority, target).await? {
+            Some(Consent::Auth(auth)) => json!({ "auth": auth }),
+            Some(Consent::Admin) => json!({ "admin": true }),
+            None => serde_json::Value::Null,
+        },
+    )
+}
+
 pub(crate) async fn set_archived(
     session: &Session,
     owner: &Arc<Identity>,

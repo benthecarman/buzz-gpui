@@ -1624,6 +1624,7 @@ impl ExternalPlugins {
             "navigation/watch" => "navigation/changed",
             "presence/watch" => "presence/changed",
             "inbox/watch" => "inbox/changed",
+            "unread/watchTargets" => "unread/targetsChanged",
             "names/watch" => "names/changed",
             "activity/watch" => "activity/changed",
             "agents/watch" => "agents/changed",
@@ -1643,6 +1644,7 @@ impl ExternalPlugins {
             "navigation/watch" => capabilities::watch_navigation(params, notify, cx),
             "presence/watch" => capabilities::watch_presence(params, notify, cx),
             "inbox/watch" => reading::watch_inbox(params, notify, cx),
+            "unread/watchTargets" => reading::watch_targets(params, notify, cx),
             "names/watch" => capabilities::watch_names(params, notify, cx),
             "activity/watch" => observed::watch(params, notify, cx),
             "agents/watch" => agents::watch(params, notify, cx),
@@ -2016,6 +2018,9 @@ impl ExternalPlugins {
             "navigation/watch" => Self::watch(path, generation, "navigation/watch", params, cx),
             "presence/watch" => Self::watch(path, generation, "presence/watch", params, cx),
             "inbox/watch" => Self::watch(path, generation, "inbox/watch", params, cx),
+            "unread/watchTargets" => {
+                Self::watch(path, generation, "unread/watchTargets", params, cx)
+            }
             "names/watch" => Self::watch(path, generation, "names/watch", params, cx),
             "activity/watch" => Self::watch(path, generation, "activity/watch", params, cx),
             "activity/observed" => Reply::Now(observed::get(params, cx)),
@@ -2051,6 +2056,7 @@ impl ExternalPlugins {
             "navigation/retry" => later(capabilities::retry_navigation(cx)),
             "outbox/get" => later(outbox::get(params, cx)),
             "archives/get" => later(channels::archives(params, cx)),
+            "archives/consent" => later(channels::archive_consent(params, cx)),
             "read/clearLocal" => later(reading::local(true, params, cx)),
             "read/markLocal" => later(reading::local(false, params, cx)),
             "sessions/memberOf" => later(channels::member_of(params, cx)),
@@ -2246,6 +2252,7 @@ impl ExternalPlugins {
             "projects/git" => later(content::git(params, cx)),
             "events/query" => later(events::query(params, cx)),
             "agents/list" => Reply::Now(agents::list(cx)),
+            "agents/choices" => Reply::Now(agents::choices(cx)),
             "services/list" => Reply::Now(Ok(cx.global::<Self>().service_list())),
             "services/subscribe" | "services/unsubscribe" => {
                 let target = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);

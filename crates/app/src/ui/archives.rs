@@ -113,6 +113,14 @@ pub fn ensure(community: &Entity<Community>, again: bool, cx: &mut App) {
     .detach();
 }
 
+/// Calls `changed` whenever any community's archive read changes.
+pub fn observe(
+    cx: &mut App,
+    mut changed: impl FnMut(&mut App) + 'static,
+) -> gpui_kit::Subscription {
+    cx.observe_global::<Archives>(move |cx| changed(cx))
+}
+
 /// The read state, if a read was asked for.
 pub fn status(community: &Entity<Community>, cx: &App) -> Option<Status> {
     let key = key(community, cx);

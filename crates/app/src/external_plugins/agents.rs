@@ -1004,6 +1004,57 @@ pub fn list(cx: &App) -> Result<Value, Failure> {
     }))
 }
 
+/// `agents/choices`: the agents you may pick in the selected community
+/// (`agentChoices`): `identities`, your agents its hosts run for this
+/// relay, and `selectable`, those minus the ones the community archived,
+/// with the archive read that decided it.
+pub fn choices(cx: &mut App) -> Result<Value, Failure> {
+    use crate::agents2::Status;
+    use crate::ui::archives::{self, Status as Archive};
+    let community = super::capabilities::community(cx)?;
+    archives::ensure(&community, false, cx);
+    let origin = community.read(cx).origin.clone();
+    let (status, error) = match agents2(cx)?.read(cx).status() {
+        Status::Unavailable => ("unavailable", None),
+        Status::Loading => ("loading", None),
+        Status::Ready => ("ready", None),
+        Status::Error(error) => ("error", Some(error.clone())),
+    };
+    let mut seen = std::collections::HashSet::new();
+    let identities: Vec<(String, String)> = crate::ui::identity::AgentLibrary::from_hosts(cx)
+        .agents
+        .into_iter()
+        .filter(|(_, _, relay)| {
+            buzz_relay_client::RelayOrigin::parse(relay).is_ok_and(|other| other == origin)
+        })
+        .filter(|(key, _, _)| seen.insert(key.clone()))
+        .map(|(key, name, _)| (key, name))
+        .collect();
+    let choice = |(pubkey, name): &(String, String)| json!({ "pubkey": pubkey, "name": name, "managed": true, "managedName": name });
+    let archive = archives::status(&community, cx);
+    Ok(json!({
+        "status": status,
+        "error": error,
+        "pending": status == "loading",
+        "complete": status == "ready",
+        "identities": identities.iter().map(choice).collect::<Vec<_>>(),
+        "selectable": identities
+            .iter()
+            .filter(|(pubkey, _)| !archives::hides(&community, pubkey, cx))
+            .map(choice)
+            .collect::<Vec<_>>(),
+        "archives": {
+            "status": match archive {
+                None => "idle",
+                Some(Archive::Loading) => "loading",
+                Some(Archive::Ready) => "ready",
+                Some(Archive::Error) => "error",
+            },
+            "archived": archives::archived(&community, cx),
+        },
+    }))
+}
+
 /// `agents/watch`: sends `agents/changed` with what `agents/list` gives,
 /// now and whenever it changes.
 pub fn watch(
