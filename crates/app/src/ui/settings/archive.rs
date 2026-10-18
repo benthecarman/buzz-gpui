@@ -76,6 +76,48 @@ fn partition(community: &Entity<Community>, cx: &App) -> (String, String) {
     )
 }
 
+/// The viewer's archive settings in `community`, and where the archive
+/// is (`ArchiveHost.settings`), for plugins.
+pub(crate) fn settings_for(
+    community: &Entity<Community>,
+    cx: &mut App,
+) -> Result<(ArchiveSettings, std::path::PathBuf), String> {
+    let (viewer, key) = partition(community, cx);
+    let archive = open(cx)?;
+    Ok((
+        archive.settings(&viewer, &key)?,
+        archive.path().to_path_buf(),
+    ))
+}
+
+/// Saves archive settings, as the card does, then captures under them.
+pub(crate) fn configure_for(
+    community: &Entity<Community>,
+    observer: bool,
+    metrics: bool,
+    observer_days: u32,
+    revision: i64,
+    cx: &mut App,
+) -> Result<ArchiveSettings, String> {
+    let (viewer, key) = partition(community, cx);
+    let saved = open(cx)?.configure(&viewer, &key, observer, metrics, observer_days, revision)?;
+    recapture(community, cx);
+    Ok(saved)
+}
+
+/// Clears saved records of `kind` (or all), as the card does.
+pub(crate) fn clear_for(
+    community: &Entity<Community>,
+    kind: Option<u16>,
+    cx: &mut App,
+) -> Result<(), String> {
+    let (viewer, key) = partition(community, cx);
+    open(cx)?.clear(&viewer, &key, kind)?;
+    // Clearing moves the revision; capture follows it.
+    recapture(community, cx);
+    Ok(())
+}
+
 /// [`capture`] again after the settings changed.
 fn recapture(community: &Entity<Community>, cx: &mut App) {
     if let IdentityState::Ready(identity) = &cx.global::<AppState>().identity {

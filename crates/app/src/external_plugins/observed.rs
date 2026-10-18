@@ -3,6 +3,7 @@
 //! live and from the archive. Only an agent's owner can read its records.
 
 use super::capabilities::{Failure, Watch, community};
+use super::protocol::INVALID_PARAMS;
 use crate::agent_activity::observer;
 use crate::agent_activity::turns::TurnState;
 use crate::agent_activity::{FeedStatus, HistoryStatus, Snapshot};
@@ -121,4 +122,74 @@ pub fn watch(
         }
     });
     Ok((Watch::new(subscription, Task::ready(())), json!({})))
+}
+
+fn archive_json(
+    settings: &buzz_relay_client::archive::ArchiveSettings,
+    path: &std::path::Path,
+) -> Value {
+    json!({
+        "observer": settings.observer,
+        "metrics": settings.metrics,
+        "observerDays": settings.observer_days,
+        "revision": settings.revision,
+        "location": "device",
+        "path": path,
+        "bytes": settings.bytes,
+    })
+}
+
+/// `archive/settings`: what this device saves of your agents' activity
+/// in the selected community (`ArchiveHost.settings`).
+pub fn archive_settings(cx: &mut App) -> Result<Value, Failure> {
+    let community = community(cx)?;
+    let (settings, path) =
+        crate::ui::settings::archive::settings_for(&community, cx).map_err(|error| (3, error))?;
+    Ok(archive_json(&settings, &path))
+}
+
+/// `archive/configure`: saves what to keep (`ArchiveHost.configure`);
+/// `revision` must be the one read, so a change made meanwhile wins.
+pub fn archive_configure(params: &Value, cx: &mut App) -> Result<Value, Failure> {
+    let community = community(cx)?;
+    let flag = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_bool)
+            .ok_or_else(|| (INVALID_PARAMS, format!("{key} must be true or false")))
+    };
+    let days = params
+        .get("observerDays")
+        .and_then(Value::as_u64)
+        .and_then(|days| u32::try_from(days).ok())
+        .ok_or((INVALID_PARAMS, "observerDays is required".to_owned()))?;
+    let revision = params
+        .get("revision")
+        .and_then(Value::as_i64)
+        .ok_or((INVALID_PARAMS, "revision is required".to_owned()))?;
+    let saved = crate::ui::settings::archive::configure_for(
+        &community,
+        flag("observer")?,
+        flag("metrics")?,
+        days,
+        revision,
+        cx,
+    )
+    .map_err(|error| (3, error))?;
+    let (_, path) =
+        crate::ui::settings::archive::settings_for(&community, cx).map_err(|error| (3, error))?;
+    Ok(archive_json(&saved, &path))
+}
+
+/// `archive/clear`: deletes saved activity (`kind` 44200), metrics
+/// (24200), or both (`ArchiveHost.clear`, buzz-app's `clearHistory`).
+pub fn archive_clear(params: &Value, cx: &mut App) -> Result<Value, Failure> {
+    let community = community(cx)?;
+    let kind = match params.get("kind").and_then(Value::as_u64) {
+        None => None,
+        Some(kind @ (24200 | 44200)) => Some(kind as u16),
+        Some(_) => return Err((INVALID_PARAMS, "kind is 24200 or 44200".to_owned())),
+    };
+    crate::ui::settings::archive::clear_for(&community, kind, cx).map_err(|error| (3, error))?;
+    Ok(Value::Null)
 }

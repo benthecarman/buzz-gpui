@@ -550,6 +550,9 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agents/watch` | none | `{"watch"}`. Buzz then sends `agents/changed` with what `agents/list` gives, now and whenever it changes. Stop with `agents/unwatch`. |
 | `activity/observed` | `agent` (optional) | `{"status","turns","typing","records","history","hasOlder","workingChannels"}`: what the community's activity feed shows of agents anywhere, of one agent or all. `turns` are `{"agent","turn","channel","at","state","requests"}`, and `records` (newest 200) the decrypted transcript frames of your own agents, `{"id","agent","kind","createdAt","receivedAt","historical","channels","frame"}`. |
 | `activity/history` | `agent` (optional), `older` (optional) | `null`. Reads saved records from the archive: an agent's, older ones with `older: true`, or everyone's newest. They arrive through `activity/watch`. |
+| `archive/settings` | none | What this device saves of your agents' activity in the selected community (`ArchiveHost.settings`): `{"observer","metrics","observerDays","revision","location","path","bytes"}`. |
+| `archive/configure` | `observer`, `metrics`, `observerDays` (1 to 90), `revision` (the one read) | The saved settings, as the Settings card saves them; capture follows them. Needs `manage-agents`. |
+| `archive/clear` | `kind` (optional: 44200 for activity, 24200 for metrics; both without it) | `null`, after deleting the saved records (`clearHistory`). Needs `manage-agents`. |
 | `activity/watch` | `agent` (optional) | `{"watch"}`. Buzz then sends `activity/changed` with what `activity/observed` gives, now and whenever it changes. Stop with `activity/unwatch`. |
 | `agents/dismissError` | `agent`, `message` | `null`, after hiding that failed run's error on this device |
 | `agents/clearActivity` | `agent` (optional) | `null`, after forgetting what agents on this device did, of one agent or all |

@@ -2003,6 +2003,21 @@ impl ExternalPlugins {
             "activity/watch" => Self::watch(path, generation, "activity/watch", params, cx),
             "activity/observed" => Reply::Now(observed::get(params, cx)),
             "activity/history" => Reply::Now(observed::history(params, cx)),
+            "archive/settings" => Reply::Now(observed::archive_settings(cx)),
+            "archive/configure" | "archive/clear" => {
+                let allowed = cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .is_some_and(|plugin| plugin.may(Permission::ManageAgents));
+                Reply::Now(match (allowed, method) {
+                    (false, _) => Err((
+                        FORBIDDEN,
+                        "Declare the manage-agents permission in buzz-plugin.json.".to_owned(),
+                    )),
+                    (true, "archive/configure") => observed::archive_configure(params, cx),
+                    (true, _) => observed::archive_clear(params, cx),
+                })
+            }
             "media/get" => later(capabilities::media(params, cx)),
             "media/url" => Reply::Now(capabilities::media_url(params, cx)),
             "community/clearCache" => later(capabilities::community(cx).map(|community| {

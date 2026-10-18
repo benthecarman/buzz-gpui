@@ -5,7 +5,7 @@
 mod about;
 mod agents;
 mod appearance;
-mod archive;
+pub(crate) mod archive;
 pub(crate) mod avatar;
 pub mod cards;
 mod communities;
