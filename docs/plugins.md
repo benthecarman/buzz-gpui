@@ -734,8 +734,15 @@ passes a function, or reaches into the app, it works differently:
   embeds; `read/mark` covers explicit marks.
 - **Reads are snapshots.** Agent memories, workflows, runs and project
   reads answer once rather than handing out live views. Ask again to
-  refresh, or watch the channel, thread, unread counts, events or outbox
-  where a change needs to be seen as it happens.
+  refresh, or watch the channel, thread, unread counts, Inbox, names,
+  presence, events or outbox where a change needs to be seen as it
+  happens.
+- **Services are announced, not injected.** A buzz-app plugin `inject`s
+  the services it needs and starts once they exist. Here a plugin always
+  starts; `services/list` and `services/changed` say which are offered.
+- **A run ends when the plugin answers.** buzz-app's `workingUntil` keeps
+  a run open past its answer. Here the plugin answers, then opens a call
+  as the same agent with `agent/open` and keeps acting through it.
 - **Hosted agents have no unfinished state.** Making a hosted agent
   finishes or fails as a whole.
 - Buzz draws a panel's channel-header launcher from its `icon` and `label`,
