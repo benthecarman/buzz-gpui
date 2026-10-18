@@ -22,6 +22,8 @@ use std::time::Duration;
 
 /// How long a read waits for the relay.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a read waits for the relay to confirm rows shown from disk.
+const FRESH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Most messages one answer carries.
 pub const MAX_MESSAGES: usize = 200;
 const DEFAULT_MESSAGES: usize = 50;
@@ -205,6 +207,7 @@ pub fn timeline(snapshot: &TimelineSnapshot, limit: usize, profiles: &Profiles) 
         "channel": snapshot.channel,
         "messages": rows[start..].iter().map(|row| message(row, profiles)).collect::<Vec<_>>(),
         "hasMore": snapshot.has_more || start > 0,
+        "stale": snapshot.stale,
         "error": match &snapshot.status {
             TimelineStatus::Error(error) => Some(error.clone()),
             _ => None,
@@ -283,6 +286,14 @@ pub fn channel_messages(params: &Value, cx: &App) -> Result<Task<Result<Value, F
     let wait = on_runtime(cx, async move {
         let view = session.open_channel(&channel);
         let mut snapshot = view.snapshot.clone();
+        // A head restored from disk is ready before the relay confirms
+        // it; wait a while for the relay's read, then answer with what
+        // there is.
+        let fresh = snapshot.wait_for(|timeline| {
+            timeline.status != TimelineStatus::Loading
+                && (!timeline.stale || timeline.error.is_some())
+        });
+        let _ = tokio::time::timeout(FRESH_TIMEOUT, fresh).await;
         let ready = snapshot
             .wait_for(|timeline| timeline.status != TimelineStatus::Loading)
             .await

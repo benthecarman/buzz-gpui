@@ -441,7 +441,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `community/clearCache` | none | `null`, after forgetting the conversations Buzz saved of the community, here and on disk, as Clear cache in Settings does. Open channels load again. |
 | `community/channels` | none | The selected community's channels: `[{"id","name","description","private","archived","kind","members","labels","lastActivityAt","readOnly","creator","createdAt","parent"}]`, where `kind` is `stream`, `forum`, `dm` or `session` |
 | `session/watch` | `what`: `channels`, `presence`, `emoji`, or `typing` or `activity` with a `channel` | `{"watch"}`. Buzz then sends `session/changed` with `what` and `value` (as `community/channels`, `presence/get`, `emoji/list`, `typing/get` with `channel` and `anywhere`, or `threads/activity`'s `items`), now and whenever it changes. Stop with `session/unwatch`. |
-| `channel/messages` | `channel`, `limit` (default 50, at most 200) | `{"channel","messages","hasMore","error"}`, the newest messages, oldest first. For older history, use `events/query` with `until`. |
+| `channel/messages` | `channel`, `limit` (default 50, at most 200) | `{"channel","messages","hasMore","stale","error"}`, the newest messages, oldest first. `stale` is true when the relay has not yet confirmed rows saved on this device. For older history, use `events/query` with `until`. |
 | `thread/messages` | `channel`, `root` | `{"root","replies","hasMore"}` |
 | `channel/watch` | `channel`, `limit` | `{"watch","channel"}`. Buzz then sends `channel/changed` (below). |
 | `thread/watch` | `channel`, `root` | `{"watch","channel","root"}`. Buzz then sends `thread/changed` with `root`, `replies`, `hasMore` and `error`, now and whenever the thread changes. |
