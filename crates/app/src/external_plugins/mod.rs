@@ -1818,7 +1818,8 @@ impl ExternalPlugins {
             | "sidebar/mute"
             | "sidebar/sort"
             | "sidebar/assign"
-            | "sidebar/removeGroup" => {
+            | "sidebar/removeGroup"
+            | "archives/request" => {
                 let permission = match method {
                     "events/publish" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
@@ -1840,7 +1841,8 @@ impl ExternalPlugins {
                     | "sidebar/mute"
                     | "sidebar/sort"
                     | "sidebar/assign"
-                    | "sidebar/removeGroup" => Permission::ManageChannels,
+                    | "sidebar/removeGroup"
+                    | "archives/request" => Permission::ManageChannels,
                     _ => Permission::SendMessages,
                 };
                 let allowed = cx
@@ -1890,6 +1892,7 @@ impl ExternalPlugins {
                     "kit/save" => content::save_kit(params, cx),
                     "workflows/dismiss" => workflows::dismiss(params, cx),
                     "sessions/create" => channels::create_session(params, cx),
+                    "archives/request" => channels::request_archive(params, cx),
                     "sidebar/star"
                     | "sidebar/mute"
                     | "sidebar/sort"

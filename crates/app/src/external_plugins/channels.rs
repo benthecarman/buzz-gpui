@@ -360,6 +360,33 @@ pub fn archives(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failu
     }))
 }
 
+/// `archives/request`: archives or unarchives an identity in the
+/// community (`archives.request`), with its owner attestation when it is
+/// one of your agents, or your relay owner or admin role. Answers once
+/// the archive shows it.
+pub fn request_archive(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let archive = match text(params, "action") {
+        Some("archive") => true,
+        Some("unarchive") => false,
+        _ => return Err(invalid("action must be archive or unarchive")),
+    };
+    let target = text(params, "pubkey")
+        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| invalid("pubkey is required"))?
+        .to_ascii_lowercase();
+    let owner = match &cx.global::<crate::community::AppState>().identity {
+        crate::community::IdentityState::Ready(identity) => identity.clone(),
+        _ => return Err((1, "You are not signed in.".to_owned())),
+    };
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        crate::agents2::cleanup::set_archived(&session, &owner, &target, archive)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
 /// `sessions/create`: a new private work session titled `title`, under
 /// `parent` if given, with `agents` (your agents in this community)
 /// added. Answers with its channel id once the relay lists it.

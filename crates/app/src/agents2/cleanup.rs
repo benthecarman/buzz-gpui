@@ -227,15 +227,47 @@ async fn archive(
     authority: &str,
     agent: &str,
 ) -> Result<(), String> {
-    if archived(http, authority, agent).await? == Archived::Yes {
-        return Ok(());
-    }
     // Without an owner-attested profile the agent is not in the directory,
     // so there is nothing to hide.
-    let Some(path) = consent(http, &owner.pubkey_hex(), authority, agent).await? else {
+    match request(http, owner, authority, agent, true).await {
+        Err(Refusal::NoConsent) => Ok(()),
+        Err(Refusal::Failed(error)) => Err(error),
+        Ok(()) => Ok(()),
+    }
+}
+
+enum Refusal {
+    /// Neither the target's owner attestation nor a relay role allows it.
+    NoConsent,
+    Failed(String),
+}
+
+/// Archives (9035) or unarchives (9036) `target` as `owner`, with its owner
+/// attestation or the owner's relay role as consent, and answers once the
+/// relay's archive shows it (`archives.request`).
+async fn request(
+    http: &RelayHttp,
+    owner: &Arc<Identity>,
+    authority: &str,
+    target: &str,
+    archive: bool,
+) -> Result<(), Refusal> {
+    let wanted = if archive { Archived::Yes } else { Archived::No };
+    if archived(http, authority, target)
+        .await
+        .map_err(Refusal::Failed)?
+        == wanted
+    {
         return Ok(());
-    };
-    let mut tags = vec![vec!["-".to_owned()], vec!["p".to_owned(), agent.to_owned()]];
+    }
+    let path = consent(http, &owner.pubkey_hex(), authority, target)
+        .await
+        .map_err(Refusal::Failed)?
+        .ok_or(Refusal::NoConsent)?;
+    let mut tags = vec![
+        vec!["-".to_owned()],
+        vec!["p".to_owned(), target.to_owned()],
+    ];
     if let Consent::Auth(auth) = path {
         tags.push(auth);
     }
@@ -243,13 +275,15 @@ async fn archive(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let kind = if archive { 9035 } else { 9036 };
+    let failed = |error: String| Refusal::Failed(error);
     let unsigned = owner
-        .template(Purpose::Content, 9035, now, tags, String::new())
-        .map_err(|error| error.to_string())?;
+        .template(Purpose::Content, kind, now, tags, String::new())
+        .map_err(|error| failed(error.to_string()))?;
     let signed = owner
         .sign(Purpose::Content, unsigned)
-        .map_err(|error| error.to_string())?;
-    let body = serde_json::to_string(&signed).map_err(|error| error.to_string())?;
+        .map_err(|error| failed(error.to_string()))?;
+    let body = serde_json::to_string(&signed).map_err(|error| failed(error.to_string()))?;
     let uncertain = match http.post("/events", body).await {
         Ok(receipt) => {
             let receipt: Value = serde_json::from_slice(&receipt).unwrap_or(Value::Null);
@@ -258,16 +292,50 @@ async fn archive(
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("refused");
-                return Err(format!("The relay refused the archive request: {reason}"));
+                return Err(failed(format!(
+                    "The relay refused the archive request: {reason}"
+                )));
             }
             None
         }
         Err(error) => Some(error.to_string()),
     };
-    match archived(http, authority, agent).await? {
-        Archived::Yes => Ok(()),
-        Archived::No => {
-            Err(uncertain.unwrap_or_else(|| "The relay did not confirm the change. Retry.".into()))
-        }
+    if archived(http, authority, target)
+        .await
+        .map_err(Refusal::Failed)?
+        == wanted
+    {
+        Ok(())
+    } else {
+        Err(failed(uncertain.unwrap_or_else(|| {
+            "The relay did not confirm the change. Retry.".into()
+        })))
     }
+}
+
+/// Archives or unarchives `target` in `session`'s community as `owner`,
+/// which needs its owner attestation or a relay owner or admin role.
+pub(crate) async fn set_archived(
+    session: &Session,
+    owner: &Arc<Identity>,
+    target: &str,
+    archive: bool,
+) -> Result<(), String> {
+    let authority = session
+        .snapshot()
+        .borrow()
+        .relay
+        .as_ref()
+        .map(|relay| relay.authority.clone())
+        .filter(|authority| !authority.is_empty())
+        .ok_or("This community has no archive.")?;
+    let http = RelayHttp::new(session.origin().clone(), owner.clone());
+    request(&http, owner, &authority, target, archive)
+        .await
+        .map_err(|refusal| match refusal {
+            Refusal::NoConsent => {
+                "Only the identity's owner or a relay admin can change its archive.".to_owned()
+            }
+            Refusal::Failed(error) => error,
+        })
 }

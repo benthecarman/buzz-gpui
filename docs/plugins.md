@@ -493,6 +493,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `outbox/get` | `id` (optional) | One event's `{"id","kind","channel","delivery","error","acknowledged"}` while Buzz still holds it, or `null`; without `id`, every event still on its way. `delivery` is `sending`, `accepted`, `unknown`, `failed` or `seen` (the relay showed it back). |
 | `outbox/watch` | none | `{"watch"}`. Buzz then sends `outbox/changed` with `events`, the events still on their way, now and whenever that changes; one that leaves was delivered or dismissed. Stop with `outbox/unwatch`. |
 | `archives/get` | `refresh` (optional) | `{"archived"}`: the identities the community archived, which Buzz leaves out of mentions, member choices and search |
+| `archives/request` | `action` (`archive` or `unarchive`), `pubkey` | `null` once the archive shows it. Allowed for one of your agents (its owner attestation is the consent) or with a relay owner or admin role. Needs `manage-channels`. |
 | `sessions/create` | `title`, `parent` (optional session), `agents` (optional: your agents in this community) | `{"channel"}`: a new private work session, as Me starts, once the relay lists it with the agents added. Needs `manage-channels`. |
 | `sessions/memberOf` | `pubkey` | The ids of the channels that list them as a member |
 | `agents/list` | none | `{"agents","running","elsewhere","teams","types"}`: the selected community's agents and every agent running on this device, each `{"pubkey","name","type","owner","relay","picture","place","config","attentionEnabled","attention","skipped","timers"}` (`place` is `local` or `hosted`; `skipped` holds attention objects that could not be read, by slug, with the `problem`; `timers` is each timer's `armedAt`, `nextDue` and `used`); agents listed as running elsewhere (`place` `elsewhere`); your teams `{"id","name","instructions","members"}`; and the agent types `{"type","title","description","hosted"}` |
@@ -724,9 +725,6 @@ passes a function, or reaches into the app, it works differently:
   reads answer once rather than handing out live views. Ask again to
   refresh, or watch the channel, thread, unread counts, events or outbox
   where a change needs to be seen as it happens.
-- **Archive requests are not offered.** Buzz archives an agent's identity
-  when you delete the agent (`agents/remove`); plugins read the archive
-  with `archives/get`.
 - **Hosted agents have no unfinished state.** Making a hosted agent
   finishes or fails as a whole.
 - Buzz draws a panel's channel-header launcher from its `icon` and `label`,

@@ -15,7 +15,7 @@
 //!   [`Agents2::global`].
 
 pub mod attention;
-mod cleanup;
+pub(crate) mod cleanup;
 #[cfg(debug_assertions)]
 mod dev;
 pub mod listings;
