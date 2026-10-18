@@ -55,7 +55,7 @@ enum Answer {
 
 /// What came back for one request.
 enum Outcome {
-    Answered(Option<Node>),
+    Answered(Option<Box<Node>>),
     Failed,
 }
 
@@ -352,7 +352,9 @@ pub fn init(cx: &mut App) {
             ANSWERS.with_borrow_mut(|answers| {
                 if let Some(answer) = answers.entries.get_mut(&key) {
                     *answer = match (outcome, &*answer) {
-                        (Outcome::Answered(tree), _) => Answer::Ready(tree.map(Rc::new)),
+                        (Outcome::Answered(tree), _) => {
+                            Answer::Ready(tree.map(|tree| Rc::new(*tree)))
+                        }
                         // A refresh that failed keeps what showed.
                         (Outcome::Failed, Answer::Asking(tree)) => Answer::Ready(tree.clone()),
                         (Outcome::Failed, _) => Answer::Failed(std::time::Instant::now()),
@@ -423,7 +425,8 @@ fn ask(
                 Outcome::Answered(
                     Node::parse(tree)
                         .inspect_err(|error| tracing::warn!(%error, "plugin renderer answer"))
-                        .ok(),
+                        .ok()
+                        .map(Box::new),
                 )
             }
             _ => Outcome::Failed,
@@ -546,7 +549,7 @@ pub(super) fn ask_with(
     let request = requester.request(method, params, std::time::Duration::from_secs(10));
     requester.runtime().spawn(async move {
         let outcome = match request.await {
-            Ok(Ok(value)) => Outcome::Answered(parse(value)),
+            Ok(Ok(value)) => Outcome::Answered(parse(value).map(Box::new)),
             Ok(Err(_)) | Err(_) => Outcome::Failed,
         };
         let _ = inbox.unbounded_send((entry, outcome));
