@@ -589,6 +589,7 @@ fn prepare(row: &MessageRow, directory: &Directory) -> Prepared {
         message: super::renderers::InMessage {
             row,
             profiles: &directory.profiles,
+            reaction: None,
         },
         content,
         emoji: &row.emoji,

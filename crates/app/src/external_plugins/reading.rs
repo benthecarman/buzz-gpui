@@ -119,12 +119,22 @@ pub fn sync(retry: bool, cx: &App) -> Result<Value, Failure> {
     }
     Ok(match &community.snapshot.unread.sync {
         None => Value::Null,
-        Some(sync) => json!({
-            "capability": format!("{:?}", sync.capability).to_ascii_lowercase(),
-            "status": format!("{:?}", sync.status).to_ascii_lowercase(),
-            "complete": format!("{:?}", sync.completeness).to_ascii_lowercase(),
-            "error": sync.error,
-        }),
+        Some(sync) => {
+            use buzz_relay_client::read_state::ReadCapability;
+            let completeness = format!("{:?}", sync.completeness).to_ascii_lowercase();
+            json!({
+                "capability": match sync.capability {
+                    ReadCapability::Unsupported => "unsupported",
+                    ReadCapability::ReadOnly => "read-only",
+                    ReadCapability::FrontierSync => "frontier-sync",
+                },
+                "status": format!("{:?}", sync.status).to_ascii_lowercase(),
+                "completeness": completeness,
+                // The name this answer first used.
+                "complete": completeness,
+                "error": sync.error,
+            })
+        }
     })
 }
 

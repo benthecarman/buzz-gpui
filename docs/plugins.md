@@ -113,7 +113,8 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
 }}
 ```
 
-- A contribution `id` uses lowercase letters, digits, `-` and `_`. Titles are
+- A contribution `id` starts with a lowercase letter or digit, then uses
+  those, `.`, `-` and `_`. Titles are
   1 to 64 characters.
 - `icon` names a Buzz icon, such as `House`, `Globe`, `Bell`, `Gear`, `Code`
   or `Plug`. An unknown name shows the plug icon. A page's `icon` can also be
@@ -306,14 +307,16 @@ same way, per query.
 | `message/render` | `renderer`, `message` | `{"tree"}` or `null` |
 | `message/accessory` | `accessory`, `message` | `{"tree"}` to show beside its reactions, or `null`. Asked again when the message is edited or gets a reply. |
 | `attachment/render` | `renderer`, `attachment` (`url`, `kind`: `image`, `video`, `audio` or `file`, `mime`, `name`, `size`, `duration`, `waveform`, `voiceNote`, `dimensions` `{"width","height"}`, `blurhash`, `previewUrl`), `removable` (a draft the plugin may take out with `attachment/remove`, buzz-app's `onRemove`) | `{"tree"}` or `null` |
-| `inline/render` | `renderer`, `text` (what the pattern matched), `message` (the message it is in) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text. Buzz asks once per piece and message. |
+| `inline/render` | `renderer`, `text` (what the pattern matched), `message` (the message it is in), `reaction` (`{"content","emojiUrl","count","authors"}` when the text is a reaction on it, else `null`) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text. Buzz asks once per piece and message, and separately for a reaction. |
 | `names/resolve` | `policy`, `identities` (`[{"pubkey","name","isAgent","owner"}]`, at most 5,000), `viewer`, `candidates` (the keys in view, or `null` for everyone) | `{"labels": {"<pubkey>": {"name", "qualifier"}}}`. Keys left out show their public name. |
 | `service/request` | `from` (the asking plugin's id), `service`, `method`, `params` | Any JSON, handed back to the plugin that asked. An error is passed on as its error. |
 | `completion/query` | `completion`, `query` (the text after the trigger, up to the caret), `channel`, `thread` (the root the composer replies in, or `null`), `inviteAgents` (`true` in a new session's composer, which may offer your library agents not yet in the conversation) | `{"items", "status", "retry"}`: at most 50 items `{"label", "detail", "text", "mentions", "preview", "disabled", "exact"}`. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys) as chips that make them recipients. `preview` is a line under the label; `disabled` is why it cannot be picked; a space typed after the query picks the item marked `exact`. `status` shows a line such as "No matches", and `retry: true` adds a row that asks again. |
 
 A renderer's tree can use every element but `input`. Its buttons and switches
-send `render/event` with `renderer`, `target` (the URL, message or attachment
-it drew), `id`, `event` and `value`.
+send `render/event` with `renderer`, `target` (what it drew: the URL, the
+attachment's URL, or for a message `<message id>:<revision>`), `message`
+(the message id, for message renderers and accessories), `id`, `event` and
+`value`.
 
 ### Other notifications from Buzz
 
@@ -499,7 +502,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `unread/watch` | none | `{"watch"}`. Buzz then sends `unread/changed` with the same fields, now and whenever they change. Stop with `unread/unwatch`. |
 | `unread/message` | `channel`, `message` | Whether that loaded message shows as unread now |
 | `unread/attention` | `channel`, `message` | That loaded message's attention under the badges' policy (`unread.attention`): `{"status","category","mentioned","root","pending","unread","forced","viewing"}`, `status` being `unknown`, `ineligible` or `eligible` and `category` `mention`, `direct`, `thread` or `null`; `null` before read state loads |
-| `unread/sync` | none | `{"capability","status","complete","error"}`: how read marks sync to the relay, or `null` before it is known. `unread/retrySync` tries again after a failure. |
+| `unread/sync` | none | `{"capability","status","completeness","error"}` (`capability` `unsupported`, `read-only` or `frontier-sync`; `completeness` `unknown`, `snapshot` or `bounded`, also sent as `complete`): how read marks sync to the relay, or `null` before it is known. `unread/retrySync` tries again after a failure. |
 | `threads/activity` | `channel` | `{"channel","items","error"}`: threads with unread replies for you, newest first, each `{"root","latestMessage","author","createdAt","preview","unreadCount"}` |
 | `inbox/get` | none | `{"items","error"}`: the Inbox's conversations, each `{"channel","message","latestMessage","root","author","preview","createdAt","mentioned","thread","unreadCount","manual"}`; `manual` is a mark from `read/markLocal` |
 | `inbox/watch` | none | `{"watch"}`. Buzz then sends `inbox/changed` with what `inbox/get` gives, now and whenever the Inbox changes. Stop with `inbox/unwatch`. |
@@ -570,7 +573,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `reaction/select` | `view` (an open `reactionPicker`), `emoji` | `null`. Buzz reacts with it and closes the picker. |
 | `composer/settle` | `view`, `element` (a composer that handed the plugin its draft), `sent` | `null`. With `sent: true` the composer clears; otherwise it keeps the draft to try again. |
 | `composer/insert` | `composer` (from `composer/tool`, or an embedded composer's `ready`), `text` | `null`, after putting the text at the composer's caret |
-| `composer/insertMentions` | `composer`, `pubkeys` (at most 32) | `null`, after putting mention chips at the caret; the people become recipients |
+| `composer/insertMentions` | `composer`, `pubkeys` (at most 32), or `mentions` (`[{"pubkey","name"}]`, to label each chip yourself, as `insertMention` does) | `null`, after putting mention chips at the caret; the people become recipients. Like the other composer writes (`composer/insert`, `composer/insertResource`, `composer/capture`), it is refused while the composer is disabled or read-only. |
 | `composer/insertResource` | `composer`, `uri` (a Buzz or web link), `label` | `null`, after putting the link as one chip at the caret |
 | `composer/focus` | `composer` | `null`, after putting the caret back in the composer |
 | `composer/capture` | `composer` | `{"view"}`. A view of `kind` `capture` takes the composer's place, as recording a voice note does, until `composer/accept` or the user discards it (the view then closes). |
@@ -594,7 +597,8 @@ A message looks like this:
   "edited": false, "threadRoot": null, "replyParent": null, "replyCount": 2,
   "mentions": [], "delivery": null, "kind": 9, "audience": null,
   "signer": null, "workflowOwner": null, "participants": [],
-  "reactions": [{"content": "👍", "emojiUrl": null, "count": 1, "authors": ["<pubkey>"]}],
+  "reactions": [{"content": "👍", "emojiUrl": null, "count": 1, "authors": ["<pubkey>"],
+                 "events": [{"id": "<reaction event id>", "author": "<pubkey>"}]}],
   "attachments": [{"url": "https://…", "kind": "image", "mime": "image/png",
     "size": 73, "name": "dot.png", "duration": null, "waveform": null,
     "voiceNote": false, "dimensions": {"width": 1, "height": 1},

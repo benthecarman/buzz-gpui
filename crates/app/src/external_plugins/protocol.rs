@@ -142,12 +142,14 @@ fn valid_plugin_id(id: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
+/// buzz-app's `[a-z0-9][a-z0-9._-]*`, up to 64 characters.
 pub fn valid_contribution_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-_".contains(c))
+    let mut chars = id.chars();
+    id.len() <= 64
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
 /// The `initialize` result: what the plugin adds to the app.

@@ -140,6 +140,11 @@ pub fn message(row: &MessageRow, profiles: &Profiles) -> Value {
             "emojiUrl": group.emoji.as_ref().map(|emoji| emoji.url.clone()),
             "count": group.events.len(),
             "authors": group.events.iter().map(|reaction| reaction.author.to_hex()).collect::<Vec<_>>(),
+            // Each reaction event, so its author can delete it.
+            "events": group.events.iter().map(|reaction| json!({
+                "id": reaction.id.to_hex(),
+                "author": reaction.author.to_hex(),
+            })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "attachments": row.attachments.iter().map(|attachment| json!({
             "url": attachment.url,

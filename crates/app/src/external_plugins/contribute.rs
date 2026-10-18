@@ -391,7 +391,18 @@ impl crate::ui::renderers::TextRenderer for Inline {
     }
 
     fn find(&self, text: &str, message: InMessage) -> Vec<std::ops::Range<usize>> {
-        let id = message.row.id.to_hex();
+        let id = match message.reaction {
+            Some(_) => format!("{}/reaction", message.row.id.to_hex()),
+            None => message.row.id.to_hex(),
+        };
+        let reaction = message.reaction.map(|group| {
+            json!({
+                "content": group.content,
+                "emojiUrl": group.emoji.as_ref().map(|emoji| emoji.url.clone()),
+                "count": group.events.len(),
+                "authors": group.events.iter().map(|reaction| reaction.author.to_hex()).collect::<Vec<_>>(),
+            })
+        });
         let mut found = Vec::new();
         for matched in self.pattern.find_iter(text).take(32) {
             let piece = matched.as_str();
@@ -412,6 +423,7 @@ impl crate::ui::renderers::TextRenderer for Inline {
                         "renderer": self.id,
                         "text": piece,
                         "message": capabilities::message(message.row, message.profiles),
+                        "reaction": reaction,
                     }),
                     tree_of,
                 ),
@@ -442,6 +454,12 @@ pub(super) fn drawn(
     cx: &App,
 ) -> AnyElement {
     let (plugin, renderer, place) = (plugin.to_owned(), id.to_owned(), target.to_owned());
+    // A message's target is `<id>:<revision>`; the message is the id.
+    let message = target
+        .split(':')
+        .next()
+        .filter(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_owned);
     let fields = HashMap::new();
     let embeds = HashMap::new();
     let draw = Draw {
@@ -452,6 +470,7 @@ pub(super) fn drawn(
                 json!({
                     "renderer": renderer,
                     "target": place,
+                    "message": message,
                     "id": element,
                     "event": event,
                     "value": value,
@@ -869,6 +888,9 @@ pub fn insert(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failu
     let composer = COMPOSERS
         .with_borrow(|composers| composers.get(&id).and_then(WeakEntity::upgrade))
         .ok_or((1, "That composer is closed.".to_owned()))?;
+    if composer.read(cx).disabled(cx) {
+        return Err((1, "That composer cannot be written in now.".to_owned()));
+    }
     let window =
         crate::ui::navigation::main_window(cx).ok_or((1, "The window is not open.".to_owned()))?;
     let input = composer.read(cx).input();
@@ -910,35 +932,76 @@ fn composer_of(
     Ok((composer, window))
 }
 
-/// `composer/insertMentions`: mention chips for `pubkeys` at the caret,
-/// which also make them recipients (`insertMentions`).
-pub fn insert_mentions(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
+/// [`composer_of`] for a change to the draft: refused while nothing can
+/// be typed there (`ComposerToolProps.disabled`).
+fn writable(
+    params: &Value,
+    cx: &App,
+) -> Result<(Entity<Composer>, AnyWindowHandle), capabilities::Failure> {
     let (composer, window) = composer_of(params, cx)?;
-    let pubkeys: Vec<String> = params
-        .get("pubkeys")
-        .and_then(Value::as_array)
-        .ok_or((
-            protocol::INVALID_PARAMS,
-            "pubkeys must be a list".to_owned(),
-        ))?
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .map(str::to_ascii_lowercase)
-        .take(32)
-        .collect();
-    if pubkeys.is_empty() {
+    if composer.read(cx).disabled(cx) {
+        return Err((1, "That composer cannot be written in now.".to_owned()));
+    }
+    Ok((composer, window))
+}
+
+/// `composer/insertMentions`: mention chips for `pubkeys` (or `mentions`,
+/// each `{"pubkey","name"}` to show its own name) at the caret, which also
+/// make them recipients (`insertMention`, `insertMentions`).
+pub fn insert_mentions(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
+    let (composer, window) = writable(params, cx)?;
+    let hex = |key: &str| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let named: Vec<(String, Option<String>)> = match params.get("mentions") {
+        Some(mentions) => mentions
+            .as_array()
+            .ok_or((
+                protocol::INVALID_PARAMS,
+                "mentions must be a list".to_owned(),
+            ))?
+            .iter()
+            .filter_map(|mention| {
+                let key = mention
+                    .get("pubkey")
+                    .and_then(Value::as_str)
+                    .filter(|key| hex(key))?;
+                let name = mention
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned);
+                Some((key.to_ascii_lowercase(), name))
+            })
+            .take(32)
+            .collect(),
+        None => params
+            .get("pubkeys")
+            .and_then(Value::as_array)
+            .ok_or((
+                protocol::INVALID_PARAMS,
+                "pubkeys must be a list".to_owned(),
+            ))?
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|key| hex(key))
+            .map(|key| (key.to_ascii_lowercase(), None))
+            .take(32)
+            .collect(),
+    };
+    if named.is_empty() {
         return Err((protocol::INVALID_PARAMS, "pubkeys names no one".to_owned()));
     }
     let community = AppState::current(cx).ok_or((1, "No community is selected.".to_owned()))?;
     let profiles = community.read(cx).snapshot.profiles.clone();
-    let recipients: Vec<(String, SharedString, Option<String>)> = pubkeys
+    let recipients: Vec<(String, SharedString, Option<String>)> = named
         .into_iter()
-        .map(|key| {
-            let name = profiles
-                .get(&key)
-                .map(|profile| profile.name.clone())
-                .unwrap_or_else(|| key.chars().take(10).collect());
+        .map(|(key, name)| {
+            let name = name.unwrap_or_else(|| {
+                profiles
+                    .get(&key)
+                    .map(|profile| profile.name.clone())
+                    .unwrap_or_else(|| key.chars().take(10).collect())
+            });
             (key, name.into(), None)
         })
         .collect();
@@ -959,7 +1022,7 @@ pub fn insert_mentions(params: &Value, cx: &mut App) -> Result<Value, capabiliti
 /// `composer/insertResource`: a link to `uri`, labelled `label`, as one
 /// chip at the caret (`insertResource`).
 pub fn insert_resource(params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
-    let (composer, window) = composer_of(params, cx)?;
+    let (composer, window) = writable(params, cx)?;
     let text = |key: &str| {
         params
             .get(key)
@@ -980,7 +1043,7 @@ pub fn insert_resource(params: &Value, cx: &mut App) -> Result<Value, capabiliti
 /// the composer's editor, as voice notes record (`capture`), until
 /// `composer/accept` or the user discards it.
 pub fn capture(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
-    let (composer, window) = composer_of(params, cx)?;
+    let (composer, window) = writable(params, cx)?;
     let id = params
         .get("composer")
         .and_then(Value::as_u64)

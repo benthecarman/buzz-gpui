@@ -1845,13 +1845,15 @@ fn reaction_glyph(
         let message = renderers::InMessage {
             row,
             profiles: &rows.directory.profiles,
+            reaction: Some(group),
         };
         let whole = renderers::text_matches(&group.content, message)
             .into_iter()
             .find(|(range, _)| *range == (0..group.content.len()));
+        // A reaction's answer is kept apart from the same text in prose.
+        let place = format!("{}/reaction", row.id.to_hex());
         if let Some((_, key)) = whole
-            && let Some(element) =
-                renderers::render_text(&key, &group.content, &row.id.to_hex(), cx)
+            && let Some(element) = renderers::render_text(&key, &group.content, &place, cx)
         {
             return element;
         }

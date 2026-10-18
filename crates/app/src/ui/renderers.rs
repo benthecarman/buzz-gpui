@@ -68,6 +68,8 @@ pub trait TextRenderer {
 pub struct InMessage<'a> {
     pub row: &'a MessageRow,
     pub profiles: &'a buzz_relay_client::Profiles,
+    /// The reaction drawn, when the text is one (`InlineContent.reaction`).
+    pub reaction: Option<&'a buzz_relay_client::fold::ReactionGroup>,
 }
 
 /// A message action (`MessageActionContribution`): a more-menu item, and
