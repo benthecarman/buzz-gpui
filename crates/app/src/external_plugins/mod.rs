@@ -563,7 +563,7 @@ impl ExternalPlugins {
     /// each channel's catch-up, and the first problem worth showing.
     fn live_status(live: &buzz_relay_client::session::LiveView) -> Value {
         // Variant names, payloads left out: `Failed("…")` is `failed`.
-        fn label(value: impl std::fmt::Debug) -> String {
+        fn label(value: &impl std::fmt::Debug) -> String {
             let text = format!("{value:?}");
             let name = text.split(['(', ' ', '{']).next().unwrap_or_default();
             let mut chars = name.chars();
