@@ -21,8 +21,19 @@ use std::sync::Arc;
 /// Tells the plugin's view what happened on the message.
 pub type Send = Rc<dyn Fn(&str, serde_json::Value, &mut App)>;
 
+/// How a `message` element draws its row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Style {
+    pub layout: message::Layout,
+    /// No avatar or byline.
+    pub compact: bool,
+    /// The hover bar and its menu.
+    pub actions: bool,
+}
+
 pub struct MessageView {
     community: Entity<Community>,
+    style: Style,
     channel: String,
     row: Option<Arc<MessageRow>>,
     /// The message could not be read.
@@ -118,11 +129,23 @@ impl MessageView {
             channel,
             row: None,
             missing: false,
+            style: Style {
+                layout: message::Layout::Timeline,
+                compact: false,
+                actions: true,
+            },
             actions,
             _thread: thread,
             _follow: follow,
             _actions: observe,
         }
+    }
+}
+
+impl MessageView {
+    pub fn styled(mut self, style: Style) -> Self {
+        self.style = style;
+        self
     }
 }
 
@@ -152,20 +175,25 @@ impl Render for MessageView {
             community.session.viewer(),
             Directory::of(community, members.as_deref(), cx),
         );
-        MessageActions::fill(&self.actions, &mut rows, cx);
+        if self.style.actions {
+            MessageActions::fill(&self.actions, &mut rows, cx);
+        }
         let rows = Rc::new(rows);
         let item = Item {
             row,
-            head: true,
+            head: !self.style.compact,
             day: None,
             group: None,
         };
-        let overlays = self
-            .actions
-            .update(cx, |actions, cx| actions.overlays(window, cx));
+        let overlays = if self.style.actions {
+            self.actions
+                .update(cx, |actions, cx| actions.overlays(window, cx))
+        } else {
+            Vec::new()
+        };
         div()
             .relative()
-            .child(message::render(&item, &rows, cx))
+            .child(message::render_in(self.style.layout, &item, &rows, cx))
             .children(overlays)
             .into_any_element()
     }

@@ -1133,6 +1133,16 @@ pub enum Node {
         id: String,
         channel: String,
         message: String,
+        /// `timeline` (the default), `thread` or `nested`: the row as a
+        /// conversation, a thread panel or a nested reply draws it.
+        #[serde(default)]
+        layout: Option<String>,
+        /// Without the avatar and byline, as a follow-up in a group.
+        #[serde(default)]
+        compact: bool,
+        /// The hover bar and its More menu (default on).
+        #[serde(default)]
+        actions: Option<bool>,
     },
     /// Buzz's own thread view of `root` in `channel`
     /// (`conversation.ui.Thread`), `height` pixels tall (default 480).

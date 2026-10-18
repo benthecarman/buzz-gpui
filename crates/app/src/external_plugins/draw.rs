@@ -56,6 +56,7 @@ pub enum EmbedNode<'a> {
         id: &'a str,
         channel: &'a str,
         message: &'a str,
+        style: super::message_view::Style,
     },
 }
 
@@ -96,10 +97,22 @@ pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
                 id,
                 channel,
                 message,
+                layout,
+                compact,
+                actions,
             } => found.push(EmbedNode::Message {
                 id,
                 channel,
                 message,
+                style: super::message_view::Style {
+                    layout: match layout.as_deref() {
+                        Some("thread") => crate::ui::message::Layout::Thread,
+                        Some("nested") => crate::ui::message::Layout::Nested,
+                        _ => crate::ui::message::Layout::Timeline,
+                    },
+                    compact: *compact,
+                    actions: actions.unwrap_or(true),
+                },
             }),
             _ => {}
         }

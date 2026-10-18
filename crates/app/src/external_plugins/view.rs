@@ -604,7 +604,8 @@ impl ExternalView {
                     id,
                     channel,
                     message,
-                } => (*id, format!("message:{channel}:{message}")),
+                    style,
+                } => (*id, format!("message:{channel}:{message}:{style:?}")),
             };
             seen.insert(id.to_owned());
             if self
@@ -695,6 +696,7 @@ impl ExternalView {
                     id,
                     channel,
                     message,
+                    style,
                 } if readable(channel) => {
                     buzz_relay_client::EventId::from_hex(message)
                         .ok()
@@ -711,6 +713,7 @@ impl ExternalView {
                                 super::message_view::MessageView::new(
                                     community, channel, message, send, window, cx,
                                 )
+                                .styled(style)
                             })
                             .into()
                         })
