@@ -2,7 +2,8 @@
 //! in `features/conversation/contracts.ts`): typing a plugin's trigger
 //! character, such as `/`, at the start of a word opens a popup of its
 //! suggestions, and picking one replaces the trigger and query with its
-//! text. `@`, `#` and `:` stay the composer's own.
+//! text. A plugin takes `@`, `#` or `:` only by ranking before Buzz's own
+//! completion on it, or while that plugin is off.
 //!
 //! A plugin answers later than the composer paints, so a query reads
 //! `None` until its answer is in; [`generation`] changes when one arrives
@@ -124,8 +125,11 @@ pub fn triggers() -> Vec<(char, &'static str)> {
     REGISTRY.with_borrow(|registry| {
         let mut triggers: Vec<(char, &'static str)> = Vec::new();
         for completion in registry.iter() {
+            // Only against Buzz's own that are on: off, they free the trigger.
             let outranked = BUNDLED.iter().any(|&(trigger, order, key)| {
-                trigger == completion.trigger && (order, key) <= (completion.order, completion.key)
+                trigger == completion.trigger
+                    && crate::plugins::enabled_key(key)
+                    && (order, key) <= (completion.order, completion.key)
             });
             if !outranked
                 && !triggers

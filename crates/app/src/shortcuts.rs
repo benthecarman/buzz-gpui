@@ -897,7 +897,7 @@ pub fn external_key_down(event: &KeyDownEvent, window: &mut Window, cx: &mut App
     // one that is off or ineligible leaves the press to the next, as
     // buzz-app's dispatcher keeps looking.
     let rows = rows(Shortcuts::overrides(cx), DESKTOP);
-    for shortcut in rows
+    let mut matching: Vec<_> = rows
         .iter()
         .filter(|row| {
             row.effective
@@ -905,7 +905,10 @@ pub fn external_key_down(event: &KeyDownEvent, window: &mut Window, cx: &mut App
                 .any(|binding| binding.same(&captured.binding))
         })
         .filter_map(|row| external(row.key))
-    {
+        .collect();
+    // By contribution key, as buzz-app's dispatcher tries them.
+    matching.sort_by_key(|shortcut| shortcut.key);
+    for shortcut in matching {
         if EXTERNAL_OFF.with_borrow(|off| off.contains(shortcut.key)) {
             continue;
         }

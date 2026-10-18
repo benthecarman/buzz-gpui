@@ -44,22 +44,22 @@ pub fn memories(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>
     let agent = text(params, "agent")
         .ok_or_else(|| invalid("agent is required"))?
         .to_ascii_lowercase();
-    let owned = crate::agents2::Agents2::global(cx).is_some_and(|agents| {
-        agents
-            .read(cx)
-            .agents()
-            .iter()
-            .any(|known| known.pubkey == agent)
-    });
-    if !owned {
-        return Err(invalid("agent is not one of your agents"));
-    }
     let session = community(cx)?.read(cx).session.clone();
+    // Any agent key but yours; the relay answers only its owner, so an
+    // agent listed elsewhere reads too (`memoryAgent`).
+    if !buzz_relay_client::session::memory_agent(&agent, session.viewer()) {
+        return Err(invalid("agent is not an agent key"));
+    }
     Ok(on_tokio(cx, async move {
+        use buzz_relay_client::session::MemoryError;
         let listing = session
             .agent_memories(&agent)
             .await
-            .map_err(|error| (3, error.to_string()))?;
+            .map_err(|error| match error {
+                // Not yours to read (`denied`), apart from a read that failed.
+                MemoryError::Denied => (1, "denied".to_owned()),
+                MemoryError::Failed(error) => (2, error),
+            })?;
         Ok(json!({
             "entries": listing.entries.iter().map(|entry| json!({
                 "slug": entry.slug,
@@ -78,6 +78,10 @@ fn revision(revision: &Revision) -> Value {
         "author": revision.author,
         "createdAt": revision.created_at,
         "content": revision.content,
+        // The whole signed event, as buzz-app's revisions are.
+        "kind": revision.kind,
+        "tags": revision.tags,
+        "sig": revision.sig,
     })
 }
 
@@ -297,7 +301,8 @@ fn failure(failure: EntityFailure) -> Failure {
         EntityFailure::Unavailable => "unavailable",
         EntityFailure::InvalidTarget => "invalidTarget",
     };
-    (3, text.to_owned())
+    // A read that failed (code 2), saying why.
+    (2, text.to_owned())
 }
 
 /// A repository or project. `route` is what `ui/navigate` takes as the

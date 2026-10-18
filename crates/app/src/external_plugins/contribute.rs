@@ -108,6 +108,9 @@ thread_local! {
     /// embedded composer: writes through it stop once that is gone
     /// (`ComposerToolProps` live only as long as the tool).
     static COMPOSERS: RefCell<HashMap<u64, Grant>> = RefCell::default();
+    /// Captures a tool started, by the composer number it was handed: they
+    /// end when the tool goes (`capture` lives as long as the tool).
+    static CAPTURING: RefCell<HashMap<u64, WeakEntity<Composer>>> = RefCell::default();
     /// Draft attachments a plugin's renderer was offered to remove, by url.
     static REMOVERS: RefCell<HashMap<String, String>> = RefCell::default();
     /// Settings cards a plugin hid or marked pending, by key.
@@ -257,7 +260,15 @@ pub fn publish(plugin: &str, params: &Value) -> Result<Value, capabilities::Fail
     let published =
         SUGGESTIONS.with_borrow_mut(|suggestions| match suggestions.entries.get_mut(&entry) {
             Some(slot) => {
-                *slot = Some(answer(params));
+                // `withdraw` takes back what was published, as buzz-app's
+                // `publish` disposer does: nothing shows.
+                *slot = Some(
+                    if params.get("withdraw").and_then(Value::as_bool) == Some(true) {
+                        answer(&json!({ "items": [] }))
+                    } else {
+                        answer(params)
+                    },
+                );
                 true
             }
             None => false,
@@ -320,12 +331,17 @@ fn items(value: &Value) -> Vec<Item> {
                     let label = text(item, "label").filter(|label| !label.is_empty())?;
                     // Each a pubkey, or `{"pubkey","name"}` to name its chip.
                     let mut names = HashMap::new();
+                    // All or nothing: an item naming a bad key, or more than
+                    // 32, is dropped, as buzz-app drops it.
                     let mentions: Vec<String> = item
                         .get("mentions")
                         .and_then(Value::as_array)
-                        .map(|keys| {
+                        .map(|keys| -> Option<Vec<String>> {
+                            if keys.len() > 32 {
+                                return None;
+                            }
                             keys.iter()
-                                .filter_map(|mention| {
+                                .map(|mention| {
                                     let key = mention
                                         .as_str()
                                         .or_else(|| mention.get("pubkey").and_then(Value::as_str))
@@ -340,10 +356,9 @@ fn items(value: &Value) -> Vec<Item> {
                                     }
                                     Some(key)
                                 })
-                                .take(32)
                                 .collect()
                         })
-                        .unwrap_or_default();
+                        .unwrap_or(Some(Vec::new()))?;
                     Some(Item {
                         names,
                         text: text(item, "text").unwrap_or_else(|| label.clone()),
@@ -739,10 +754,28 @@ pub(super) fn drawn(
 }
 
 fn message_json(row: &MessageRow, cx: &App) -> Value {
-    let profiles = AppState::current(cx)
+    let profiles = community_of(row, cx)
         .map(|community| community.read(cx).snapshot.profiles.clone())
         .unwrap_or_default();
     capabilities::message(row, &profiles)
+}
+
+/// The community a message is in: the one listing its channel (channel
+/// ids are unique), else the selected one.
+fn community_of(row: &MessageRow, cx: &App) -> Option<Entity<crate::community::Community>> {
+    cx.global::<AppState>()
+        .communities
+        .iter()
+        .find(|community| {
+            community
+                .read(cx)
+                .snapshot
+                .channels
+                .iter()
+                .any(|channel| *channel.id == *row.channel)
+        })
+        .cloned()
+        .or_else(|| AppState::current(cx))
 }
 
 /// The viewer, for actions on the user's own messages.
@@ -992,9 +1025,9 @@ impl MessageAction for Action {
 
     fn run(&self, row: &Arc<MessageRow>, _: &mut Window, cx: &mut App) {
         let message = message_json(row, cx);
-        // The conversation's community: the selected one, where message
-        // menus show.
-        let community = AppState::current(cx)
+        // The message's own community, which an embedded message may not
+        // share with the selected one.
+        let community = community_of(row, cx)
             .map(|community| community.read(cx).origin.websocket().to_string());
         ExternalPlugins::notify_running(
             &self.plugin,
@@ -1320,6 +1353,18 @@ pub fn insert(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capab
     let window =
         crate::ui::navigation::main_window(cx).ok_or((1, "The window is not open.".to_owned()))?;
     let input = composer.read(cx).input();
+    // Within the draft's limit, as buzz-app's `insertText` refuses more.
+    let (draft, selected) = {
+        let state = input.read(cx);
+        (state.value(), state.selected_range())
+    };
+    // What stays once the selection is replaced, plus the text.
+    let replaced = draft
+        .get(selected)
+        .map_or(0, |replaced| replaced.chars().count());
+    if draft.chars().count() - replaced + text.chars().count() > 16_000 {
+        return Err((3, "The draft would be over 16,000 characters.".to_owned()));
+    }
     window
         .update(cx, |_, window, cx| {
             input.update(cx, |state, cx| state.insert(text, window, cx));
@@ -1545,6 +1590,10 @@ pub fn capture(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capa
             composer.accept_plugin_capture(file, window, cx)
         });
     });
+    CAPTURING.with_borrow_mut(|capturing| {
+        capturing.retain(|_, composer| composer.upgrade().is_some());
+        capturing.insert(id, composer.downgrade());
+    });
     let (view, view_id) = super::view::ExternalView::capture(plugin, id, accept, cx);
     let started = window
         .update(cx, |_, window, cx| {
@@ -1683,6 +1732,10 @@ pub fn accept(
 /// `composer/focus`: puts the caret back in the composer (`focus`).
 pub fn focus(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capabilities::Failure> {
     let (composer, window) = composer_of(plugin, params, cx)?;
+    // Nothing to focus while it cannot be used, as buzz-app's `focus`.
+    if composer.read(cx).disabled(cx) {
+        return Ok(Value::Null);
+    }
     let input = composer.read(cx).input();
     window
         .update(cx, |_, window, cx| {
@@ -1920,6 +1973,30 @@ pub fn register(
                             context.composer.clone(),
                             Some(cx.entity().downgrade().into()),
                         );
+                        // A capture this tool started ends with it.
+                        cx.on_release(move |tool: &mut Tool, cx| {
+                            // Only when the tool itself goes, not when the
+                            // toolbar is rebuilt around it.
+                            let key = format!("{}/{}", tool.plugin, tool.id);
+                            let kept = crate::plugins::enabled_key(&key)
+                                && crate::ui::composer_tools::listed(cx)
+                                    .iter()
+                                    .any(|(listed, _, _)| *listed == key);
+                            if kept {
+                                return;
+                            }
+                            let capturing =
+                                CAPTURING.with_borrow_mut(|capturing| capturing.remove(&composer));
+                            // After the composer that dropped the tool is done.
+                            if let Some(capturing) = capturing {
+                                cx.defer(move |cx| {
+                                    let _ = capturing.update(cx, |composer, cx| {
+                                        composer.cancel_plugin_capture(cx)
+                                    });
+                                });
+                            }
+                        })
+                        .detach();
                         Tool {
                             plugin,
                             id,

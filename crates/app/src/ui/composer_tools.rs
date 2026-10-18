@@ -3,9 +3,9 @@
 //! Projects' "Issues and pull requests" picker.
 //!
 //! The composer makes one view per tool for each composer, so a tool owns
-//! state for its conversation. Tools sit between the emoji and voice note
-//! buttons, ordered by `order` and then by key (buzz-app sorts the bundled
-//! emoji tool at 0 and voice notes at 10, so plugins at 0 follow emoji).
+//! state for its conversation. Tools sit among Buzz's own buttons by
+//! `order` and then key, as buzz-app sorts its bundled mention (-10),
+//! emoji (0) and voice note (10) tools ([`Slot`]).
 
 use super::composer::Composer;
 use crate::community::Community;
@@ -75,12 +75,36 @@ pub fn unregister(key: &str, cx: &mut App) {
 }
 
 /// One view per registered toolbar tool for a new composer.
-/// Each with whether it leads the toolbar: tools ordered below 0 sit in
-/// the leading group, beside the recipients (`renderLeading`).
-pub fn build(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<(bool, AnyView)> {
+/// Where a plugin tool sits among Buzz's own toolbar buttons, which are
+/// the Mentions (-10), Emoji (0) and Voice Notes (10) plugins' tools: by
+/// order, then key. Tools ordered below 0 lead, beside the recipients
+/// (`renderLeading`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    BeforeMention,
+    AfterMention,
+    BeforeEmoji,
+    BeforeVoice,
+    AfterVoice,
+}
+
+impl Slot {
+    fn of(order: i32, key: &str) -> Self {
+        match (order, key) {
+            place if place < (-10, "buzz.mentions/picker") => Self::BeforeMention,
+            (order, _) if order < 0 => Self::AfterMention,
+            place if place < (0, "buzz.emoji/picker") => Self::BeforeEmoji,
+            place if place < (10, "buzz.voice-notes/recorder") => Self::BeforeVoice,
+            _ => Self::AfterVoice,
+        }
+    }
+}
+
+/// One view per registered tool for a new composer, with its slot.
+pub fn build(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<(Slot, AnyView)> {
     build_where(false, context, window, cx)
         .into_iter()
-        .map(|(order, view)| (order < 0, view))
+        .map(|(order, key, view)| (Slot::of(order, key), view))
         .collect()
 }
 
@@ -88,7 +112,7 @@ pub fn build(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<(bo
 pub fn build_accessories(context: ToolContext, window: &mut Window, cx: &mut App) -> Vec<AnyView> {
     build_where(true, context, window, cx)
         .into_iter()
-        .map(|(_, view)| view)
+        .map(|(_, _, view)| view)
         .collect()
 }
 
@@ -97,7 +121,7 @@ fn build_where(
     context: ToolContext,
     window: &mut Window,
     cx: &mut App,
-) -> Vec<(i32, AnyView)> {
+) -> Vec<(i32, &'static str, AnyView)> {
     let tools = cx
         .try_global::<Tools>()
         .map(|tools| tools.0.clone())
@@ -106,7 +130,13 @@ fn build_where(
     tools
         .into_iter()
         .filter(|tool| tool.accessory == accessory && crate::plugins::enabled_key(tool.key))
-        .map(|tool| (tool.order, (tool.build)(context.clone(), window, cx)))
+        .map(|tool| {
+            (
+                tool.order,
+                tool.key,
+                (tool.build)(context.clone(), window, cx),
+            )
+        })
         .collect()
 }
 

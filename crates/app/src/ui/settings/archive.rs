@@ -90,6 +90,9 @@ pub(crate) fn settings_for(
     ))
 }
 
+/// A page of saved records, and every agent with records of its kind.
+pub(crate) type SavedPage = (archive::ArchivePage, Vec<String>);
+
 /// One page of the viewer's saved records of `kind` (24200 activity or
 /// 44200 metrics) in `community`, newest first, from one `agent` and
 /// older than `before` if given (`ArchiveHost.read`), read off the UI
@@ -100,15 +103,18 @@ pub(crate) fn read_for(
     agent: Option<String>,
     before: Option<i64>,
     cx: &mut App,
-) -> Result<Task<Result<archive::ArchivePage, String>>, String> {
+) -> Result<Task<Result<SavedPage, String>>, String> {
     let IdentityState::Ready(identity) = &cx.global::<AppState>().identity else {
         return Err("You are not signed in.".into());
     };
     let identity = identity.clone();
     let (_, key) = partition(community, cx);
     let archive = open(cx)?;
-    let read = Runtime::handle(cx)
-        .spawn_blocking(move || archive.read(&identity, &key, kind, agent.as_deref(), before));
+    let read = Runtime::handle(cx).spawn_blocking(move || {
+        let page = archive.read(&identity, &key, kind, agent.as_deref(), before)?;
+        let agents = archive.agents(&identity.pubkey_hex(), &key, kind)?;
+        Ok((page, agents))
+    });
     Ok(cx.background_spawn(async move {
         read.await
             .unwrap_or_else(|_| Err("The archive read stopped.".into()))

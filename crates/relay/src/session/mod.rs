@@ -55,7 +55,7 @@ pub use kit::{CreationSnapshot, KitSnapshot, KitStatus};
 pub use live_feed::LiveBatch;
 pub use me_kit::{MeKit, MeKitSnapshot, MeKitStatus};
 pub use members::{MemberAddition, MemberOperation, MemberOperationStatus};
-pub use memories::{MemoryEntry, MemoryError, MemoryListing};
+pub use memories::{MemoryEntry, MemoryError, MemoryListing, memory_agent};
 pub use observer::{ActivityFeed, FeedStatus};
 pub use projects::Projects;
 pub use statuses::StatusWatch;

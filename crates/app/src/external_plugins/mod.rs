@@ -552,7 +552,8 @@ impl ExternalPlugins {
             "status": match &snapshot.status {
                 buzz_relay_client::SessionStatus::Connecting => "connecting",
                 buzz_relay_client::SessionStatus::Ready => "ready",
-                buzz_relay_client::SessionStatus::Failed(_) => "failed",
+                // buzz-app's `RelaySnapshot.status` word.
+                buzz_relay_client::SessionStatus::Failed(_) => "error",
             },
             "error": match &snapshot.status {
                 buzz_relay_client::SessionStatus::Failed(error) => Some(error.clone()),
@@ -1340,7 +1341,8 @@ impl ExternalPlugins {
                 },
             );
             spec.placement = match page.placement {
-                PagePlacement::Sidebar => pages::Placement::Sidebar,
+                _ if page.primary == Some(false) => pages::Placement::Hidden,
+                PagePlacement::Sidebar | PagePlacement::Unknown => pages::Placement::Sidebar,
                 PagePlacement::Topbar | PagePlacement::Toolbar => pages::Placement::Topbar,
                 PagePlacement::Hidden => pages::Placement::Hidden,
             };
@@ -1810,6 +1812,14 @@ impl ExternalPlugins {
                     .map(str::trim)
                     .filter(|emoji| !emoji.is_empty() && emoji.chars().count() <= 64)
                     .map(str::to_owned);
+                // Refused while nothing can be sent there, as buzz-app's
+                // `select` answers false.
+                if view
+                    .as_ref()
+                    .is_some_and(|view| view.read(cx).reacting_disabled(cx))
+                {
+                    return Reply::Now(Err((3, "Reactions cannot be sent here now.".to_owned())));
+                }
                 let select = view.and_then(|view| view.read(cx).selector());
                 Reply::Now(
                     match (select, emoji, crate::ui::navigation::main_window(cx)) {
@@ -2162,6 +2172,7 @@ impl ExternalPlugins {
             | "outbox/retry"
             | "outbox/dismiss"
             | "emoji/add"
+            | "statuses/save"
             | "projects/gitAuthorization"
             | "agents/logProof"
             | "reminders/create"
@@ -2211,6 +2222,7 @@ impl ExternalPlugins {
                     | "outbox/retry"
                     | "outbox/dismiss"
                     | "emoji/add"
+                    | "statuses/save"
                     | "projects/gitAuthorization" => Permission::PublishEvents,
                     "agents/create" | "agents/save" | "agents/remove" | "teams/save"
                     | "teams/remove" | "agents/retype" | "agents/port" | "agents/attest"
@@ -2288,6 +2300,7 @@ impl ExternalPlugins {
                         capabilities::retry(method == "outbox/dismiss", &params, cx)
                     }
                     "emoji/add" => capabilities::add_emoji(params, cx),
+                    "statuses/save" => capabilities::save_status(params, cx),
                     "reminders/create" | "reminders/snooze" | "reminders/complete"
                     | "reminders/cancel" => channels::change(method, params, cx),
                     "files/upload" => capabilities::upload(&plugin_id, params, cx),

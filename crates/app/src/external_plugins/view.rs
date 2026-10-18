@@ -41,6 +41,8 @@ pub struct ExternalView {
     close: Option<crate::ui::account_actions::Close>,
     /// Picks a reaction (`reaction/select`).
     select: Option<crate::ui::emoji_picker::Select>,
+    /// The community a reaction picker reacts in.
+    reacting_in: Option<WeakEntity<Community>>,
     /// Sets a new agent's config (`agent/createConfig`).
     change: Option<crate::agents2::registry::CreateChange>,
     /// Ends a composer capture (`composer/accept`).
@@ -323,6 +325,7 @@ impl ExternalView {
     ) -> AnyView {
         // Where the reaction goes (`ReactionToolProps.scope`), and whether
         // it can be sent now: not while only the saved copy shows.
+        let weak = community.downgrade();
         let community = community.read(cx);
         let extra = json!({
             "community": community.origin.websocket(),
@@ -334,11 +337,21 @@ impl ExternalView {
             "reactionPicker",
             |view| {
                 view.select = Some(select);
+                view.reacting_in = Some(weak);
                 view.extra = extra;
             },
             cx,
         )
         .into()
+    }
+
+    /// Whether a reaction picker cannot react now: its community shows only
+    /// its saved copy, or is gone (`ReactionToolProps.disabled`).
+    pub(super) fn reacting_disabled(&self, cx: &App) -> bool {
+        self.reacting_in
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .is_none_or(|community| community.read(cx).snapshot.cached)
     }
 
     /// What `reaction/select` calls: a reaction picker's pick.
@@ -443,6 +456,7 @@ impl ExternalView {
                 extra: Value::Null,
                 close: None,
                 select: None,
+                reacting_in: None,
                 change: None,
                 accept: None,
                 route: None,

@@ -603,6 +603,9 @@ mod tests {
             author: "a".repeat(64),
             created_at: 1,
             content: content.into(),
+            kind: 40100,
+            tags: Vec::new(),
+            sig: String::new(),
         }
     }
 

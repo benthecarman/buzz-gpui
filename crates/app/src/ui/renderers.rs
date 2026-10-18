@@ -355,17 +355,24 @@ pub fn link(url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement> {
     // web; an equal order goes to the lower key, as everywhere.
     const BUNDLED: &str = "buzz.links/links";
     let bundled = match super::links::link_kind(url) {
+        // Off, the Links plugin claims nothing.
+        _ if !crate::plugins::enabled_key(BUNDLED) => i32::MAX,
         Some(super::links::LinkKind::Web) => 100,
         Some(_) => 0,
+        // Buzz entity links, such as issues, are Links' at 0 too.
+        None if url.starts_with("buzz:") => 0,
         None => i32::MAX,
     };
+    // Only the one that ranks first, if it outranks Buzz's own: declining
+    // (or not answered yet) leaves the chip to Buzz, not to the next.
     candidates
         .into_iter()
+        .next()
         .filter(|renderer| {
             let order = renderer.order(url);
             order < bundled || (order == bundled && renderer.key() < BUNDLED)
         })
-        .find_map(|renderer| guarded(renderer.key(), || renderer.render(url, label, cx)))
+        .and_then(|renderer| guarded(renderer.key(), || renderer.render(url, label, cx)))
 }
 
 /// Inline text through the inline renderers, first that takes it.
@@ -467,7 +474,7 @@ struct Diffs;
 
 impl MessageRenderer for Diffs {
     fn key(&self) -> &str {
-        "buzz.diffs/diffs"
+        "buzz.diffs/diff"
     }
 
     fn matches(&self, row: &MessageRow) -> bool {
@@ -483,7 +490,7 @@ struct VoiceNotes;
 
 impl AttachmentRenderer for VoiceNotes {
     fn key(&self) -> &str {
-        "buzz.voice-notes/voice-notes"
+        "buzz.voice-notes/player"
     }
 
     fn matches(&self, attachment: &Attachment) -> bool {

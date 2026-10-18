@@ -489,6 +489,9 @@ mod tests {
             author: "a".repeat(64),
             created_at: u64::from(id),
             content: String::new(),
+            kind: 40100,
+            tags: Vec::new(),
+            sig: String::new(),
         }
     }
 

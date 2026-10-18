@@ -406,9 +406,9 @@ pub type Policy = std::rc::Rc<
 /// The bundled policy's plugin.
 const BUNDLED: &str = "buzz.identity-naming";
 
-/// Adds a plugin's naming policy. As in buzz-app, a policy applies only
-/// while it is the one on: with the bundled one or another also on, no
-/// policy applies and names are public profile names.
+/// Adds a plugin's naming policy. As in buzz-app, where a second
+/// `register` is refused, the first policy on applies: the bundled one,
+/// else the plugin policy registered first.
 pub fn register_policy(key: &'static str, policy: Policy) {
     POLICIES.with_borrow_mut(|policies| {
         policies.retain(|(existing, _)| *existing != key);
@@ -427,7 +427,7 @@ pub fn policy_changed() {
     POLICY_GENERATION.set(POLICY_GENERATION.get() + 1);
 }
 
-/// The policy on, if exactly one is: `None` for the bundled one.
+/// The policy that applies: the bundled one, else the first plugin's.
 enum Active {
     None,
     Bundled,
@@ -443,10 +443,10 @@ fn active() -> Active {
             .collect()
     });
     let bundled = crate::plugins::enabled(BUNDLED);
-    match (bundled, plugins.as_slice()) {
-        (true, []) => Active::Bundled,
-        (false, [(key, policy)]) => Active::Plugin(key, policy.clone()),
-        _ => Active::None,
+    match (bundled, plugins.first()) {
+        (true, _) => Active::Bundled,
+        (false, Some((key, policy))) => Active::Plugin(key, policy.clone()),
+        (false, None) => Active::None,
     }
 }
 

@@ -34,12 +34,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 thread_local! {
-    /// The current visit's attempt and whether its opening control kept
+    /// The current history entry's id and whether its opening control kept
     /// the focus, for views built while the workspace is busy.
     static VISIT: std::cell::Cell<(u64, bool)> = const { std::cell::Cell::new((0, false)) };
 }
 
-/// The current visit, as `(attempt, keeps focus)` (`PageNavigation`'s
+/// The current visit, as `(entry id, keeps focus)` (`PageNavigation`'s
 /// `entryId` and `focus`); readable while the workspace itself updates.
 pub fn current_visit() -> (u64, bool) {
     VISIT.get()
@@ -819,7 +819,17 @@ impl Workspace {
                 self.enter_visit(cx);
             }
         }
+        self.publish_visit();
         cx.notify();
+    }
+
+    /// The current history entry and focus, for views built while the
+    /// workspace updates.
+    fn publish_visit(&self) {
+        VISIT.set((
+            self.history.current_id().unwrap_or_default(),
+            self.keep_focus || self.preserve_focus,
+        ));
     }
 
     fn remember_outside_settings(&mut self, target: &Target) {
@@ -832,6 +842,12 @@ impl Workspace {
     }
 
     /// The place history is at, and whether Back and Forward go anywhere.
+    /// The current history entry's id: the same through Retry and Back or
+    /// Forward to it (`PageNavigation.entryId`).
+    pub(crate) fn entry(&self) -> Option<u64> {
+        self.history.current_id()
+    }
+
     pub(crate) fn location(&self) -> (Option<Target>, bool, bool) {
         (
             self.history.current().cloned(),
@@ -1119,7 +1135,7 @@ impl Workspace {
         self.resolving = None;
         self.failure = None;
         self.attempts += 1;
-        VISIT.set((self.attempts, self.keep_focus));
+        self.publish_visit();
         self.settling = match &target.place {
             Place::Page(page) | Place::Route { page, .. } if pages::settles(*page, cx) => {
                 self.arm_settle_timeout(cx);

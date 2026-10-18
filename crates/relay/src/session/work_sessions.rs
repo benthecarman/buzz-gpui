@@ -764,6 +764,17 @@ impl Session {
         })));
     }
 
+    /// Reads the roster again from the relay's primary
+    /// (`channels.refreshRoster`).
+    pub fn refresh_roster(&self) {
+        let _ = self.commands.send(super::Message::With(Box::new(|actor| {
+            actor.start_scan(ScanOptions {
+                strong: true,
+                force_metadata: true,
+            })
+        })));
+    }
+
     /// The channel list as last published.
     pub fn channels_now(&self) -> Arc<[ChannelSummary]> {
         self.snapshot.borrow().channels.clone()

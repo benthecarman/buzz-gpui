@@ -953,8 +953,14 @@ pub(super) fn agents2(cx: &App) -> Result<Entity<crate::agents2::Agents2>, Failu
 }
 
 fn https(value: Option<&Value>) -> Result<Option<String>, Failure> {
+    match value {
+        // `null` removes it, as `""` does (`AgentChange.picture`).
+        Some(Value::Null) => return Ok(Some(String::new())),
+        None => return Ok(None),
+        Some(_) => {}
+    }
     match value.and_then(Value::as_str) {
-        None => Ok(None),
+        None => Err((INVALID_PARAMS, "picture must be an https URL".to_owned())),
         Some("") => Ok(Some(String::new())),
         Some(url) if url.starts_with("https://") => Ok(Some(url.to_owned())),
         Some(_) => Err((INVALID_PARAMS, "picture must be an https URL".to_owned())),
@@ -973,20 +979,30 @@ pub fn list(cx: &App) -> Result<Value, Failure> {
         Status::Ready => ("ready", None),
         Status::Error(error) => ("error", Some(error.clone())),
     };
+    let viewer = match &cx.global::<crate::community::AppState>().identity {
+        crate::community::IdentityState::Ready(identity) => Some(identity.pubkey_hex()),
+        _ => None,
+    };
     Ok(json!({
         "status": status,
         "error": error,
         "agents": agents.agents().iter().map(|agent| agent_entry(agent, cx)).collect::<Vec<_>>(),
         "running": agents.running().iter().map(|agent| agent_entry(agent, cx)).collect::<Vec<_>>(),
-        "elsewhere": agents.elsewhere(cx).iter().map(|agent| json!({
-            "pubkey": agent.pubkey,
-            "name": agent.name,
-            "type": agent.agent_type,
-            "relay": agent.relay,
-            "picture": agent.picture,
-            "place": "elsewhere",
-            "hosted": crate::agents2::is_hosted(&agent.agent_type, cx),
-        })).collect::<Vec<_>>(),
+        "elsewhere": agents.elsewhere(cx).iter().map(|agent| {
+            // A hosted agent runs where its host does, wherever it was
+            // listed (`AgentPlace`).
+            let hosted = crate::agents2::is_hosted(&agent.agent_type, cx);
+            json!({
+                "pubkey": agent.pubkey,
+                "name": agent.name,
+                "type": agent.agent_type,
+                "owner": viewer,
+                "relay": agent.relay,
+                "picture": agent.picture,
+                "place": if hosted { "hosted" } else { "elsewhere" },
+                "hosted": hosted,
+            })
+        }).collect::<Vec<_>>(),
         "teams": agents.teams().iter().map(|team| json!({
             "id": team.id,
             "name": team.name,

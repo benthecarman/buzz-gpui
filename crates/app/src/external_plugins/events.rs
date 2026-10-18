@@ -118,8 +118,10 @@ pub fn matches(filter: &Map<String, Value>, event: &Event) -> bool {
                     && t.get(1).is_some_and(|tag_value| has(value, tag_value))
             })
         }
-        // `limit` and the relay's read extensions decide nothing here.
-        _ => true,
+        "limit" | "consistency" => true,
+        // Search, feeds and the thread extensions are the relay's to
+        // decide: no event here matches them (`matchesEvent`).
+        _ => false,
     })
 }
 
@@ -130,6 +132,14 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
     let filters = filters(params, true)?;
     let http = RelayHttp::new(community.read(cx).origin.clone(), identity(cx)?);
     let session = community.read(cx).session.clone();
+    // The channels you can read, for the outbox's pending events.
+    let readable: HashSet<String> = community
+        .read(cx)
+        .snapshot
+        .channels
+        .iter()
+        .map(|channel| channel.id.clone())
+        .collect();
     Ok(on_tokio(cx, async move {
         let mut events = http
             .query_raw(&filters)
@@ -152,14 +162,34 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
                 let Some(signed) = &op.signed else {
                     continue;
                 };
+                // Product feedback never shows, and nothing from a
+                // channel you cannot read (`session.read`).
+                let channel = signed
+                    .tags
+                    .iter()
+                    .map(|tag| tag.as_slice())
+                    .find(|tag| tag.first().map(String::as_str) == Some("h"))
+                    .and_then(|tag| tag.get(1));
+                if signed.kind.as_u16() == 42000
+                    || channel.is_some_and(|channel| !readable.contains(channel))
+                {
+                    continue;
+                }
                 if !known.contains(&signed.id.to_hex())
                     && filters.iter().any(|filter| matches(filter, signed))
-                    && let Ok(value) = serde_json::to_value(signed)
+                    && let Ok(mut value) = serde_json::to_value(signed)
                 {
+                    // How it is going, as the projected rows carry.
+                    value["delivery"] = json!(super::outbox::delivery_name(op.delivery));
+                    value["error"] = json!(op.error);
                     events.push(value);
                 }
             }
         }
+        // Newest first, as the relay answers.
+        events.sort_by_key(|event| {
+            std::cmp::Reverse(event.get("created_at").and_then(Value::as_u64).unwrap_or(0))
+        });
         events.truncate(MAX_EVENTS);
         Ok(Value::Array(events))
     }))

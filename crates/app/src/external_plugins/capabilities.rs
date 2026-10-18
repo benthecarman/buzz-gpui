@@ -293,7 +293,8 @@ fn profile(key: &str, profile: Option<&Arc<Profile>>) -> Value {
             "isAgent": profile.is_agent,
             // An agent's attested owner (NIP-OA), if its profile names one.
             "owner": profile.owner_pubkey,
-            "loaded": !profile.name_is_fallback,
+            // Read from the relay, named or not.
+            "loaded": true,
         }),
         None => json!({
             "pubkey": key,
@@ -302,6 +303,7 @@ fn profile(key: &str, profile: Option<&Arc<Profile>>) -> Value {
             "about": null,
             "nip05": null,
             "isAgent": false,
+            "owner": null,
             "loaded": false,
         }),
     }
@@ -1029,14 +1031,14 @@ pub fn navigation_state(cx: &App) -> Value {
             "ingress": failed.ingress,
         })
     });
-    let (attempt, opening) = workspace.visit();
+    let (_, opening) = workspace.visit();
     json!({
         "status": match (&failed, opening) {
             (Some(_), _) => "failed",
             (None, true) => "opening",
             (None, false) => "opened",
         },
-        "entry": attempt,
+        "entry": workspace.entry(),
         "place": here.map(|here| place_json(&here, cx)),
         "failed": failed,
         "canGoBack": back,
@@ -1117,7 +1119,8 @@ fn pubkeys(params: &Value, max: usize) -> Result<Vec<String>, Failure> {
 
 /// `community/channels`: the selected community's channels.
 pub fn channels(cx: &App) -> Value {
-    let Some(community) = AppState::current(cx) else {
+    // The community the request or watch reaches, not only the selected.
+    let Ok(community) = community(cx) else {
         return json!([]);
     };
     Value::Array(
@@ -1201,15 +1204,21 @@ pub fn channel_list(cx: &App) -> Result<Value, Failure> {
 pub fn search_public(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let query = text(params, "query").unwrap_or_default().to_owned();
     let exact = params.get("exact").and_then(Value::as_bool) == Some(true);
+    // At most this many (`searchPublic`'s `limit`).
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|limit| limit.max(1) as usize);
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         let page = session
             .search_public_channel_page(&query, exact)
             .await
-            .map_err(|error| (3, error))?;
+            .map_err(|error| (2, error))?;
+        let keep = limit.unwrap_or(usize::MAX).min(page.channels.len());
         Ok(json!({
-            "channels": page.channels.iter().map(channel_json).collect::<Vec<_>>(),
-            "partial": page.partial,
+            "channels": page.channels[..keep].iter().map(channel_json).collect::<Vec<_>>(),
+            "partial": page.partial || keep < page.channels.len(),
         }))
     }))
 }
@@ -1228,7 +1237,7 @@ pub fn find_labeled(params: &Value, cx: &App) -> Result<Task<Result<Value, Failu
         let found = session
             .find_labeled(&creator, &label)
             .await
-            .map_err(|error| (3, error))?;
+            .map_err(|error| (2, error))?;
         Ok(Value::Array(found.iter().map(channel_json).collect()))
     }))
 }
@@ -1670,9 +1679,13 @@ pub fn git_authorization(params: &Value, cx: &App) -> Result<Value, Failure> {
         .read(cx)
         .session
         .projects()
-        .git_authorization(repository)
-        .map_err(invalid)?;
-    Ok(json!({ "repository": repository, "token": token }))
+        .git_authorization(repository);
+    // `null` for a repository this community does not serve, as
+    // `authorizeGit` answers.
+    Ok(match token {
+        Ok(token) => json!({ "repository": repository, "token": token }),
+        Err(_) => Value::Null,
+    })
 }
 
 /// `agents/attest`: your NIP-OA proof that you own `pubkey`, the tag
@@ -1874,6 +1887,25 @@ pub fn statuses(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>
     }))
 }
 
+/// `statuses/save`: sets your status, `text` and `emoji` with an optional
+/// `expiresAt` (unix seconds), or clears it with both empty
+/// (`statuses.save`). Answers once the relay has it.
+pub fn save_status(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let input = buzz_relay_client::user_status::StatusInput {
+        text: text(params, "text").unwrap_or_default().to_owned(),
+        emoji: text(params, "emoji").unwrap_or_default().to_owned(),
+        expires_at: params.get("expiresAt").and_then(Value::as_u64),
+    };
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        session
+            .set_status(input)
+            .await
+            .map(|()| Value::Null)
+            .map_err(|error| (3, error))
+    }))
+}
+
 /// `emoji/add`: adds `shortcode` to your custom emoji set, or gives it a
 /// new image at `url` (`emoji.add`; `emoji.upload` is `files/upload`
 /// first). Answers once the replacement set is sent.
@@ -1885,11 +1917,14 @@ pub fn add_emoji(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
         .ok_or_else(|| invalid("url is required"))?
         .to_owned();
     let session = community(cx)?.read(cx).session.clone();
+    // The name as it is saved (`emoji.add` answers it).
+    let saved = buzz_relay_client::messages::normalize_shortcode(&code)
+        .ok_or_else(|| invalid("shortcode is not a valid emoji name"))?;
     Ok(on_tokio(cx, async move {
         session
             .add_emoji(&code, &url)
             .await
-            .map(|()| Value::Null)
+            .map(|()| json!({ "shortcode": saved }))
             .map_err(|error| (3, error))
     }))
 }
@@ -1897,6 +1932,8 @@ pub fn add_emoji(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
 /// `emoji/list`: the community's custom emoji.
 pub fn emoji(cx: &App) -> Result<Value, Failure> {
     let community = community(cx)?;
+    // Read them if nothing has yet (`emoji.ensure`).
+    community.read(cx).session.ensure_emoji();
     let emoji = community.read(cx).snapshot.emoji.clone();
     Ok(Value::Array(
         emoji
@@ -1912,6 +1949,7 @@ pub fn emoji(cx: &App) -> Result<Value, Failure> {
 pub fn emoji_catalog(cx: &App) -> Result<Value, Failure> {
     use buzz_relay_client::emoji::CatalogStatus;
     let community = community(cx)?;
+    community.read(cx).session.ensure_emoji();
     let emoji = community.read(cx).snapshot.emoji.clone();
     let (status, error) = match &emoji.status {
         CatalogStatus::Idle => ("idle", None),
@@ -2065,16 +2103,19 @@ fn start_navigation(params: &Value, cx: &mut App) -> Result<bool, Failure> {
         if matches!(place, Place::Conversation { .. }) {
             return Err(invalid("a conversation needs its community"));
         }
+        let replace = params.get("replace").and_then(Value::as_bool) == Some(true);
+        let keep = text(params, "focus") == Some("preserve");
         navigation::with_workspace(cx, move |workspace, window, cx| {
             workspace.select_personal(window, cx);
-            workspace.navigate(
-                Target {
-                    community: None,
-                    place,
-                },
-                window,
-                cx,
-            );
+            let target = Target {
+                community: None,
+                place,
+            };
+            match (keep, replace) {
+                (true, _) => workspace.navigate_keeping_focus(target, replace, window, cx),
+                (false, true) => workspace.navigate_replacing(target, window, cx),
+                (false, false) => workspace.navigate(target, window, cx),
+            }
         });
         return Ok(true);
     }
@@ -2166,7 +2207,23 @@ pub fn contributions(cx: &App) -> Value {
             "key": panel.key,
             "title": panel.title,
             "order": panel.order,
-            "launcher": panel.launcher.is_some(),
+            "icon": format!("{:?}", panel.icon),
+            // The channel header button (`channelLauncher`, with
+            // `channelPlacement`), or `null`.
+            "launcher": panel.launcher.as_ref().map(|launcher| json!({
+                "label": launcher.label,
+                "placement": match launcher.placement {
+                    crate::ui::channel_panels::Placement::Side => "side",
+                    crate::ui::channel_panels::Placement::Bottom => "bottom",
+                },
+                "target": launcher.target,
+            })),
+            // The app header button (`launcher`) and the channel menu entry.
+            "appLauncher": panel.app_launcher.as_ref().map(|launcher| json!({
+                "label": launcher.label,
+                "target": launcher.target,
+            })),
+            "menu": panel.menu.as_ref().map(|menu| json!({ "label": menu.label })),
         })).collect::<Vec<_>>(),
         "settings": crate::ui::settings::cards::all(cx).iter().map(|card| json!({
             "key": card.key,
@@ -2184,6 +2241,7 @@ pub fn contributions(cx: &App) -> Value {
         })).collect::<Vec<_>>(),
         "shortcuts": crate::shortcuts::external_list(cx).iter().map(|shortcut| json!({
             "key": shortcut.key,
+            "pluginId": crate::plugins::plugin_of(shortcut.key),
             "plugin": shortcut.plugin,
             "title": shortcut.title,
             "chords": shortcut.chords,
@@ -2226,12 +2284,19 @@ pub fn contributions(cx: &App) -> Value {
             .collect::<Vec<_>>(),
     });
     // Buzz's own link chips, which plugins outrank by order and key.
-    lists["linkRenderers"] =
-        json!([{ "key": "buzz.links/links", "title": "Links", "order": null }]);
-    let mut accessories: Vec<Value> = vec![
-        json!({ "key": "buzz.agent-activity/activity", "placement": "message", "title": "Agent Activity", "order": 0 }),
-        json!({ "key": "buzz.agent-activity/typing-presentation", "placement": "composer", "title": "Agent typing presentation", "order": 0 }),
-    ];
+    lists["linkRenderers"] = json!(if crate::plugins::enabled("buzz.links") {
+        vec![json!({ "key": "buzz.links/links", "title": "Links", "order": null })]
+    } else {
+        Vec::new()
+    });
+    let mut accessories: Vec<Value> = if crate::plugins::enabled("buzz.agent-activity") {
+        vec![
+            json!({ "key": "buzz.agent-activity/activity", "placement": "message", "title": "Agent Activity", "order": 0 }),
+            json!({ "key": "buzz.agent-activity/typing-presentation", "placement": "composer", "title": "Agent typing presentation", "order": 0 }),
+        ]
+    } else {
+        Vec::new()
+    };
     accessories.extend(crate::ui::composer_tools::listed(cx)
         .iter()
         .filter(|(key, _, accessory)| *accessory && crate::plugins::enabled_key(key))
@@ -2273,7 +2338,7 @@ const BUNDLED_TOOLS: [(&str, i32, &str); 3] = [
 
 /// Buzz's own completions, as `(key, trigger, order, title)`.
 const BUNDLED_COMPLETIONS: [(&str, &str, i32, &str); 3] = [
-    ("buzz.mentions/typeahead", "@", -10, "Mentions"),
+    ("buzz.mentions/typeahead", "@", -10, "Mention"),
     ("buzz.channels/channel-typeahead", "#", 0, "Channel"),
     ("buzz.emoji/typeahead", ":", 0, "Emoji"),
 ];
@@ -2342,12 +2407,32 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
     let source = text(params, "sourceKey")
         .filter(|key| !key.is_empty() && key.chars().count() <= 1024)
         .ok_or_else(|| invalid("sourceKey is required (up to 1024 characters)"))?;
-    // The community the request reaches: one it names, or the selected.
-    let community = community(cx).ok();
-    // Any place `ui/navigate` takes, or the short forms below.
-    let place = match (text(params, "to"), text(params, "channel"), &community) {
+    // The community the request reaches: one it names, or the selected;
+    // none for a place in Personal space (`community: null`).
+    let community = match params.get("community") {
+        Some(Value::Null) => None,
+        _ => community(cx).ok(),
+    };
+    for key in ["title", "body"] {
+        if params
+            .get(key)
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return Err(invalid(format!("{key} must be text")));
+        }
+    }
+    // Any place `ui/navigate` takes, or the short forms below; one that
+    // cannot open is refused (`parseOpenTarget`).
+    let place = match (
+        text(params, "to"),
+        text(params, "channel"),
+        text(params, "page"),
+    ) {
         (Some(_), _, _) => place_of(params, cx)?,
-        (None, Some(channel), Some(community)) => {
+        (None, Some(channel), _) => {
+            let community = community
+                .as_ref()
+                .ok_or_else(|| invalid("a conversation needs a community"))?;
             let channel = self::channel(&json!({ "channel": channel }), community.read(cx))?;
             let message = event_id(params, "message")?;
             let thread = event_id(params, "thread")?;
@@ -2358,15 +2443,14 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
                 members: false,
             }
         }
-        _ => match text(params, "page").and_then(|key| {
-            crate::ui::pages::all(cx)
+        (None, None, Some(key)) => {
+            let spec = crate::ui::pages::all(cx)
                 .into_iter()
                 .find(|spec| spec.page.key() == key)
-        }) {
-            // A plugin page a click opens.
-            Some(spec) => Place::Page(spec.page),
-            None => Place::Page(crate::ui::pages::Page::MESSAGES),
-        },
+                .ok_or_else(|| invalid(format!("There is no page {key}")))?;
+            Place::Page(spec.page)
+        }
+        (None, None, None) => Place::Page(crate::ui::pages::Page::MESSAGES),
     };
     let target = Target {
         community: community.map(|community| community.read(cx).origin.to_string()),

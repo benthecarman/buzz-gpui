@@ -1465,7 +1465,10 @@ fn winning_picker(cx: &App) -> Option<ReactionPicker> {
         .0
         .iter()
         .filter(|picker| crate::plugins::enabled_key(picker.key))
-        .filter(|picker| (picker.order, picker.key) < BUNDLED)
+        // The bundled picker counts only while Emoji is on.
+        .filter(|picker| {
+            !crate::plugins::enabled_key(BUNDLED.1) || (picker.order, picker.key) < BUNDLED
+        })
         .min_by_key(|picker| (picker.order, picker.key))
         .cloned()
 }

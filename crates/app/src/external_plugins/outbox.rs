@@ -10,6 +10,10 @@ use buzz_relay_client::outbox::{Delivery, Operation, Outbox};
 use gpui_kit::*;
 use serde_json::{Value, json};
 
+pub(super) fn delivery_name(delivery: Delivery) -> &'static str {
+    self::delivery(delivery)
+}
+
 fn delivery(delivery: Delivery) -> &'static str {
     match delivery {
         Delivery::Sending => "sending",
@@ -38,6 +42,9 @@ fn operation(operation: &Operation) -> Value {
         "createdAt": operation.event.created_at.as_secs(),
         "content": operation.event.content,
         "tags": operation.event.tags.iter().map(|tag| tag.as_slice()).collect::<Vec<_>>(),
+        // The signed event, once signed (`OutgoingEvent.signed`).
+        "pubkey": operation.signed.as_ref().map(|signed| signed.pubkey.to_hex()),
+        "sig": operation.signed.as_ref().map(|signed| signed.sig.to_string()),
     })
 }
 
@@ -177,6 +184,8 @@ pub fn watch(
     let (sender, mut changes) = futures::channel::mpsc::unbounded::<Value>();
     crate::runtime::Runtime::handle(cx).spawn(async move {
         let Some(outbox) = session.outbox().await else {
+            // A community that takes no writes has nothing on its way.
+            let _ = sender.unbounded_send(json!([]));
             return;
         };
         let mut receiver = outbox.changes();

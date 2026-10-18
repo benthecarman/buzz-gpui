@@ -6,7 +6,7 @@ use super::capabilities::{Failure, Watch, community};
 use super::protocol::INVALID_PARAMS;
 use crate::agent_activity::observer;
 use crate::agent_activity::turns::TurnState;
-use crate::agent_activity::{Capture, FeedStatus, HistoryStatus, Snapshot};
+use crate::agent_activity::{Capture, HistoryStatus, Snapshot};
 use gpui_kit::*;
 use serde_json::{Value, json};
 
@@ -43,6 +43,10 @@ fn state(snapshot: &Snapshot, agent: Option<&str>) -> Value {
             "channel": typing.channel_id,
             "root": typing.thread_root,
             "since": typing.started_at,
+            // The last working signal: each lives `TYPING_FRESH_MS`.
+            "timestamp": typing
+                .expires_at
+                .saturating_sub(crate::agent_activity::turns::TYPING_FRESH_MS),
             "expiresAt": typing.expires_at,
             // Only working typing evidence is kept.
             "working": true,
@@ -80,6 +84,18 @@ fn state(snapshot: &Snapshot, agent: Option<&str>) -> Value {
             Capture::Error => "error",
         },
         "workingChannels": snapshot.working_channels,
+        // This app's own agents' requests in channels you can read.
+        "local": snapshot.local.iter().filter(|work| mine(&work.agent)).map(|work| json!({
+            "agent": work.agent,
+            "channel": work.channel_id,
+            "message": work.message_id,
+            "root": work.thread_root_id,
+            "state": format!("{:?}", work.state).to_ascii_lowercase(),
+            "startedAt": work.started_at,
+            "error": work.error,
+            "dismissed": work.dismissed,
+            "step": work.step.as_ref().map(|step| json!({ "tool": step.tool, "target": step.target })),
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -90,10 +106,8 @@ fn agent(params: &Value) -> Option<&str> {
 /// `activity/observed`: what the feed shows now, of one `agent` or all.
 pub fn get(params: &Value, cx: &App) -> Result<Value, Failure> {
     let community = community(cx)?;
+    // Without a feed on this device, `status` says `unavailable`.
     let snapshot = observer::snapshot(&community, cx);
-    if snapshot.status == FeedStatus::Unavailable {
-        return Err((3, "This device cannot read agent activity.".to_owned()));
-    }
     Ok(state(&snapshot, agent(params)))
 }
 
@@ -220,14 +234,8 @@ pub fn archive_read(params: &Value, cx: &mut App) -> Result<Task<Result<Value, F
     let read = crate::ui::settings::archive::read_for(&community, kind, agent, before, cx)
         .map_err(|error| (3, error))?;
     Ok(cx.background_spawn(async move {
-        let page = read.await.map_err(|error| (3, error))?;
-        let mut agents: Vec<&str> = page
-            .records
-            .iter()
-            .map(|record| record.agent.as_str())
-            .collect();
-        agents.sort_unstable();
-        agents.dedup();
+        // Every agent with saved records of this kind, not only this page's.
+        let (page, agents) = read.await.map_err(|error| (2, error))?;
         Ok(json!({
             "agents": agents,
             "records": page.records.iter().map(|record| json!({

@@ -77,6 +77,11 @@ pub struct Revision {
     pub author: String,
     pub created_at: u64,
     pub content: String,
+    /// The rest of the signed event (its `expected-revision` and `h`
+    /// tags, kind and signature), for callers that want it whole.
+    pub kind: u16,
+    pub tags: Vec<Vec<String>>,
+    pub sig: String,
 }
 
 impl Revision {
@@ -86,6 +91,13 @@ impl Revision {
             author: event.pubkey.to_hex(),
             created_at: event.created_at.as_secs(),
             content: event.content.clone(),
+            kind: event.kind.as_u16(),
+            tags: event
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect(),
+            sig: event.sig.to_string(),
         }
     }
 

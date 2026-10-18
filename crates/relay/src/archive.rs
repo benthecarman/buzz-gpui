@@ -268,6 +268,19 @@ impl Archive {
         Ok(())
     }
 
+    /// The agents with saved records of `kind` for the viewer, at most
+    /// 256 (`ArchivePage.agents`).
+    pub fn agents(&self, viewer: &str, community: &str, kind: u16) -> Result<Vec<String>> {
+        let inner = self.lock()?;
+        let mut statement = database(inner.connection.prepare(
+            "SELECT DISTINCT agent FROM archive_events WHERE viewer=?1 AND community=?2 AND kind=?3 ORDER BY agent LIMIT 256",
+        ))?;
+        let rows = database(
+            statement.query_map(params![viewer, community, kind], |r| r.get::<_, String>(0)),
+        )?;
+        database(rows.collect::<rusqlite::Result<Vec<_>>>())
+    }
+
     /// One page of the viewer's saved records of `kind`, newest first,
     /// optionally from one `agent` and older than the `before` cursor
     /// (buzz-app's archive `read`). Records past their retention are left

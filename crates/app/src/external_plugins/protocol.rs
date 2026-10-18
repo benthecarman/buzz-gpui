@@ -226,7 +226,7 @@ pub struct AccountActionDecl {
 pub struct AccessoryDecl {
     pub id: String,
     pub title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "order")]
     pub order: i32,
     /// `composer` (the default): a view above every composer. `message`:
     /// drawn beside each message's reactions; Buzz asks
@@ -433,10 +433,10 @@ fn one_minute() -> u64 {
 pub struct CompletionDecl {
     pub id: String,
     pub title: String,
-    /// One character, not `@`, `#` or `:`, which the composer keeps.
+    /// One character; `@`, `#` and `:` only by ranking before Buzz's own.
     pub trigger: String,
     /// Of completions on one trigger, the lowest order (then key) answers.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "order")]
     pub order: i32,
 }
 
@@ -453,7 +453,7 @@ pub struct PanelDecl {
     #[serde(default)]
     pub matches: Vec<String>,
     /// Which panel shows a link several match: the lowest wins.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "order")]
     pub order: i32,
     /// A button in the channel header that toggles the panel.
     #[serde(default)]
@@ -538,6 +538,21 @@ pub struct PageDecl {
     /// Shows Buzz's companion dock beside the page (`companion`).
     #[serde(default)]
     pub companion: bool,
+    /// `false` keeps the page out of navigation (buzz-app's `primary`).
+    #[serde(default)]
+    pub primary: Option<bool>,
+}
+
+/// An `order`: any finite number, as buzz-app takes, rounded to a whole
+/// one.
+fn order<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
+    let value = f64::deserialize(deserializer)?;
+    if !value.is_finite() {
+        return Err(serde::de::Error::custom("order must be a finite number"));
+    }
+    Ok(value
+        .round()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -552,6 +567,10 @@ pub enum PagePlacement {
     Toolbar,
     /// No navigation entry; search and links still reach it.
     Hidden,
+    /// A placement Buzz does not know: dropped, as buzz-app drops it,
+    /// leaving the default.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -635,7 +654,7 @@ pub struct LinkRendererDecl {
     pub title: Option<String>,
     pub matches: Vec<String>,
     /// Lower wins among renderers that match.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "order")]
     pub order: i32,
 }
 
@@ -652,7 +671,7 @@ pub struct MessageRendererDecl {
     pub kinds: Vec<u16>,
     #[serde(default)]
     pub prefix: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "order")]
     pub order: i32,
 }
 
@@ -675,7 +694,7 @@ pub struct ToolDecl {
     pub title: String,
     #[serde(default)]
     pub icon: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "order")]
     pub order: i32,
     /// Also a reaction picker (`reactionComponent`): a view of kind
     /// `reactionPicker` shown for "Add reaction" when its order (then
@@ -696,7 +715,7 @@ pub struct ShortcutDecl {
     #[serde(default)]
     pub keys: Vec<String>,
     /// Settings lists the plugin's shortcuts by this, then by id.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "order")]
     pub order: i32,
     /// Also runs while a text field has focus.
     #[serde(default)]
@@ -850,7 +869,13 @@ impl Contributions {
         }
         for category in &self.notifications {
             id(&category.id)?;
-            check_title(&category.id, &category.label)?;
+            // Labels may run to 128 characters, as buzz-app's.
+            if category.label.trim().is_empty() || category.label.chars().count() > 128 {
+                return Err(format!(
+                    "“{}” needs a label of 1 to 128 characters.",
+                    category.id
+                ));
+            }
         }
         for action in &self.message_actions {
             id(&action.id)?;
@@ -1006,6 +1031,9 @@ impl Contributions {
         for shortcut in &self.shortcuts {
             id(&shortcut.id)?;
             check_title(&shortcut.id, &shortcut.title)?;
+            if shortcut.keys.is_empty() {
+                return Err(format!("“{}” needs at least one key binding.", shortcut.id));
+            }
             for keys in &shortcut.keys {
                 Chord::parse(keys)?;
             }

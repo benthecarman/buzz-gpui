@@ -85,11 +85,11 @@ async fn read_in(
     let aggregate = channels.len() > 1;
     let view = workflows
         .definitions(channels, aggregate)
-        .map_err(|error| (3, error))?;
+        .map_err(|error| (2, error))?;
     view.refresh(false).await;
     let snapshot = view.snapshot();
     if let Some(error) = &snapshot.error {
-        return Err((3, error.clone()));
+        return Err((2, error.clone()));
     }
     let answer = json!({
         "status": status(snapshot.status),
@@ -176,11 +176,11 @@ pub fn runs(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
         let workflow = named(definitions, &id, owner.as_deref())?;
         let view = workflows
             .runs(&workflow, cursor)
-            .map_err(|error| (3, error))?;
+            .map_err(|error| (2, error))?;
         view.refresh(false).await;
         let snapshot = view.snapshot();
         if let Some(error) = &snapshot.error {
-            return Err((3, error.clone()));
+            return Err((2, error.clone()));
         }
         Ok(json!({
             "status": status(snapshot.status),

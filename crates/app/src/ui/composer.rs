@@ -269,8 +269,8 @@ pub struct Composer {
     /// Me: no remembered-agent follow-up draft after a send.
     no_followup: bool,
     /// Plugin tools in the toolbar (`composer_tools`).
-    /// Plugin tools, each with whether it leads the toolbar.
-    tools: Vec<(bool, AnyView)>,
+    /// Plugin tools, each with its place among Buzz's own buttons.
+    tools: Vec<(super::composer_tools::Slot, AnyView)>,
     /// Plugin accessories above the composer.
     accessories: Vec<AnyView>,
     /// The tool registry's [`super::composer_tools::generation`] the
@@ -1491,6 +1491,14 @@ impl Composer {
                 )
             })
             .flatten()
+            // Buzz's own `@`, `#` and `:` are their plugins': off, they
+            // offer nothing.
+            .filter(|query| match query.trigger {
+                Trigger::Mention => crate::plugins::enabled("buzz.mentions"),
+                Trigger::Channel => crate::plugins::enabled("buzz.channels"),
+                Trigger::Emoji => crate::plugins::enabled("buzz.emoji"),
+                _ => true,
+            })
             .filter(|query| {
                 // A chip's own `@Name` is not a search.
                 !state
@@ -2878,6 +2886,15 @@ impl Composer {
     }
 
     /// Ends a plugin capture (`accept`), attaching `file` if it made one.
+    /// Ends a plugin's capture with nothing attached, as when the tool
+    /// that started it goes.
+    pub fn cancel_plugin_capture(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.capture, Some(Capture::Plugin(_))) {
+            self.capture = None;
+            cx.notify();
+        }
+    }
+
     pub fn accept_plugin_capture(
         &mut self,
         file: Option<Captured>,
@@ -4641,40 +4658,40 @@ impl Composer {
                         .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx))),
                 )
             })
+            .children(self.tools_in(super::composer_tools::Slot::BeforeEmoji))
             .child(
-                div().relative().child(
-                    IconButton::new("emoji", IconName::Smiley)
-                        .size(IconButtonSize::Sm)
-                        .selected(self.picker_open)
-                        .tooltip("Emoji and GIFS")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            // The press outside that just closed it.
-                            if this
-                                .picker_closed
-                                .take()
-                                .is_some_and(|at| at.elapsed() < Duration::from_millis(300))
-                            {
-                                return;
-                            }
-                            this.picker_open = !this.picker_open;
-                            if this.picker_open {
-                                this.picker.update(cx, |picker, cx| {
-                                    picker.reset(window, cx);
-                                    picker.focus(window, cx);
-                                });
-                            } else {
-                                this.focus(window, cx);
-                            }
-                            cx.notify();
-                        })),
-                ),
+                div()
+                    .relative() // The emoji picker is the Emoji plugin's.
+                    .when(crate::plugins::enabled("buzz.emoji"), |toolbar| {
+                        toolbar.child(
+                            IconButton::new("emoji", IconName::Smiley)
+                                .size(IconButtonSize::Sm)
+                                .selected(self.picker_open)
+                                .tooltip("Emoji and GIFS")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    // The press outside that just closed it.
+                                    if this
+                                        .picker_closed
+                                        .take()
+                                        .is_some_and(|at| at.elapsed() < Duration::from_millis(300))
+                                    {
+                                        return;
+                                    }
+                                    this.picker_open = !this.picker_open;
+                                    if this.picker_open {
+                                        this.picker.update(cx, |picker, cx| {
+                                            picker.reset(window, cx);
+                                            picker.focus(window, cx);
+                                        });
+                                    } else {
+                                        this.focus(window, cx);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
-            .children(
-                self.tools
-                    .iter()
-                    .filter(|(leading, _)| !leading)
-                    .map(|(_, tool)| tool.clone()),
-            )
+            .children(self.tools_in(super::composer_tools::Slot::BeforeVoice))
             // A plain 32px button: no hover fill, an 18px glyph. While
             // editing it stays but records nothing (`useVoiceCapture`).
             // The recorder is the Voice Notes plugin's (`voice-notes`).
@@ -4701,6 +4718,7 @@ impl Composer {
                         ),
                 )
             })
+            .children(self.tools_in(super::composer_tools::Slot::AfterVoice))
             .child(
                 div()
                     .relative()
@@ -4750,6 +4768,15 @@ impl Composer {
 
     /// `.composerLeadingTools`: the mention button, and once chips name
     /// recipients, a pill of their avatars that remove them on click.
+    /// The plugin tools in one toolbar slot, in order.
+    fn tools_in(&self, slot: super::composer_tools::Slot) -> Vec<AnyView> {
+        self.tools
+            .iter()
+            .filter(|(at, _)| *at == slot)
+            .map(|(_, tool)| tool.clone())
+            .collect()
+    }
+
     fn leading_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         let recipients = self.recipients(cx);
@@ -4852,22 +4879,21 @@ impl Composer {
                 d.rounded_full().px(px(2.)).bg(c.affordance_subtle)
             })
             // Plugin tools ordered below 0 lead (`renderLeading`).
-            .children(
-                self.tools
-                    .iter()
-                    .filter(|(leading, _)| *leading)
-                    .map(|(_, tool)| tool.clone()),
-            )
-            .child(
-                IconButton::new("mention", IconName::At)
-                    .size(IconButtonSize::Sm)
-                    .tooltip("Mention a member")
-                    .selected(self.mention_picker.is_some())
-                    .disabled(self.input_disabled(cx))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.toggle_mention_picker(window, cx)),
-                    ),
-            )
+            .children(self.tools_in(super::composer_tools::Slot::BeforeMention))
+            // The mention picker is the Mentions plugin's.
+            .when(crate::plugins::enabled("buzz.mentions"), |toolbar| {
+                toolbar.child(
+                    IconButton::new("mention", IconName::At)
+                        .size(IconButtonSize::Sm)
+                        .tooltip("Mention a member")
+                        .selected(self.mention_picker.is_some())
+                        .disabled(self.input_disabled(cx))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_mention_picker(window, cx)
+                        })),
+                )
+            })
+            .children(self.tools_in(super::composer_tools::Slot::AfterMention))
             .when(has_recipients, |d| {
                 d.child(
                     // 28px buttons overlapping by 6px, then 6px of pill.

@@ -659,6 +659,8 @@ pub fn me(cx: &App) -> Result<Value, Failure> {
     for flag in ["starWritable", "sortWritable", "muteWritable"] {
         me[flag] = json!(false);
     }
+    // The conversations in Me, from the placement record.
+    me["meChannels"] = json!(session.me_kit().snapshot().me_channels());
     Ok(me)
 }
 
@@ -963,6 +965,8 @@ pub fn refresh(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
         "emoji" => session.refresh_emoji(),
         "hiddenDms" => session.refresh_dm_visibility(),
         "sidebar" => session.refresh_sidebar(),
+        "channels" => session.refresh_channels(),
+        "roster" => session.refresh_roster(),
         "kit" => {
             return Ok(on_tokio(cx, async move {
                 session
@@ -975,7 +979,8 @@ pub fn refresh(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
         _ => {
             return Err((
                 INVALID_PARAMS,
-                "what is unread, inbox, reminders, emoji, hiddenDms, sidebar or kit".to_owned(),
+                "what is unread, inbox, reminders, emoji, hiddenDms, sidebar, channels, roster or kit"
+                    .to_owned(),
             ));
         }
     }
