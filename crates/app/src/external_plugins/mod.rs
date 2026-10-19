@@ -1273,6 +1273,18 @@ impl ExternalPlugins {
         let views: Vec<_> = plugin.views.values().cloned().collect();
         for view in views {
             if let Some(view) = view.upgrade() {
+                // A page whose route no longer suits it closes instead.
+                if view.read(cx).kind() == "page" {
+                    let page = pages::Page::new(intern(view.read(cx).contribution_key()));
+                    if crate::ui::navigation::workspace(cx)
+                        .is_some_and(|workspace| !workspace.read(cx).page_route_stands(page, cx))
+                    {
+                        crate::ui::navigation::with_workspace(cx, move |workspace, _, cx| {
+                            workspace.drop_page_view(page, cx)
+                        });
+                        continue;
+                    }
+                }
                 let params = view.read(cx).open_params(cx);
                 if let Some(connection) = cx
                     .global::<Self>()

@@ -882,7 +882,10 @@ impl Workspace {
     /// A failed visit mounts nothing until Retry, which builds it with its
     /// route.
     fn ensure_page_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.failure.is_some() || self.views.contains_key(&self.page) {
+        if self.failure.is_some()
+            || self.views.contains_key(&self.page)
+            || !self.page_route_stands(self.page, cx)
+        {
             return;
         }
         if let Some(build) = pages::spec(self.page, cx).and_then(|spec| spec.build) {
@@ -893,6 +896,29 @@ impl Workspace {
             }
             self.views.insert(self.page, view);
         }
+    }
+
+    /// The visit's route still suits `page`: it takes routes, at the
+    /// version the route was made for, and these params. A page back at
+    /// another version mounts nothing (`unavailable`).
+    pub(crate) fn page_route_stands(&self, page: Page, cx: &App) -> bool {
+        if page != self.page || self.page_route.is_none() {
+            return true;
+        }
+        match self.history.current().map(|target| &target.place) {
+            Some(Place::Route {
+                params, version, ..
+            }) => pages::routes(page, cx).is_some_and(|routes| {
+                version.is_none_or(|version| version == routes.version) && (routes.validate)(params)
+            }),
+            _ => true,
+        }
+    }
+
+    /// Closes the view of `page`, whose route no longer suits it.
+    pub(crate) fn drop_page_view(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.views.remove(&page);
+        cx.notify();
     }
 
     fn page_view(&self, page: Page) -> AnyElement {

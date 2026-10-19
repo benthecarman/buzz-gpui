@@ -489,14 +489,10 @@ impl Composer {
         })
         .detach();
         let markdown = LiveMarkdown::new(&input, cx);
-        let context = super::composer_tools::ToolContext {
-            community: community.clone(),
-            channel: channel.clone(),
-            thread: thread_root.map(|root| root.to_hex()),
-            composer: cx.weak_entity(),
-        };
-        let tools = super::composer_tools::build(context.clone(), &[], window, cx);
-        let accessories = super::composer_tools::build_accessories(context, &[], window, cx);
+        // Tools and accessories are made when the composer first shows, as
+        // buzz-app mounts them with it, so they open with the thread's
+        // root once its host knows it.
+        let (tools, accessories) = (Vec::new(), Vec::new());
         let mut composer = Self {
             community,
             channel,
@@ -566,7 +562,7 @@ impl Composer {
             no_followup: false,
             tools,
             accessories,
-            tools_generation: super::composer_tools::generation(cx),
+            tools_generation: UNBUILT,
             completions_generation: super::composer_completions::generation(),
             no_attachments: false,
             run_models: models::RunModels::default(),
@@ -614,6 +610,9 @@ impl Composer {
             return;
         }
         self.plugin_root = Some(root);
+        if self.tools_generation == UNBUILT {
+            return;
+        }
         let context = super::composer_tools::ToolContext {
             community: self.community.clone(),
             channel: self.channel.clone(),
@@ -3418,6 +3417,9 @@ pub fn pane_drop_overlay(composer: &Entity<Composer>, cx: &App) -> Option<AnyEle
 }
 
 /// `draft:<channel>`, or `draft:<channel>:thread:<root>` for a thread.
+/// `tools_generation` before the composer first shows.
+const UNBUILT: u64 = u64::MAX;
+
 fn draft_key(channel: &str, thread_root: Option<EventId>) -> String {
     match thread_root {
         Some(root) => format!("draft:{channel}:thread:{}", root.to_hex()),

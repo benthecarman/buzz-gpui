@@ -358,6 +358,12 @@ pub fn gallery(rows: &[Arc<MessageRow>], current: &Attachment) -> Vec<Attachment
 impl Render for Comments {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        // Plugins hear the thread's root (`threadRootId={snapshot.root.id}`).
+        if let Some(root) = self.snapshot.root.as_ref().map(|root| root.id) {
+            self.composer.update(cx, |composer, cx| {
+                composer.set_thread_root(root, window, cx)
+            });
+        }
         let state = self.state();
         let resolved = state == ThreadState::Ready;
         let replies = self.replies();
