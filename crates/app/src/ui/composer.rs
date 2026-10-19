@@ -596,6 +596,26 @@ impl Composer {
         self.session_conversation = true;
     }
 
+    /// Makes or remakes the tools and accessories, as buzz-app mounts them
+    /// with the composer: when it shows, or when its host keeps it mounted
+    /// out of sight (an unselected tab, closed comments).
+    pub fn mount_tools(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let generation = super::composer_tools::generation(cx);
+        if generation == self.tools_generation {
+            return;
+        }
+        self.tools_generation = generation;
+        let context = super::composer_tools::ToolContext {
+            community: self.community.clone(),
+            channel: self.channel.clone(),
+            thread: self.plugin_thread(),
+            composer: cx.weak_entity(),
+        };
+        self.tools = super::composer_tools::build(context.clone(), &self.tools, window, cx);
+        self.accessories =
+            super::composer_tools::build_accessories(context, &self.accessories, window, cx);
+    }
+
     /// The thread plugins hear this composer replies in.
     fn plugin_thread(&self) -> Option<String> {
         self.plugin_root
@@ -5785,19 +5805,7 @@ impl Render for Composer {
                 self.refresh_completion(cx);
             }
         }
-        let generation = super::composer_tools::generation(cx);
-        if generation != self.tools_generation {
-            self.tools_generation = generation;
-            let context = super::composer_tools::ToolContext {
-                community: self.community.clone(),
-                channel: self.channel.clone(),
-                thread: self.plugin_thread(),
-                composer: cx.weak_entity(),
-            };
-            self.tools = super::composer_tools::build(context.clone(), &self.tools, window, cx);
-            self.accessories =
-                super::composer_tools::build_accessories(context, &self.accessories, window, cx);
-        }
+        self.mount_tools(window, cx);
         let c = *cx.colors();
         self.sync_uploads(cx);
         self.markdown.follow_theme(&self.input, &c, cx);

@@ -1021,6 +1021,7 @@ impl Workspace {
         }
         let state = self.tabs(cx);
         self.ensure_tab_views(window, cx);
+        channel_tab_views::mount_composers(self, window, cx);
         self.reveal_main(&state, &laid_out, window);
         let side = self
             .drawer

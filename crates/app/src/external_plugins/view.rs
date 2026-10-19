@@ -326,6 +326,12 @@ impl ExternalView {
     }
 
     /// Keeps `route` as the page's route, as its next `view/open` says.
+    /// It forgets its route, which a page at another version does not
+    /// take (`routeVersion`).
+    pub(super) fn clear_route(&mut self) {
+        self.route = None;
+    }
+
     pub(super) fn set_route(&mut self, route: Value) {
         self.route = Some(route);
     }

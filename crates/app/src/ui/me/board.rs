@@ -907,6 +907,7 @@ impl Render for SessionWork {
             TabGeometry::finish(&self.tab_geometry);
         }
         let state = self.tabs(cx);
+        channel_tab_views::mount_composers(self, window, cx);
         let showing = state.showing();
         let has_content = state.has_panel() || self.side_drawer();
         let heading = self.heading((state.pane_open && has_content, has_content), window, cx);

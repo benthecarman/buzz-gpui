@@ -492,6 +492,15 @@ impl ChannelPage {
         self.input.clone()
     }
 
+    /// Mounts the composer's tools where buzz-app mounts the composer: in
+    /// any conversation but a preview, shown or not.
+    pub fn mount_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.preview() {
+            self.composer
+                .update(cx, |composer, cx| composer.mount_tools(window, cx));
+        }
+    }
+
     /// A reader's conversation: links open nowhere in Buzz and no thread
     /// opens from it (`ChannelPreview` has no `onOpenThread`).
     pub fn as_reader(&mut self, cx: &mut Context<Self>) {

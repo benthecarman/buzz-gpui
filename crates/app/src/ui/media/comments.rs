@@ -193,6 +193,22 @@ impl Comments {
         self.on_open = Some(on_open);
     }
 
+    /// Mounts the composer's tools once the thread is ready, open or
+    /// closed, as buzz-app keeps the comments mounted; plugins hear the
+    /// thread's root (`threadRootId={snapshot.root.id}`).
+    pub fn mount_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.snapshot.root.as_ref().map(|root| root.id) else {
+            return;
+        };
+        let ready = self.state() == ThreadState::Ready;
+        self.composer.update(cx, |composer, cx| {
+            composer.set_thread_root(root, window, cx);
+            if ready {
+                composer.mount_tools(window, cx);
+            }
+        });
+    }
+
     pub fn state(&self) -> ThreadState {
         let snapshot = &self.snapshot;
         if let Some(error) = &snapshot.error {
@@ -358,12 +374,7 @@ pub fn gallery(rows: &[Arc<MessageRow>], current: &Attachment) -> Vec<Attachment
 impl Render for Comments {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
-        // Plugins hear the thread's root (`threadRootId={snapshot.root.id}`).
-        if let Some(root) = self.snapshot.root.as_ref().map(|root| root.id) {
-            self.composer.update(cx, |composer, cx| {
-                composer.set_thread_root(root, window, cx)
-            });
-        }
+        self.mount_composer(window, cx);
         let state = self.state();
         let resolved = state == ThreadState::Ready;
         let replies = self.replies();

@@ -1264,6 +1264,17 @@ impl ExternalPlugins {
                 crate::ui::renderers::unregister(key);
             }
         }
+        // The route versions its page views were opened at.
+        let kept: Vec<_> = plugin.views.values().cloned().collect();
+        let versions: std::collections::HashMap<pages::Page, Option<u32>> = kept
+            .iter()
+            .filter_map(|view| view.upgrade())
+            .filter(|view| view.read(cx).kind() == "page")
+            .map(|view| {
+                let page = pages::Page::new(intern(view.read(cx).contribution_key()));
+                (page, pages::routes(page, cx).map(|routes| routes.version))
+            })
+            .collect();
         Self::apply(path, generation, &id, &name, &contributions, cx);
         let state = cx.global_mut::<Self>();
         let Some(plugin) = state.current(path, generation) else {
@@ -1273,16 +1284,26 @@ impl ExternalPlugins {
         let views: Vec<_> = plugin.views.values().cloned().collect();
         for view in views {
             if let Some(view) = view.upgrade() {
-                // A page whose route no longer suits it closes instead.
                 if view.read(cx).kind() == "page" {
                     let page = pages::Page::new(intern(view.read(cx).contribution_key()));
+                    // The shown page whose route no longer suits it closes
+                    // instead; this run never opened it, so it hears nothing.
                     if crate::ui::navigation::workspace(cx)
                         .is_some_and(|workspace| !workspace.read(cx).page_route_stands(page, cx))
                     {
+                        let view_id = view.read(cx).view_id().to_owned();
+                        if let Some(plugin) = cx.global_mut::<Self>().by_id_mut(&id) {
+                            plugin.views.remove(&view_id);
+                        }
                         crate::ui::navigation::with_workspace(cx, move |workspace, _, cx| {
                             workspace.drop_page_view(page, cx)
                         });
                         continue;
+                    }
+                    // A hidden one opens at its start when its routes changed.
+                    let now = pages::routes(page, cx).map(|routes| routes.version);
+                    if versions.get(&page).is_some_and(|before| *before != now) {
+                        view.update(cx, |view, _| view.clear_route());
                     }
                 }
                 let params = view.read(cx).open_params(cx);

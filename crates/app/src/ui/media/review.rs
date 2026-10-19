@@ -1907,6 +1907,10 @@ impl Render for Review {
             )
             .child(stage);
         let sheet_height = (vh * 0.44).clamp(288., 352.);
+        // Comments stay mounted while closed.
+        if let Some(comments) = &self.comments {
+            comments.update(cx, |comments, cx| comments.mount_composer(window, cx));
+        }
         let comments = self
             .comments
             .clone()

@@ -914,22 +914,9 @@ impl ThreadPanel {
         self.view.load_more();
     }
 
-    fn composer_view(&self, read_only: bool, cx: &mut Context<Self>) -> AnyElement {
-        let c = *cx.colors();
-        if read_only {
-            return div()
-                .mx(px(16.))
-                .mb(px(16.))
-                .p(px(12.))
-                .rounded(px(20.))
-                .border_1()
-                .border_color(c.border_standard)
-                .bg(c.surface_panel)
-                .text_body_sm()
-                .text_color(c.text_subtle)
-                .child("Join this channel to send messages.")
-                .into_any_element();
-        }
+    /// A channel known only from the cache shows its composer disabled,
+    /// as buzz-app's does (a preview shows Join instead).
+    fn composer_view(&self, _read_only: bool, _cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex_none()
             .child(self.composer.clone())
@@ -947,7 +934,16 @@ impl ThreadPanel {
             },
             None => ReplyContext::Missing,
         });
-        let can_send = self.can_send();
+        // A channel known only from the cache cannot be written to yet.
+        let read_only = self
+            .community
+            .read(cx)
+            .snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.id == self.channel)
+            .is_some_and(|channel| channel.read_only);
+        let can_send = self.can_send() && !read_only;
         let placeholder = self.snapshot.root.as_ref().map(|root| {
             let name = super::workflows::sender_name(&profiles, root);
             reply_placeholder(root, &self.viewer, &name)
@@ -964,6 +960,23 @@ impl ThreadPanel {
                 composer.set_thread_root(root, window, cx);
             }
         });
+    }
+
+    /// Mounts the composer's tools where buzz-app mounts the composer:
+    /// with its root known and verified, outside a preview, shown or not.
+    pub fn mount_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(root) = self.snapshot.root.as_ref().map(|root| root.id) {
+            self.composer.update(cx, |composer, cx| {
+                composer.set_thread_root(root, window, cx)
+            });
+        }
+        let mounted = self.snapshot.root.is_some()
+            && self.root_verified()
+            && matches!(self.access(cx), Access::Member | Access::Other);
+        if mounted {
+            self.composer
+                .update(cx, |composer, cx| composer.mount_tools(window, cx));
+        }
     }
 
     /// After each layout: reports what the reader sees, follows the panel

@@ -95,6 +95,31 @@ pub fn thread_channel<T: TabHost>(
 /// Makes the views of tabs that have none yet. A thread tab whose
 /// message changed has its view select it in place, keeping the reply
 /// being written; until the view knows its root, a new view opens it.
+/// Mounts the composers of the conversation and every tab, selected or
+/// not, as buzz-app keeps each tab's content mounted.
+pub fn mount_composers<T: TabHost>(this: &mut T, window: &mut Window, cx: &mut Context<T>) {
+    if let Some(page) = this.page() {
+        page.update(cx, |page, cx| page.mount_composer(window, cx));
+    }
+    let views: Vec<_> = this
+        .tab_views()
+        .values()
+        .filter_map(|view| match view {
+            TabView::Conversation(page) => Some((Some(page.clone()), None)),
+            TabView::Thread { panel, .. } => Some((None, Some(panel.clone()))),
+            _ => None,
+        })
+        .collect();
+    for (page, panel) in views {
+        if let Some(page) = page {
+            page.update(cx, |page, cx| page.mount_composer(window, cx));
+        }
+        if let Some(panel) = panel {
+            panel.update(cx, |panel, cx| panel.mount_composer(window, cx));
+        }
+    }
+}
+
 pub fn ensure_views<T: TabHost>(this: &mut T, window: &mut Window, cx: &mut Context<T>) {
     let (Some(community), Some(_)) = (this.community(), this.channel_id(cx)) else {
         return;
