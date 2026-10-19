@@ -96,6 +96,10 @@ struct Answers {
 /// A renderer's answer for a target, on its way to the UI thread.
 type Delivered = ((String, String), Outcome);
 
+/// How a message accessory's place opens the thread of the message it
+/// drew for.
+type ThreadOpener = (crate::ui::message::RowHandler, Arc<MessageRow>);
+
 thread_local! {
     static ANSWERS: RefCell<Answers> = RefCell::default();
     static INBOX: RefCell<Option<futures::channel::mpsc::UnboundedSender<Delivered>>> =
@@ -132,6 +136,9 @@ thread_local! {
     /// `contributions/list`.
     static TITLES: RefCell<HashMap<String, (String, Option<i32>)>> = RefCell::default();
     /// Each plugin's settings cards, for `settings/check`.
+    /// How each message accessory's place opens its message's thread, by
+    /// accessory key and message id, as last drawn.
+    static THREAD_OPENERS: RefCell<HashMap<(String, String), ThreadOpener>> = RefCell::default();
     static CARD_OWNERS: RefCell<HashMap<String, Vec<String>>> = RefCell::default();
     /// How many holders keep Settings' card checks running now.
     static CARDS_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -243,6 +250,35 @@ fn check_cards(cx: &mut App) -> Subscription {
     }
     CARDS_HELD.set(CARDS_HELD.get() + 1);
     Subscription::new(|| CARDS_HELD.set(CARDS_HELD.get().saturating_sub(1)))
+}
+
+/// `message/openThread`: opens the thread of `message`, as the place its
+/// accessory `accessory` was drawn does (`openThread`). `false` where
+/// that place cannot.
+pub fn open_accessory_thread(
+    plugin: &str,
+    params: &Value,
+    cx: &mut App,
+) -> Result<Value, capabilities::Failure> {
+    let field = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or((protocol::INVALID_PARAMS, format!("{key} is required")))
+    };
+    let key = format!("{plugin}/{}", field("accessory")?);
+    let message = field("message")?.to_owned();
+    let Some((open, row)) =
+        THREAD_OPENERS.with_borrow(|openers| openers.get(&(key, message)).cloned())
+    else {
+        return Ok(json!(false));
+    };
+    let window =
+        crate::ui::navigation::main_window(cx).ok_or((1, "The window is not open.".to_owned()))?;
+    window
+        .update(cx, |_, window, cx| open(&row, window, cx))
+        .map_err(|_| (1, "The window is not open.".to_owned()))?;
+    Ok(json!(true))
 }
 
 /// A contribution's title and order, by `plugin/id` key.
@@ -478,6 +514,9 @@ pub fn forget(plugin: &str) {
     MARKS.with_borrow_mut(|marks| marks.retain(|key, _| !key.starts_with(&prefix)));
     CARD_STATES.with_borrow_mut(|states| states.retain(|key, _| !key.starts_with(&prefix)));
     CARD_OWNERS.with_borrow_mut(|owners| owners.remove(plugin));
+    THREAD_OPENERS.with_borrow_mut(|openers| {
+        openers.retain(|(key, _), _| !key.starts_with(&format!("{plugin}/")))
+    });
     super::naming::forget(plugin);
     // Prose drew this plugin's old answers.
     crate::ui::renderers::text_changed();
@@ -903,7 +942,12 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
         self.order
     }
 
-    fn render(&self, row: &Arc<MessageRow>, open_thread: bool, cx: &App) -> Option<AnyElement> {
+    fn render(
+        &self,
+        row: &Arc<MessageRow>,
+        open_thread: Option<&crate::ui::message::RowHandler>,
+        cx: &App,
+    ) -> Option<AnyElement> {
         let kinds_ok = if self.kinds.is_empty() {
             row.kind == 9
         } else {
@@ -918,8 +962,23 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
             row.id.to_hex(),
             hashed(&row.content),
             row.reply_count,
-            open_thread
+            open_thread.is_some()
         );
+        // What `message/openThread` runs for this accessory's message.
+        if let Some(open) = open_thread {
+            THREAD_OPENERS.with_borrow_mut(|openers| {
+                // Kept for the messages drawn lately.
+                if openers.len() >= 4096 {
+                    openers.clear();
+                }
+                openers.insert(
+                    (self.key.to_owned(), row.id.to_hex()),
+                    (open.clone(), row.clone()),
+                )
+            });
+        }
+        let community = community_of(row, cx)
+            .map(|community| community.read(cx).origin.websocket().to_string());
         let tree = ask(
             &self.plugin,
             self.key,
@@ -929,7 +988,8 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
                 json!({
                     "accessory": self.id,
                     "message": message_json(row, cx),
-                    "openThread": open_thread,
+                    "openThread": open_thread.is_some(),
+                    "community": community,
                 })
             },
             cx,
@@ -1136,20 +1196,25 @@ pub fn set_card_visibility(plugin: &str, params: &Value, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// A settings card whose check failed is checked again (`ensure`): it
-/// is pending until its plugin answers `settings/visibility`.
-pub fn recheck_card(key: &str, cx: &mut App) {
+/// A settings card hidden or whose check failed is checked again
+/// (`ensure`): it is pending until its plugin answers
+/// `settings/visibility`.
+pub fn recheck_card(key: &str, cx: &mut App) -> bool {
     use crate::ui::settings::cards::{self, CardVisibility};
-    let failed = CARD_STATES.with_borrow_mut(|states| match states.get_mut(key) {
-        Some(state) if *state == CardVisibility::Error => {
+    let plugin = crate::plugins::plugin_of(key);
+    let checked = CARD_STATES.with_borrow_mut(|states| match states.get_mut(key) {
+        Some(state) if matches!(*state, CardVisibility::Error | CardVisibility::Hidden) => {
             *state = CardVisibility::Pending;
             true
         }
         _ => false,
     });
-    if failed {
+    if checked {
+        let card = key.rsplit('/').next().unwrap_or(key);
+        ExternalPlugins::notify_running(plugin, "settings/check", json!({ "cards": [card] }), cx);
         cards::changed(cx);
     }
+    checked
 }
 
 /// `page/badge`: the text on a page's row, or none.
@@ -1307,7 +1372,7 @@ impl Render for Tool {
             .upgrade()
             .map(|composer| {
                 let composer = composer.read(cx);
-                (composer.disabled(cx), composer.invites_agents())
+                (composer.disabled(cx), composer.invites_agents(cx))
             })
             .unwrap_or((true, false));
         let key = format!("{}/{}", self.plugin, self.id);

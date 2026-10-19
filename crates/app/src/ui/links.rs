@@ -333,6 +333,8 @@ pub struct Chip<'a> {
     pub line_height: Pixels,
     /// The widest the chip may be before its label wraps.
     pub max_width: Option<Pixels>,
+    /// The message it is in, if any, which a panel it opens belongs to.
+    pub origin: Option<navigation::LinkOrigin>,
 }
 
 /// A plain anchor for links no renderer takes: underlined body text.
@@ -341,6 +343,7 @@ fn plain_anchor(
     url: &str,
     text: String,
     line: Pixels,
+    origin: Option<navigation::LinkOrigin>,
     c: &buzz_ui::Colors,
 ) -> AnyElement {
     let target = url.to_string();
@@ -358,7 +361,13 @@ fn plain_anchor(
                 if target.starts_with("buzz:") {
                     navigation::open_url(&target, window, cx)
                 } else {
-                    navigation::open_web_link(&target, event.modifiers(), window, cx)
+                    navigation::open_web_link_from(
+                        &target,
+                        event.modifiers(),
+                        origin.clone(),
+                        window,
+                        cx,
+                    )
                 }
             })
         })
@@ -380,6 +389,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             url,
             authored.unwrap_or_else(|| url.to_string()),
             chip.line_height,
+            chip.origin.clone(),
             &c,
         );
     }
@@ -395,10 +405,12 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
                 url,
                 authored.unwrap_or_else(|| url.to_string()),
                 chip.line_height,
+                chip.origin.clone(),
                 &c,
             );
         };
         let target = url.to_string();
+        let origin = chip.origin.clone();
         let middle = target.clone();
         return div()
             .id(chip.id)
@@ -409,7 +421,13 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
                 if target.starts_with("buzz:") {
                     navigation::try_open_url(&target, window, cx);
                 } else {
-                    navigation::open_web_link(&target, event.modifiers(), window, cx)
+                    navigation::open_web_link_from(
+                        &target,
+                        event.modifiers(),
+                        origin.clone(),
+                        window,
+                        cx,
+                    )
                 }
             })
             .on_mouse_down(MouseButton::Middle, move |_, window, cx| {
@@ -495,6 +513,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             url,
             display.clone().unwrap_or_else(|| url.to_string()),
             chip.line_height,
+            chip.origin.clone(),
             &c,
         );
     }
@@ -566,6 +585,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             .into_any_element()
     };
     let target = url.to_string();
+    let origin = chip.origin.clone();
     let middle = target.clone();
     let internal = !external;
     // "This Buzz link couldn’t be opened here." after a failed open.
@@ -662,7 +682,13 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
                     cx.notify();
                 });
             } else {
-                navigation::open_web_link(&target, event.modifiers(), window, cx)
+                navigation::open_web_link_from(
+                    &target,
+                    event.modifiers(),
+                    origin.clone(),
+                    window,
+                    cx,
+                )
             }
         });
     if internal {

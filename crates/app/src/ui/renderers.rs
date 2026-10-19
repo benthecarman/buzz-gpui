@@ -95,10 +95,15 @@ pub trait MessageAccessory {
     fn order(&self) -> i32 {
         0
     }
-    /// `open_thread`: this place offers to open the message's thread
+    /// `open_thread`: how this place opens the message's thread
     /// (`MessageAccessoryProps.openThread`), as a timeline does and a
     /// thread does not.
-    fn render(&self, row: &Arc<MessageRow>, open_thread: bool, cx: &App) -> Option<AnyElement>;
+    fn render(
+        &self,
+        row: &Arc<MessageRow>,
+        open_thread: Option<&super::message::RowHandler>,
+        cx: &App,
+    ) -> Option<AnyElement>;
 }
 
 /// Replaces an attachment's player (voice notes use one).
@@ -241,7 +246,7 @@ pub fn register_message_accessory(accessory: Rc<dyn MessageAccessory>) {
 /// (`buzz.agent-activity/activity` at 0), by order then key.
 pub fn message_accessories(
     row: &Arc<MessageRow>,
-    open_thread: bool,
+    open_thread: Option<&super::message::RowHandler>,
     cx: &App,
 ) -> Vec<(bool, AnyElement)> {
     let accessories = REGISTRY.with_borrow(|r| r.accessories.clone());

@@ -1377,70 +1377,91 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // A link a panel shows opens it outside a Messages conversation
-        // too: as a Me conversation's tab, or beside the page.
         let messages = (self.page == Page::MESSAGES)
             .then(|| self.tab_key(cx))
             .flatten();
-        if messages.is_none() && channel_panels::resolve(url, cx).is_some() {
+        // Buzz's own links come before any panel: a session opens as a
+        // tab here, anything else navigates.
+        if let Some(link) = crate::deep_links::parse(url) {
+            let Some((_, current)) = messages else {
+                return false;
+            };
+            let crate::deep_links::Link::Conversation {
+                channel,
+                message: None,
+                ..
+            } = link
+            else {
+                return false;
+            };
+            let Some(community) = self.community.clone() else {
+                return false;
+            };
+            let session = usable(&community, &channel, cx)
+                .is_some_and(|summary| summary.channel_type == Some(ChannelType::Session));
+            if !session || channel == current {
+                return false;
+            }
+            let id = format!("conversation:{channel}");
+            self.update_tabs(cx, |state| {
+                if !state.tabs.iter().any(|tab| tab.id == id) {
+                    state.tabs.push(channel_tabs::ConversationTab {
+                        id: id.clone(),
+                        kind: TabKind::Conversation { channel },
+                    });
+                }
+                state.select(&id);
+            });
+            self.focus_tab(&id, window, cx);
+            return true;
+        }
+        let Some(panel) = channel_panels::resolve(url, cx) else {
+            return false;
+        };
+        // A link from the timeline replaces the panels links opened
+        // before; one from a thread adds to them.
+        let replaces = origin.as_ref().is_some_and(|origin| !origin.thread);
+        // Outside a Messages conversation: as a Me conversation's tab, or
+        // beside the page.
+        let Some((_, current)) = messages else {
+            if replaces
+                && self.page == Page::ME
+                && let Some(work) = self.me_work(cx)
+            {
+                work.update(cx, |work, cx| work.retire_link_panels(cx));
+            }
             let (channel, root) = match origin {
                 Some(origin) => (Some(origin.channel), Some(origin.root)),
                 None => (None, None),
             };
             return self.open_panel_at(None, url, channel, root, window, cx);
-        }
-        let Some((_, current)) = messages else {
-            return false;
         };
-        if let Some(panel) = channel_panels::resolve(url, cx) {
-            let (channel, root) = match origin {
-                Some(origin) => (origin.channel, Some(origin.root)),
-                None => (current, None),
-            };
-            let tab = PanelTab {
-                panel: panel.key,
-                channel,
-                target: url.to_string(),
-                root,
-            };
-            let id = tab.id();
-            // A retargeted panel is made again with its new opening.
-            if self
-                .update_tabs(cx, |state| state.open_panel(tab))
-                .unwrap_or(false)
-            {
-                self.tab_views.remove(&id);
-                self.ensure_tab_views(window, cx);
-            }
-            self.focus_tab(&id, window, cx);
-            return true;
-        }
-        let Some(crate::deep_links::Link::Conversation {
+        let (channel, root) = match origin {
+            Some(origin) => (origin.channel, Some(origin.root)),
+            None => (current, None),
+        };
+        let tab = PanelTab {
+            panel: panel.key,
             channel,
-            message: None,
-            ..
-        }) = crate::deep_links::parse(url)
-        else {
-            return false;
+            target: url.to_string(),
+            root,
         };
-        let Some(community) = self.community.clone() else {
-            return false;
-        };
-        let session = usable(&community, &channel, cx)
-            .is_some_and(|summary| summary.channel_type == Some(ChannelType::Session));
-        if !session || channel == current {
-            return false;
+        let id = tab.id();
+        // A retargeted panel is made again with its new opening.
+        if self
+            .update_tabs(cx, |state| {
+                if replaces {
+                    state
+                        .panels
+                        .retain(|panel| !panel.transient() || panel.id() == id);
+                }
+                state.open_panel(tab)
+            })
+            .unwrap_or(false)
+        {
+            self.tab_views.remove(&id);
+            self.ensure_tab_views(window, cx);
         }
-        let id = format!("conversation:{channel}");
-        self.update_tabs(cx, |state| {
-            if !state.tabs.iter().any(|tab| tab.id == id) {
-                state.tabs.push(channel_tabs::ConversationTab {
-                    id: id.clone(),
-                    kind: TabKind::Conversation { channel },
-                });
-            }
-            state.select(&id);
-        });
         self.focus_tab(&id, window, cx);
         true
     }

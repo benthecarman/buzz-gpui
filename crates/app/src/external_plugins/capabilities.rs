@@ -2707,7 +2707,16 @@ fn notifiable(community: &Entity<Community>, channel: &str, cx: &App) -> bool {
             community.read(cx).snapshot.status,
             buzz_relay_client::SessionStatus::Ready
         )
-        && self::channel(&json!({ "channel": channel }), community.read(cx)).is_ok()
+        // A member of it, not a preview of an open one.
+        && {
+            let community = community.read(cx);
+            let viewer = community.session.viewer();
+            community
+                .snapshot
+                .channels
+                .iter()
+                .any(|listed| listed.id == channel && listed.members.iter().any(|m| m == viewer))
+        }
 }
 
 /// `notifications/submit`: a notification in one of the plugin's

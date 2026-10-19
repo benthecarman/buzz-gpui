@@ -583,8 +583,14 @@ impl Composer {
         &self.community
     }
 
-    pub fn invites_agents(&self) -> bool {
-        self.invite_agents
+    /// Your library agents may be offered here (`inviteAgents`): in a new
+    /// session or any session conversation, never while editing.
+    pub fn invites_agents(&self, cx: &App) -> bool {
+        self.editing.is_none()
+            && (self.invite_agents
+                || self
+                    .summary(cx)
+                    .is_some_and(|channel| channel.channel_type == Some(ChannelType::Session)))
     }
 
     /// Nothing can be typed or sent now (`ComposerToolProps.disabled`).
@@ -1566,7 +1572,7 @@ impl Composer {
                         community: &community,
                         channel: &self.channel,
                         thread: thread.as_deref(),
-                        invite_agents: self.invite_agents,
+                        invite_agents: self.invites_agents(cx),
                         draft: &text,
                         start: chars(query.start),
                         end: chars(query.end),

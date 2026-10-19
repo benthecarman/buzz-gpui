@@ -77,11 +77,13 @@ impl Agents2 {
                 .update(cx, |this, _| {
                     let taken = pubkey == viewer
                         || this.saved().any(|saved| saved.summary.pubkey == pubkey)
-                        || this
-                            .listed
-                            .rows_of(&origin)
-                            .iter()
-                            .any(|row| row.pubkey == pubkey);
+                        // Listed in any community bound here.
+                        || this.bound.keys().any(|origin| {
+                            this.listed
+                                .rows_of(origin)
+                                .iter()
+                                .any(|row| row.pubkey == pubkey)
+                        });
                     taken || !this.hosted_busy.insert(pubkey.clone())
                 })
                 .unwrap_or(true);

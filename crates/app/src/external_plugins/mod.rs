@@ -1421,10 +1421,11 @@ impl ExternalPlugins {
         capabilities::resolve_request(request, cx)
     }
 
-    /// Checks plugin settings card `key` again when its last check
-    /// failed: it is pending until the plugin answers.
-    pub fn recheck_card(key: &str, cx: &mut App) {
-        contribute::recheck_card(key, cx);
+    /// Checks plugin settings card `key` again when it is hidden or its
+    /// last check failed: it is pending until the plugin answers. `false`
+    /// when it is no plugin's or showed already.
+    pub fn recheck_card(key: &str, cx: &mut App) -> bool {
+        contribute::recheck_card(key, cx)
     }
 
     /// A plugin page resolved its visit to `route` itself: its view keeps
@@ -2543,6 +2544,16 @@ impl ExternalPlugins {
                         contribute::tool_state(&plugin, params, cx)
                     }
                     Some(plugin) => contribute::open_popover(&plugin, params, cx),
+                    None => Err((1, "The plugin stopped.".to_owned())),
+                },
+            ),
+            "message/openThread" => Reply::Now(
+                match cx
+                    .global_mut::<Self>()
+                    .current(path, generation)
+                    .and_then(|plugin| plugin.id().map(str::to_owned))
+                {
+                    Some(plugin) => contribute::open_accessory_thread(&plugin, params, cx),
                     None => Err((1, "The plugin stopped.".to_owned())),
                 },
             ),

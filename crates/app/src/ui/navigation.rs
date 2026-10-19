@@ -378,10 +378,22 @@ pub fn open_url(url: &str, window: &mut Window, cx: &mut App) {
 /// shows it (GitHub) opens beside the conversation. A click with a
 /// modifier, or a link no panel takes, goes to the browser.
 pub fn open_web_link(url: &str, modifiers: Modifiers, window: &mut Window, cx: &mut App) {
+    open_web_link_from(url, modifiers, None, window, cx)
+}
+
+/// [`open_web_link`] from a message, whose thread the panel it opens
+/// belongs to (`opening.root`).
+pub fn open_web_link_from(
+    url: &str,
+    modifiers: Modifiers,
+    origin: Option<LinkOrigin>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let opened = !modifiers.modified()
         && workspace(cx).is_some_and(|workspace| {
             workspace.update(cx, |workspace, cx| {
-                workspace.open_panel_link(url, window, cx)
+                workspace.open_panel_link_from(url, origin, window, cx)
             })
         });
     if !opened {
@@ -411,6 +423,9 @@ pub fn show_profile(pubkey: String, at: Point<Pixels>, window: &mut Window, cx: 
 pub struct LinkOrigin {
     pub channel: String,
     pub root: String,
+    /// The message is a reply, shown in its thread: a link from it adds
+    /// to the panels links opened rather than replacing them.
+    pub thread: bool,
 }
 
 impl LinkOrigin {
@@ -418,6 +433,7 @@ impl LinkOrigin {
         Self {
             channel: row.channel.to_string(),
             root: row.thread_root_id.unwrap_or(row.id).to_hex(),
+            thread: row.thread_root_id.is_some(),
         }
     }
 }

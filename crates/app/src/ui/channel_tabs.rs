@@ -123,7 +123,7 @@ impl PanelTab {
 
     /// Details a link opened, which a timeline action replaces; channel
     /// tools stay.
-    fn transient(&self) -> bool {
+    pub(crate) fn transient(&self) -> bool {
         self.target != self.channel
     }
 }

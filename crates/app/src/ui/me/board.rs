@@ -214,6 +214,12 @@ impl SessionWork {
         this
     }
 
+    /// A link from the timeline replaces the panels links opened before
+    /// (`open(..., fromThread = false)`).
+    pub(crate) fn retire_link_panels(&mut self, cx: &mut Context<Self>) {
+        self.update_tabs(cx, |state| state.panels.retain(|panel| !panel.transient()));
+    }
+
     /// Opens panel `key` (or the one that shows `target`) as a tab of
     /// this conversation, as `useConversationTabs` `open` does.
     pub(crate) fn open_panel(

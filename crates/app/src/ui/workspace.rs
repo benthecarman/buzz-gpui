@@ -1455,9 +1455,15 @@ impl Workspace {
                     Some(CardVisibility::Visible) => false,
                     // Checked again once per attempt; failing again, it is
                     // unavailable.
-                    Some(CardVisibility::Error) if self.rechecked != Some(self.attempts) => {
+                    // A hidden or failed plugin card is checked once per
+                    // attempt (`retainVisibility` ensures it) before the
+                    // visit gives up on it.
+                    Some(CardVisibility::Error | CardVisibility::Hidden)
+                        if self.rechecked != Some(self.attempts)
+                            && crate::plugins::enabled_key(key)
+                            && crate::external_plugins::ExternalPlugins::recheck_card(key, cx) =>
+                    {
                         self.rechecked = Some(self.attempts);
-                        crate::external_plugins::ExternalPlugins::recheck_card(key, cx);
                         self.wait_then_present(target, Self::presenting_waits, window, cx);
                         return;
                     }
@@ -1767,6 +1773,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         self.route_link_to_tab(url, window, cx)
+    }
+
+    /// [`Self::open_panel_link`] from a message.
+    pub fn open_panel_link_from(
+        &mut self,
+        url: &str,
+        origin: Option<super::navigation::LinkOrigin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.route_link_from(url, origin, window, cx)
     }
 
     /// A link from outside the window, or one no tab takes. With

@@ -656,7 +656,7 @@ fn full(
     }
     // Plugins' message accessories sit beside the reactions too, around
     // Agent Activity's by order then key.
-    let open_thread = rows.actions.on_open_thread.is_some();
+    let open_thread = rows.actions.on_open_thread.as_ref();
     let (before, after): (Vec<_>, Vec<_>) =
         super::renderers::message_accessories(row, open_thread, cx)
             .into_iter()

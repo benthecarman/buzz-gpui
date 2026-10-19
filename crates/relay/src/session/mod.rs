@@ -1724,6 +1724,29 @@ impl Actor {
         if let Some(live) = &mut self.live {
             live.retry();
         }
+        // Suspended previews are looked up again (`revalidatePreviews`).
+        self.revalidate_previews();
+    }
+
+    /// Looks suspended public previews up again, 128 at a time; one that
+    /// resolves resumes and its recheck notice goes.
+    fn revalidate_previews(&self) {
+        let suspended = self
+            .discovery
+            .as_ref()
+            .map(DiscoveryState::suspended_channels)
+            .unwrap_or_default();
+        for chunk in suspended.chunks(128) {
+            let ops = actions::Ops {
+                commands: self.commands.clone(),
+            };
+            let ids = chunk.to_vec();
+            tokio::spawn(async move {
+                if let Ok(ctx) = ops.context().await {
+                    let _ = ops.resolve(&ctx, ids).await;
+                }
+            });
+        }
     }
 
     /// Open windows, the selected one first.
@@ -2171,14 +2194,7 @@ impl Actor {
                     self.reads_channels(false);
                     self.publish_live();
                     self.publish();
-                    let ops = actions::Ops {
-                        commands: self.commands.clone(),
-                    };
-                    tokio::spawn(async move {
-                        if let Ok(ctx) = ops.context().await {
-                            let _ = ops.resolve(&ctx, suspended).await;
-                        }
-                    });
+                    self.revalidate_previews();
                 }
                 self.start_scan(ScanOptions {
                     strong: true,

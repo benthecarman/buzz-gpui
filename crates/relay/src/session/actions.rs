@@ -1430,6 +1430,8 @@ impl Actor {
             self.purge_denied();
             self.update_interests();
             self.reads_channels(false);
+            // A resumed preview's recheck notice goes with it.
+            self.publish_live();
             self.publish();
         }
         Ok(())
