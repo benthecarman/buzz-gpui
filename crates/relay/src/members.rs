@@ -251,7 +251,7 @@ pub fn exact_key(text: &str) -> Option<String> {
 /// search of profiles. `page` starts at 1.
 pub fn search_filter(query: &str, page: usize) -> Result<Filter, String> {
     let text = query.trim();
-    if text.is_empty() || text.chars().count() > MAX_QUERY || page == 0 {
+    if text.is_empty() || text.encode_utf16().count() > MAX_QUERY || page == 0 {
         return Err("Enter a name or public key to search.".into());
     }
     Ok(match exact_key(text) {
@@ -277,6 +277,36 @@ pub struct Person {
 
 /// The newest profile per author, ranked by how the name matches `query`,
 /// then by name and key. `exact` keeps only that author.
+/// Each key's newest profile, where the relay first listed it
+/// (`foldProfiles`).
+pub fn fold_people(events: &[Verified]) -> Vec<Person> {
+    let mut order: Vec<String> = Vec::new();
+    let mut newest: HashMap<String, &Verified> = HashMap::new();
+    for event in events.iter().filter(|e| e.kind_u16() == kinds::PROFILE) {
+        let key = event.pubkey_hex();
+        match newest.get(&key) {
+            None => {
+                order.push(key.clone());
+                newest.insert(key, event);
+            }
+            Some(current) if crate::event::is_newer(event, current) => {
+                newest.insert(key, event);
+            }
+            Some(_) => {}
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|pubkey| {
+            let event = newest.get(&pubkey)?;
+            Some(Person {
+                profile: Profile::from_event(event),
+                pubkey,
+            })
+        })
+        .collect()
+}
+
 pub fn rank_people(events: &[Verified], query: &str, exact: Option<&str>) -> Vec<Person> {
     let mut newest: HashMap<String, &Verified> = HashMap::new();
     for event in events.iter().filter(|e| e.kind_u16() == kinds::PROFILE) {

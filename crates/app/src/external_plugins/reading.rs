@@ -299,11 +299,15 @@ pub fn local(
     }))
 }
 
-/// `inbox/get`: the inbox's conversations, as the Inbox page lists them.
-pub fn inbox(cx: &App) -> Result<Value, Failure> {
-    let community = community(cx)?;
-    let state = community.read(cx).session.inbox().borrow().clone();
-    Ok(inbox_json(&state))
+/// `inbox/get`: the inbox's conversations, as the Inbox page lists them,
+/// built now if nothing followed them yet.
+pub fn inbox(cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let receiver = session.inbox_now().await.map_err(|error| (3, error))?;
+        let state = receiver.borrow().clone();
+        Ok(inbox_json(&state))
+    }))
 }
 
 fn inbox_json(state: &buzz_relay_client::session::InboxState) -> Value {
@@ -383,9 +387,13 @@ pub fn watch_inbox(
     notify: impl Fn(Value, &mut App) + 'static,
     cx: &mut App,
 ) -> Result<(Watch, Value), Failure> {
-    let mut receiver = community(cx)?.read(cx).session.inbox();
+    let session = community(cx)?.read(cx).session.clone();
     let (sender, mut changes) = futures::channel::mpsc::unbounded::<Value>();
     crate::runtime::Runtime::handle(cx).spawn(async move {
+        // First the inbox as built now, not the state before it.
+        let Ok(mut receiver) = session.inbox_now().await else {
+            return;
+        };
         let mut last = Value::Null;
         loop {
             let now = inbox_json(&receiver.borrow_and_update());

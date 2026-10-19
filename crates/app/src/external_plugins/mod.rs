@@ -2237,7 +2237,7 @@ impl ExternalPlugins {
             "read/clearLocal" => later(reading::local(true, params, cx)),
             "read/markLocal" => later(reading::local(false, params, cx)),
             "sessions/memberOf" => later(channels::member_of(params, cx)),
-            "inbox/get" => Reply::Now(reading::inbox(cx)),
+            "inbox/get" => later(reading::inbox(cx)),
             "threads/activity" => later(reading::threads(params, cx)),
             "read/mark" => later(reading::mark(params, cx)),
             "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch"

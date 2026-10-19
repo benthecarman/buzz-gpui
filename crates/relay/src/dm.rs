@@ -59,7 +59,7 @@ pub fn confirmed(channel: Option<&ChannelSummary>, viewer: &str, pubkeys: &[Stri
 /// pages of 30 that overlap the preview; a search pages by 30. `page`
 /// starts at 1.
 pub fn people_filter(query: &str, page: usize) -> Result<(Filter, usize), String> {
-    if query.chars().count() > MAX_QUERY || page == 0 {
+    if query.encode_utf16().count() > MAX_QUERY || page == 0 {
         return Err("Invalid people search.".into());
     }
     let value = query.trim();
@@ -67,8 +67,13 @@ pub fn people_filter(query: &str, page: usize) -> Result<(Filter, usize), String
     let limit = if browsing && page == 1 { 15 } else { 30 };
     let relay_page = if browsing && page > 1 { page - 1 } else { page };
     let mut f = filter(json!({"kinds": [kinds::PROFILE], "limit": limit, "page": relay_page}));
-    if let Some(key) = crate::members::exact_key(value) {
-        f.insert("authors".into(), json!([key]));
+    // Only a lowercase hex key is one (`exactKey`).
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        f.insert("authors".into(), json!([value]));
     } else if !browsing {
         f.insert("search".into(), json!(value));
         f.insert("search_mode".into(), json!("prefix"));
@@ -76,15 +81,10 @@ pub fn people_filter(query: &str, page: usize) -> Result<(Filter, usize), String
     Ok((f, limit))
 }
 
-/// The people on one picker page, without the viewer, ranked by name.
-/// `more` when the page was full.
-pub fn people_page(
-    events: &[Verified],
-    query: &str,
-    viewer: &str,
-    limit: usize,
-) -> (Vec<Person>, bool) {
-    let people = crate::members::rank_people(events, query.trim(), None)
+/// The people on one picker page, without the viewer, in the relay's
+/// order. `more` when the page was full.
+pub fn people_page(events: &[Verified], viewer: &str, limit: usize) -> (Vec<Person>, bool) {
+    let people = crate::members::fold_people(events)
         .into_iter()
         .filter(|person| person.pubkey != viewer)
         .collect();
@@ -109,7 +109,7 @@ mod tests {
         let (exact, _) = people_filter(&key(3), 1).unwrap();
         assert_eq!(exact["authors"], json!([key(3)]));
         let (upper, _) = people_filter(&key(3).to_uppercase(), 1).unwrap();
-        assert_eq!(upper["authors"], json!([key(3)]));
+        assert!(!upper.contains_key("authors"));
         assert!(people_filter(&"x".repeat(101), 1).is_err());
     }
 

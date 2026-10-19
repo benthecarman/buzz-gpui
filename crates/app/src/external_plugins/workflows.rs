@@ -238,6 +238,9 @@ pub fn command(
     let id = text(params, "workflow").map(str::to_owned);
     let owner = text(params, "owner").map(str::to_owned);
     let yaml = text(params, "yaml").map(str::to_owned);
+    // The revision the plugin read, which the relay checks the save
+    // against (`existing.revision`).
+    let revision = text(params, "revision").map(str::to_owned);
     let method = method.to_owned();
     if method != "workflows/save" && id.is_none() {
         return Err(invalid("workflow is required"));
@@ -257,6 +260,12 @@ pub fn command(
         };
         let sent = match (method.as_str(), existing) {
             ("workflows/save", existing) => {
+                let existing = existing.map(|mut existing| {
+                    if let Some(revision) = revision {
+                        existing.revision = revision;
+                    }
+                    existing
+                });
                 workflows.save(&channel, yaml.unwrap_or_default(), existing.as_ref())
             }
             ("workflows/delete", Some(workflow)) => workflows.delete(&workflow),

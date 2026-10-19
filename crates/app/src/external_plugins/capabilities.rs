@@ -2141,19 +2141,43 @@ pub fn add_emoji(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
     }))
 }
 
+/// Shortcodes as buzz-app's `localeCompare` orders them: `_`, `-`,
+/// digits, then letters regardless of case, and then lowercase first.
+fn shortcode_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let primary = |code: &str| -> Vec<u32> {
+        code.chars()
+            .map(|c| match c {
+                '_' => 0,
+                '-' => 1,
+                '0'..='9' => 2 + c as u32 - '0' as u32,
+                c => 16 + c.to_ascii_lowercase() as u32,
+            })
+            .collect()
+    };
+    primary(a).cmp(&primary(b)).then_with(|| {
+        let case =
+            |code: &str| -> Vec<bool> { code.chars().map(|c| c.is_ascii_uppercase()).collect() };
+        case(a).cmp(&case(b))
+    })
+}
+
+/// The community's custom emoji in that order.
+fn emoji_listed(emoji: &[buzz_relay_client::CustomEmoji]) -> Vec<Value> {
+    let mut listed: Vec<&buzz_relay_client::CustomEmoji> = emoji.iter().collect();
+    listed.sort_by(|a, b| shortcode_order(&a.shortcode, &b.shortcode));
+    listed
+        .into_iter()
+        .map(|emoji| json!({ "shortcode": emoji.shortcode, "url": emoji.url }))
+        .collect()
+}
+
 /// `emoji/list`: the community's custom emoji.
 pub fn emoji(cx: &App) -> Result<Value, Failure> {
     let community = community(cx)?;
     // Read them if nothing has yet (`emoji.ensure`).
     community.read(cx).session.ensure_emoji();
     let emoji = community.read(cx).snapshot.emoji.clone();
-    Ok(Value::Array(
-        emoji
-            .entries
-            .iter()
-            .map(|emoji| json!({ "shortcode": emoji.shortcode, "url": emoji.url }))
-            .collect(),
-    ))
+    Ok(Value::Array(emoji_listed(&emoji.entries)))
 }
 
 /// `emoji/catalog`: the community's custom emoji with how far the read
@@ -2173,7 +2197,7 @@ pub fn emoji_catalog(cx: &App) -> Result<Value, Failure> {
     Ok(json!({
         "status": status,
         "error": error,
-        "entries": emoji.entries.iter().map(entry).collect::<Vec<_>>(),
+        "entries": emoji_listed(&emoji.entries),
         "mine": emoji.mine.iter().map(entry).collect::<Vec<_>>(),
     }))
 }
@@ -2205,20 +2229,26 @@ pub fn typing_all(cx: &App) -> Result<Value, Failure> {
 /// `people/search`: people in the community whose profile matches
 /// `query`, a page at a time.
 pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    // At most 100 characters as given, and a page from 1 (`people`).
+    // As the Add member search does: the viewer included, and an exact
+    // key found even without a profile.
+    let members = params.get("members").and_then(Value::as_bool) == Some(true);
+    // At most 100 characters as given (`people`), or 256 trimmed for a
+    // member search (`searchMembers`), and a page from 1.
     let raw = text(params, "query").unwrap_or_default();
     let page = match params.get("page") {
         None | Some(Value::Null) => Some(1),
         Some(page) => page.as_u64().filter(|page| *page >= 1),
     };
-    let (Some(page), true) = (page, raw.encode_utf16().count() <= 100) else {
+    let fits = if members && !raw.trim().is_empty() {
+        raw.trim().encode_utf16().count() <= 256
+    } else {
+        raw.encode_utf16().count() <= 100
+    };
+    let (Some(page), true) = (page, fits) else {
         return Err(invalid("Invalid people search."));
     };
     let page = page as usize;
     let query = raw.trim().to_owned();
-    // As the Add member search does: the viewer included, and an exact
-    // key found even without a profile.
-    let members = params.get("members").and_then(Value::as_bool) == Some(true);
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         // As the New message picker does (`directMessages.people`); no
@@ -3164,6 +3194,13 @@ mod tests {
         assert_eq!(value["loaded"], false);
         assert_eq!(value["pubkey"], key);
         assert!(value["name"].as_str().is_some_and(|name| !name.is_empty()));
+    }
+
+    #[test]
+    fn shortcodes_sort_as_locale_compare_does() {
+        let mut codes = ["B", "a1", "a-b", "b", "a_b", "a"];
+        codes.sort_by(|a, b| shortcode_order(a, b));
+        assert_eq!(codes, ["a", "a_b", "a-b", "a1", "b", "B"]);
     }
 
     #[test]

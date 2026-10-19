@@ -415,6 +415,14 @@ impl Session {
         self.inbox.clone()
     }
 
+    /// The inbox as it is once followed, as `unread.inbox()` builds it
+    /// on the spot: what [`Self::inbox`] published first.
+    pub async fn inbox_now(&self) -> Result<watch::Receiver<Arc<InboxState>>, String> {
+        let receiver = self.inbox();
+        super::util::with(&self.commands, |_| ()).await?;
+        Ok(receiver)
+    }
+
     /// "Refresh" and "Retry inbox": unread evidence and the history again.
     pub fn refresh_inbox(&self) {
         let _ = self.commands.send(Message::With(Box::new(|actor| {

@@ -79,19 +79,40 @@ pub enum MemberOperationStatus {
     Failed,
 }
 
+/// Whether an addition carries the bot role tag.
+#[derive(Clone, Copy)]
+enum Role {
+    /// None at all, as a template's setup adds.
+    Plain,
+    /// When their profile says they are an agent.
+    Profile,
+    /// They are one of the viewer's agents.
+    Agent,
+}
+
 impl Session {
     /// Adds someone to a channel through the outbox and waits for the
     /// roster to list them. A second call for the same person joins the
     /// first; a failed or uncertain earlier addition is continued, never
     /// duplicated.
     pub async fn add_member(&self, channel: &str, pubkey: &str) -> Result<(), String> {
-        self.addition(channel, pubkey, false, false, true).await
+        self.addition(channel, pubkey, false, false, Role::Profile)
+            .await
+    }
+
+    /// [`Self::add_member`] for someone known to be one of your agents,
+    /// whose profile may not be loaded yet: added with the bot role
+    /// (`addChannelMember`'s agent choices).
+    pub async fn add_agent_member(&self, channel: &str, pubkey: &str) -> Result<(), String> {
+        self.addition(channel, pubkey, false, false, Role::Agent)
+            .await
     }
 
     /// [`Self::add_member`] with no role tag, as a channel template's
     /// setup adds its agents (`["h"], ["p"]` only).
     pub async fn add_member_plain(&self, channel: &str, pubkey: &str) -> Result<(), String> {
-        self.addition(channel, pubkey, false, false, false).await
+        self.addition(channel, pubkey, false, false, Role::Plain)
+            .await
     }
 
     /// Adds someone to a private work session the viewer belongs to
@@ -103,7 +124,7 @@ impl Session {
         pubkey: &str,
         allow_agents: bool,
     ) -> Result<(), String> {
-        self.addition(channel, pubkey, true, allow_agents, true)
+        self.addition(channel, pubkey, true, allow_agents, Role::Profile)
             .await
     }
 
@@ -131,7 +152,7 @@ impl Session {
         pubkey: &str,
         participant: bool,
         allow_agents: bool,
-        role: bool,
+        role: Role,
     ) -> Result<(), String> {
         let key = (channel.to_owned(), pubkey.to_owned());
         let ops = self.ops();
@@ -351,7 +372,7 @@ impl Ops {
         pubkey: &str,
         participant: bool,
         allow_agents: bool,
-        role: bool,
+        role: Role,
         intent: &mut Intent,
     ) -> Result<(), String> {
         if !members::is_key(pubkey) {
@@ -449,8 +470,12 @@ impl Ops {
                             .is_some_and(|profile| profile.is_agent)
                     })
                     .await?;
-                let draft =
-                    members::add(channel, pubkey, role && agent).map_err(|e| e.to_string())?;
+                let bot = match role {
+                    Role::Plain => false,
+                    Role::Profile => agent,
+                    Role::Agent => true,
+                };
+                let draft = members::add(channel, pubkey, bot).map_err(|e| e.to_string())?;
                 outbox
                     .send(
                         draft,

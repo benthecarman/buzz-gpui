@@ -73,7 +73,15 @@ impl Profile {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
         };
-        let name = text("display_name").or_else(|| text("name"));
+        // A name is kept as written; only a blank one is skipped.
+        let named = |key: &str| {
+            fields
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+        };
+        let name = named("display_name").or_else(|| named("name"));
         let flagged = |key: &str| fields.get(key) == Some(&Value::Bool(true));
         Self {
             name_is_fallback: name.is_none(),
@@ -451,7 +459,7 @@ mod tests {
             1,
             vec![],
         ));
-        assert_eq!(parsed.name, "Alice");
+        assert_eq!(parsed.name, "  Alice ");
         assert!(!parsed.name_is_fallback);
         assert_eq!(parsed.picture.as_deref(), Some("https://x.example/a.png"));
         assert_eq!(parsed.about, None);

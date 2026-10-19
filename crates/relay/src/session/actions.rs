@@ -486,12 +486,12 @@ impl Session {
     /// One page of the New message people picker (§5e.6).
     pub async fn people(&self, query: &str, page: usize) -> Result<PeoplePage, String> {
         let (filter, limit) = dm::people_filter(query, page)?;
-        let (ops, query, viewer) = (self.ops(), query.to_owned(), self.viewer.clone());
+        let (ops, viewer) = (self.ops(), self.viewer.clone());
         self.run(async move {
             let ctx = ops.context().await?;
             let events = read(&ctx, vec![filter]).await?;
             ops.adopt_profiles(&events).await?;
-            let (people, more) = dm::people_page(&events, &query, &viewer, limit);
+            let (people, more) = dm::people_page(&events, &viewer, limit);
             Ok(PeoplePage { people, more })
         })
         .await

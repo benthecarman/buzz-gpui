@@ -798,11 +798,28 @@ fn typed(snapshot: &MeKitSnapshot, community: &str, waiting: bool) -> KitSnapsho
         })
         .collect::<Result<Vec<_>, String>>();
     match entries {
-        Ok(entries) => KitSnapshot {
-            status,
-            entries: entries.into(),
-            error,
-        },
+        Ok(entries) => {
+            // A portable record supersedes an ordinary one for the same
+            // team (`channelKit` `refresh`).
+            let portable: std::collections::HashSet<String> = entries
+                .iter()
+                .filter(|entry| entry.record.version == 2)
+                .map(|entry| entry.record.value.id().to_owned())
+                .collect();
+            let entries: Vec<_> = entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.record.version == 2
+                        || !matches!(entry.record.value, recipes::KitValue::Team(_))
+                        || !portable.contains(entry.record.value.id())
+                })
+                .collect();
+            KitSnapshot {
+                status,
+                entries: entries.into(),
+                error,
+            }
+        }
         Err(error) => KitSnapshot {
             status: KitStatus::Error,
             entries: Arc::new([]),

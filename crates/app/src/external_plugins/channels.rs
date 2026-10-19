@@ -322,13 +322,19 @@ pub fn add_member(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure
             "Archived identities cannot be added. Choose someone else.".to_owned(),
         ));
     }
+    // One of your agents gets the bot role even before its profile is
+    // read (`addChannelMember`'s agent choices).
+    let agent = crate::ui::me::recipients::rules(&community, cx)
+        .selectable
+        .contains(&pubkey);
     let session = community.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
-        session
-            .add_member(&channel, &pubkey)
-            .await
-            .map(|()| Value::Null)
-            .map_err(|error| (3, error))
+        let added = if agent {
+            session.add_agent_member(&channel, &pubkey).await
+        } else {
+            session.add_member(&channel, &pubkey).await
+        };
+        added.map(|()| Value::Null).map_err(|error| (3, error))
     }))
 }
 
@@ -999,12 +1005,17 @@ pub fn change_sidebar(
             // for the channel's default section.
             let destination = match (text(params, "group"), text(params, "newGroup")) {
                 (Some(group), _) => Destination::Section(Some(group.to_owned())),
-                (None, Some(name)) if !name.trim().is_empty() => {
-                    Destination::Create(buzz_relay_client::sidebar::NewSection {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name: name.trim().chars().take(64).collect(),
-                    })
+                // A blank name or one past 256 is refused, as buzz-app's
+                // `validSidebarAssignment` does.
+                (None, Some(name))
+                    if name.trim().is_empty() || name.encode_utf16().count() > 256 =>
+                {
+                    return Err(invalid("Invalid sidebar assignment intent"));
                 }
+                (None, Some(name)) => Destination::Create(buzz_relay_client::sidebar::NewSection {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: name.trim().to_owned(),
+                }),
                 _ => Destination::Section(None),
             };
             on_tokio(cx, async move {
@@ -1053,13 +1064,7 @@ pub fn members(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
     // An open channel you have not joined too; the relay refuses one
     // you may not reach (`canReadRemote`).
     let channel = readable(params, community.read(cx))?;
-    let (session, profiles) = {
-        let community = community.read(cx);
-        (
-            community.session.clone(),
-            community.snapshot.profiles.clone(),
-        )
-    };
+    let session = community.read(cx).session.clone();
     let viewer = session.viewer().to_string();
     Ok(on_tokio(cx, async move {
         // A fresh read settles an uncertain change the roster now shows
@@ -1092,6 +1097,24 @@ pub fn members(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
                 "error": operation.error,
             })
         });
+        // Your agents are known by their profiles' owners, so the
+        // profiles of members you cannot otherwise remove are read first.
+        let unknown: Vec<String> = {
+            let snapshot = session.snapshot().borrow().clone();
+            state
+                .roles
+                .keys()
+                .filter(|key| {
+                    !state.can_remove_member(&viewer, key, None)
+                        && !snapshot.profiles.contains_key(*key)
+                })
+                .cloned()
+                .collect()
+        };
+        if !unknown.is_empty() {
+            let _ = session.load_profiles(unknown).await;
+        }
+        let profiles = session.snapshot().borrow().profiles.clone();
         let members: Vec<Value> = state
             .roles
             .iter()
