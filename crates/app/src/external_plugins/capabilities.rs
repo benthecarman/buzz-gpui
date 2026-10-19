@@ -1213,6 +1213,11 @@ pub fn navigation_state(cx: &App) -> Value {
             (None, false) => "opened",
         },
         "entry": workspace.entry(),
+        // Each attempt, a repeat visit or Retry included (`attempt`).
+        "attempt": {
+            "id": format!("{}:{}", workspace.entry().unwrap_or_default(), workspace.visit().0),
+            "focus": if workspace.attempt_keeps_focus() { "preserve" } else { "content" },
+        },
         "place": here.map(|here| place_json(&here, cx)),
         "failed": failed,
         "canGoBack": back,

@@ -214,6 +214,12 @@ impl SessionWork {
         this
     }
 
+    /// Panel tab `id` is open here but not the one shown.
+    pub(crate) fn panel_tab_inactive(&self, id: &str, cx: &App) -> bool {
+        let state = self.tabs(cx);
+        state.panels.iter().any(|tab| tab.id() == id) && state.selected != id
+    }
+
     /// A link from the timeline replaces the panels links opened before
     /// (`open(..., fromThread = false)`).
     pub(crate) fn retire_link_panels(&mut self, cx: &mut Context<Self>) {

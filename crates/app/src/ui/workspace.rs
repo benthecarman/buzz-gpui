@@ -934,6 +934,12 @@ impl Workspace {
 
     /// The visit being opened, by attempt, and whether it is still
     /// opening: its channel listed or looked up.
+    /// Whether the current attempt keeps the focus where it is
+    /// (`attempt.focus` `preserve`).
+    pub(crate) fn attempt_keeps_focus(&self) -> bool {
+        self.attempt_keeps_focus
+    }
+
     pub(crate) fn visit(&self) -> (u64, bool) {
         (
             self.attempts,

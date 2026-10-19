@@ -418,6 +418,8 @@ impl ChannelPage {
         self.composer.update(cx, |composer, cx| {
             composer.set_placeholder("Message your agents".into(), window, cx);
             composer.set_chat(None, cx);
+            // Me offers your agents whatever the conversation is.
+            composer.invite_agents();
         });
     }
 

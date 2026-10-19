@@ -160,6 +160,18 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Panel tab `id` is open in the conversation shown but is not the
+    /// selected tab, so it may not open or push (`panelActive`).
+    pub(crate) fn panel_tab_inactive(&self, id: &str, cx: &App) -> bool {
+        if self.page == Page::ME {
+            return self
+                .me_work(cx)
+                .is_some_and(|work| work.read(cx).panel_tab_inactive(id, cx));
+        }
+        let state = self.tabs(cx);
+        state.panels.iter().any(|tab| tab.id() == id) && state.selected != id
+    }
+
     /// Me's open conversation board, if Me has one.
     fn me_work(&self, cx: &App) -> Option<Entity<crate::ui::me::SessionWork>> {
         let page = self

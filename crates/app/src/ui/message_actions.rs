@@ -100,6 +100,9 @@ pub struct MessageActions {
     error: Option<SharedString>,
     reaction_error: Option<(EventId, SharedString)>,
     hooks: Hooks,
+    /// The rows' thread opener, made once: it lives as long as this place,
+    /// which is how a plugin accessory's `openThread` knows it retired.
+    open_thread: Option<crate::ui::message::RowHandler>,
     status: Option<SessionStatus>,
     _outbox: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -190,6 +193,13 @@ impl MessageActions {
             report_hidden: false,
             error: None,
             reaction_error: None,
+            open_thread: hooks.open_thread.clone().map(|open| {
+                Rc::new(
+                    move |row: &Arc<MessageRow>, window: &mut Window, cx: &mut App| {
+                        open(row.clone(), window, cx)
+                    },
+                ) as crate::ui::message::RowHandler
+            }),
             hooks,
             status: None,
             _outbox: None,
@@ -525,13 +535,7 @@ impl MessageActions {
             weak,
         );
         Actions {
-            on_open_thread: self.hooks.open_thread.clone().map(|open| {
-                Rc::new(
-                    move |row: &Arc<MessageRow>, window: &mut Window, cx: &mut App| {
-                        open(row.clone(), window, cx)
-                    },
-                ) as _
-            }),
+            on_open_thread: self.open_thread.clone(),
             on_retry: Some(Rc::new(move |row, _, cx| {
                 let _ = retry.update(cx, |this, cx| {
                     let (session, id) = (this.session(cx), row.id);

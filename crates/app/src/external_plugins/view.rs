@@ -393,10 +393,19 @@ impl ExternalView {
         let Some(opening) = &view.opening else {
             return false;
         };
+        // Only the panel the user sees acts: a background tab answers
+        // `false` (`panelActive`).
+        let own = format!("{}/{}", view.plugin, view.contribution);
+        let tab = format!("{own}:{}", opening.target);
+        if crate::ui::navigation::workspace(cx)
+            .is_some_and(|workspace| workspace.read(cx).panel_tab_inactive(&tab, cx))
+        {
+            return false;
+        }
         let Some(panel) = crate::ui::channel_panels::resolve(target, cx) else {
             return false;
         };
-        if panel.key == format!("{}/{}", view.plugin, view.contribution) {
+        if panel.key == own {
             this.update(cx, |view, cx| view.retarget(target.to_owned(), push, cx));
             return true;
         }

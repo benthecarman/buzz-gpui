@@ -98,7 +98,12 @@ type Delivered = ((String, String), Outcome);
 
 /// How a message accessory's place opens the thread of the message it
 /// drew for.
-type ThreadOpener = (crate::ui::message::RowHandler, Arc<MessageRow>);
+/// Held weakly: a place that went (a page closed, a channel left) opens
+/// nothing.
+type ThreadOpener = (
+    std::rc::Weak<dyn Fn(&Arc<MessageRow>, &mut Window, &mut App)>,
+    Arc<MessageRow>,
+);
 
 thread_local! {
     static ANSWERS: RefCell<Answers> = RefCell::default();
@@ -268,9 +273,11 @@ pub fn open_accessory_thread(
     };
     let key = format!("{plugin}/{}", field("accessory")?);
     let message = field("message")?.to_owned();
-    let Some((open, row)) =
-        THREAD_OPENERS.with_borrow(|openers| openers.get(&(key, message)).cloned())
-    else {
+    let entry = (key, message);
+    let opener = THREAD_OPENERS.with_borrow(|openers| openers.get(&entry).cloned());
+    let Some((open, row)) = opener.and_then(|(open, row)| Some((open.upgrade()?, row))) else {
+        // Its place is gone (`false` after it retires).
+        THREAD_OPENERS.with_borrow_mut(|openers| openers.remove(&entry));
         return Ok(json!(false));
     };
     let window =
@@ -985,7 +992,7 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
         // in for this accessory, or nothing where that place cannot.
         let used: Rc<dyn Fn()> = {
             let entry = (self.key.to_owned(), row.id.to_hex());
-            let opener = open_thread.map(|open| (open.clone(), row.clone()));
+            let opener = open_thread.map(|open| (Rc::downgrade(open), row.clone()));
             Rc::new(move || {
                 THREAD_OPENERS.with_borrow_mut(|openers| {
                     if openers.len() >= 4096 {
