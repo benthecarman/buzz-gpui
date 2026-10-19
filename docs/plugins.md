@@ -152,7 +152,10 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   meanwhile (on the same page: buzz-app's `resolve` can name any target,
   which here is `ui/navigate` with `replace: true`). A page's `view/open` carries the visit's `entry` and `focus`
   (`preserve` when the control that opened it keeps the focus, else
-  `content`, as buzz-app's `NavigationFocus`).
+  `content`, as buzz-app's `NavigationFocus`). Every later visit to an open
+  `handlesNavigation` page, its sidebar or top-bar button, Back, Retry or
+  the same `ui/navigate` included, sends `page/route` with the route (or
+  `null`) and the new `entry`, and waits for `page/settle` again.
 - A plugin can add at most 16 panels and 8 pages, and at most 16 of each kind
   below. Ids are unique across all of them.
 
@@ -260,7 +263,7 @@ keeps the answer until anything in it changes:
   and, with a picture, asks `agent/profile` (`type`, `pubkey`, `community`,
   `name`, `picture`). Deleting it asks `agent/remove` (`type`, `pubkey`,
   `community`). Each step may come again after a failure, so make each safe to
-  repeat. The Agents page shows these agents as Hosted, and `agents/create`
+  repeat, and each must answer within 2 minutes. The Agents page shows these agents as Hosted, and `agents/create`
   with this type makes one the same way. `agents/save` renames one or
   changes its picture through `agent/profile` (its other settings are the
   provider's and are refused), and `agents/remove` asks `agent/remove`,
@@ -809,6 +812,10 @@ passes a function, or reaches into the app, it works differently:
 - **A notification's page belongs to a community.** A page or settings
   notification sent without `community` opens in the community selected
   when it was sent; buzz-app's leaves the selection alone.
+
+- **A profile without a name has no name source.** `names/get` gives such
+  a key its first characters with `source: null`; buzz-app calls that a
+  public-profile name.
 
 - **`events/query` reads what the relay gives.** Its events are
   verified and filtered to channels you can read, but a reaction, edit or

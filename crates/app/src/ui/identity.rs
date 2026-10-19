@@ -21,6 +21,16 @@ pub struct NamingIdentity {
     pub owner: Option<String>,
 }
 
+/// A name a view shows for a key (`displayFacts`): its `is_agent`, when
+/// left out, is what Buzz knows of the key.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DisplayFact {
+    pub pubkey: String,
+    pub name: String,
+    pub is_agent: Option<bool>,
+    pub owner: Option<String>,
+}
+
 /// A resolved label and the npub suffix that made it unique, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Label {
@@ -410,9 +420,12 @@ const BUNDLED: &str = "buzz.identity-naming";
 /// `register` is refused, the first policy on applies: the bundled one,
 /// else the plugin policy registered first.
 pub fn register_policy(key: &'static str, policy: Policy) {
+    // Declared again, it keeps its place: the first on still applies.
     POLICIES.with_borrow_mut(|policies| {
-        policies.retain(|(existing, _)| *existing != key);
-        policies.push((key, policy));
+        match policies.iter().position(|(existing, _)| *existing == key) {
+            Some(at) => policies[at] = (key, policy),
+            None => policies.push((key, policy)),
+        }
     });
     policy_changed();
 }
@@ -452,7 +465,7 @@ fn active() -> Active {
 
 /// `identities` with `facts` in place of their keys' rows, each over
 /// what the row knew (`{...identities.get(key), ...fact}`).
-fn displayed(mut identities: Vec<NamingIdentity>, facts: &[NamingIdentity]) -> Vec<NamingIdentity> {
+fn displayed(mut identities: Vec<NamingIdentity>, facts: &[DisplayFact]) -> Vec<NamingIdentity> {
     for fact in facts {
         let key = fact.pubkey.to_ascii_lowercase();
         let known = identities
@@ -462,7 +475,9 @@ fn displayed(mut identities: Vec<NamingIdentity>, facts: &[NamingIdentity]) -> V
         identities.push(NamingIdentity {
             pubkey: key,
             name: fact.name.clone(),
-            is_agent: fact.is_agent,
+            is_agent: fact
+                .is_agent
+                .unwrap_or_else(|| known.as_ref().is_some_and(|row| row.is_agent)),
             owner: fact.owner.clone().or(known.and_then(|row| row.owner)),
         });
     }
@@ -480,7 +495,7 @@ struct CacheKey {
     naming: Option<&'static str>,
     /// Changes when a plugin policy answers.
     generation: u64,
-    facts: Vec<NamingIdentity>,
+    facts: Vec<DisplayFact>,
 }
 
 /// Names scoped to `members` (a channel's roster), or community-wide.
@@ -504,7 +519,7 @@ pub fn names_with(
     viewer: &str,
     origin: Option<&RelayOrigin>,
     members: Option<&[String]>,
-    facts: &[NamingIdentity],
+    facts: &[DisplayFact],
 ) -> Arc<Names> {
     let key = CacheKey {
         profiles: Arc::as_ptr(profiles) as *const () as usize,

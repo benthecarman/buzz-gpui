@@ -143,6 +143,18 @@ impl Workspace {
     }
 
     /// Closing returns focus to the account menu's trigger, which opened it.
+    /// Closes the companion if it shows panel `key`.
+    pub(super) fn withdraw_companion(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(&self.companion, Some(Companion::Panel { key: open, .. }) if *open == key) {
+            self.close_companion(window, cx);
+        }
+    }
+
     pub(super) fn close_companion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.companion.take().is_some() {
             window.focus(&self.main_focus, cx);

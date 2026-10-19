@@ -121,8 +121,17 @@ impl ExternalView {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
-        // The section belongs to the selected community, if any.
+        // The section belongs to the selected community, if any; an
+        // account card (`group`) to none.
+        let account = crate::ui::settings::cards::get(&format!("{plugin}/{contribution}"), cx)
+            .is_some_and(|card| {
+                matches!(
+                    card.placement,
+                    crate::ui::settings::cards::CardPlacement::Group(_)
+                )
+            });
         let community = crate::community::AppState::current(cx)
+            .filter(|_| !account)
             .map(|community| community.read(cx).origin.websocket().to_string());
         let extra = json!({ "community": community });
         Self::open(
@@ -261,6 +270,11 @@ impl ExternalView {
         );
         let id = view.read(cx).id.clone();
         (view, id)
+    }
+
+    /// Keeps `route` as the page's route, as its next `view/open` says.
+    pub(super) fn set_route(&mut self, route: Value) {
+        self.route = Some(route);
     }
 
     /// What `composer/accept` calls: a capture's end.
@@ -407,6 +421,15 @@ impl ExternalView {
             return;
         };
         let old = std::mem::replace(&mut opening.target, target.clone());
+        // Its tab, if it is one, follows.
+        let (panel, channel) = (
+            format!("{}/{}", self.plugin, self.contribution),
+            opening.channel.clone(),
+        );
+        let (from, to) = (old.clone(), target.clone());
+        crate::ui::navigation::with_workspace(cx, move |workspace, _, cx| {
+            workspace.retarget_panel(&panel, &channel, &from, &to, cx)
+        });
         if push {
             self.back.push(old);
             self.back.truncate(64);

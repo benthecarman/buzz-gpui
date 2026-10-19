@@ -1221,9 +1221,17 @@ pub fn navigation_state(cx: &App) -> Value {
 /// attempt at the same entry, its place checked anew (buzz-app's
 /// `retry()`).
 pub fn retry_navigation(cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let before = navigation::workspace(cx)
-        .map(|workspace| workspace.read(cx).visit().0)
-        .ok_or((1, "The window is not open.".to_owned()))?;
+    let workspace = navigation::workspace(cx).ok_or((1, "The window is not open.".to_owned()))?;
+    // An outside link that cannot be retried stays as it is.
+    if let Some((failed, false)) = workspace.read(cx).failed()
+        && failed.ingress
+    {
+        let reason = reason_name(failed.reason);
+        return Ok(Task::ready(Ok(
+            json!({ "status": "failed", "reason": reason }),
+        )));
+    }
+    let before = workspace.read(cx).visit().0;
     navigation::with_workspace(cx, |workspace, window, cx| {
         workspace.retry_failed(window, cx)
     });
@@ -1644,7 +1652,7 @@ pub fn names(params: &Value, cx: &App) -> Result<Value, Failure> {
 
 /// The `displayFacts` param: names this view shows for some keys, such
 /// as a draft's recipients, that the naming policy weighs in their place.
-fn display_facts(params: &Value) -> Result<Vec<crate::ui::identity::NamingIdentity>, Failure> {
+fn display_facts(params: &Value) -> Result<Vec<crate::ui::identity::DisplayFact>, Failure> {
     let Some(facts) = params.get("displayFacts").filter(|value| !value.is_null()) else {
         return Ok(Vec::new());
     };
@@ -1658,13 +1666,10 @@ fn display_facts(params: &Value) -> Result<Vec<crate::ui::identity::NamingIdenti
             let pubkey = text(fact, "pubkey")
                 .filter(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
                 .ok_or_else(|| invalid("each display fact needs a pubkey"))?;
-            Ok(crate::ui::identity::NamingIdentity {
+            Ok(crate::ui::identity::DisplayFact {
                 pubkey: pubkey.to_ascii_lowercase(),
                 name: text(fact, "name").unwrap_or_default().to_owned(),
-                is_agent: fact
-                    .get("isAgent")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                is_agent: fact.get("isAgent").and_then(Value::as_bool),
                 owner: text(fact, "owner").map(str::to_ascii_lowercase),
             })
         })
@@ -1689,30 +1694,42 @@ fn names_of(
     community: &Entity<Community>,
     keys: &[String],
     candidates: Option<&[String]>,
-    facts: &[crate::ui::identity::NamingIdentity],
+    facts: &[crate::ui::identity::DisplayFact],
     cx: &App,
 ) -> Value {
     use crate::ui::identity;
     let community = community.read(cx);
     let library = identity::AgentLibrary::from_hosts(cx);
     let viewer = community.session.viewer().to_string();
-    // The requested key always joins the scope.
-    let scope = candidates.map(|candidates| {
-        let mut scope = candidates.to_vec();
-        scope.extend(keys.iter().cloned());
-        scope
-    });
-    let names = identity::names_with(
-        &community.snapshot.profiles,
-        &library,
-        &viewer,
-        Some(&community.origin),
-        scope.as_deref(),
-        facts,
-    );
+    let names_in = |scope: Option<&[String]>| {
+        identity::names_with(
+            &community.snapshot.profiles,
+            &library,
+            &viewer,
+            Some(&community.origin),
+            scope,
+            facts,
+        )
+    };
+    // A key among the candidates is named within them; one outside joins
+    // them on its own (`scope`), so it never qualifies the others.
+    let within = names_in(candidates);
     Value::Object(
         keys.iter()
             .map(|key| {
+                let outside = candidates.filter(|candidates| {
+                    !candidates
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(key))
+                });
+                let names = match outside {
+                    Some(candidates) => {
+                        let mut scope = candidates.to_vec();
+                        scope.push(key.clone());
+                        names_in(Some(&scope))
+                    }
+                    None => within.clone(),
+                };
                 let value = json!({
                     "name": names.display(key),
                     "qualifier": names.qualifier(key),

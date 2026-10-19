@@ -38,7 +38,8 @@ enum Modal {
         _subscription: Subscription,
     },
     /// A plugin's account action.
-    Plugin(AnyView),
+    /// A plugin account action's dialog, by the action's key.
+    Plugin(&'static str, AnyView),
 }
 
 pub struct Account {
@@ -218,6 +219,15 @@ impl Account {
         cx.notify();
     }
 
+    /// Closes account action `key`'s dialog, as when the plugin took the
+    /// action away.
+    pub(crate) fn close_action(&mut self, key: &str, cx: &mut Context<Self>) {
+        if matches!(&self.modal, Some(Modal::Plugin(open, _)) if *open == key) {
+            self.modal = None;
+            cx.notify();
+        }
+    }
+
     /// Opens a plugin's account action in its dialog.
     fn open_action(
         &mut self,
@@ -234,7 +244,7 @@ impl Account {
         });
         let view = (action.build)(close, window, cx);
         self.open = None;
-        self.modal = Some(Modal::Plugin(view));
+        self.modal = Some(Modal::Plugin(action.key, view));
         cx.notify();
     }
 
@@ -535,7 +545,7 @@ impl Account {
         let content = match self.modal.as_ref()? {
             Modal::Status { editor, .. } => editor.clone().into_any_element(),
             Modal::Feedback { dialog, .. } => dialog.clone().into_any_element(),
-            Modal::Plugin(view) => view.clone().into_any_element(),
+            Modal::Plugin(_, view) => view.clone().into_any_element(),
         };
         Some(overlay::modal(window, content, None).into_any_element())
     }

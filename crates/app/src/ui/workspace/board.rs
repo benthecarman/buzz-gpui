@@ -132,6 +132,72 @@ impl Workspace {
         Some(result)
     }
 
+    /// Panel `key` was taken away: its tabs, drawer and companion close,
+    /// so their views close with them.
+    pub(crate) fn withdraw_panel(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefix = format!("{key}:");
+        for state in self.tab_states.values_mut() {
+            state.panels.retain(|tab| tab.panel != key);
+            if state.selected.starts_with(&prefix) {
+                state.selected = String::new();
+            }
+        }
+        self.tab_views.retain(|id, _| !id.starts_with(&prefix));
+        if self.drawer.as_ref().is_some_and(|drawer| drawer.key == key) {
+            self.drawer = None;
+        }
+        self.withdraw_companion(key, window, cx);
+        cx.notify();
+    }
+
+    /// Account action `key` was taken away: its dialog closes.
+    pub(crate) fn withdraw_action(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.account
+            .update(cx, |account, cx| account.close_action(key, cx));
+    }
+
+    /// A panel tab now shows `new` in place of `old` (`panel/open` or
+    /// `panel/push` within itself): the saved tab follows, so the view
+    /// made anew opens there, and a tab already showing `new` takes over.
+    pub(crate) fn retarget_panel(
+        &mut self,
+        panel: &str,
+        channel: &str,
+        old: &str,
+        new: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(community) = &self.community else {
+            return;
+        };
+        let key = (community.entity_id(), channel.to_owned());
+        let Some(state) = self.tab_states.get_mut(&key) else {
+            return;
+        };
+        let (old_id, new_id) = (format!("{panel}:{old}"), format!("{panel}:{new}"));
+        if state.panels.iter().any(|tab| tab.id() == new_id) {
+            state.panels.retain(|tab| tab.id() != old_id);
+            if state.selected == old_id {
+                state.selected = new_id;
+            }
+            self.tab_views.remove(&old_id);
+        } else if let Some(tab) = state.panels.iter_mut().find(|tab| tab.id() == old_id) {
+            tab.target = new.to_owned();
+            if state.selected == old_id {
+                state.selected = new_id.clone();
+            }
+            if let Some(view) = self.tab_views.remove(&old_id) {
+                self.tab_views.insert(new_id, view);
+            }
+        }
+        cx.notify();
+    }
+
     /// The tabs of the channel being left stay saved; their views go, as
     /// does any launcher panel, which belongs to the visit.
     pub(super) fn leave_channel_tabs(&mut self) {

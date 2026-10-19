@@ -93,10 +93,11 @@ impl Section {
         match self {
             // The Emoji plugin's card (`buzz.emoji/custom-emoji`).
             Self::CustomEmoji => has_community && crate::plugins::enabled("buzz.emoji"),
-            // An open card stays while its check is pending.
+            // Only a card that shows is listed; one pending or failed is
+            // left, as buzz-app lists only `true`.
             Self::Card(key) => cards::get(key, cx).is_some_and(|card| {
                 (has_community || matches!(card.placement, cards::CardPlacement::Group(_)))
-                    && card.visibility(cx) != cards::CardVisibility::Hidden
+                    && card.visibility(cx) == cards::CardVisibility::Visible
             }),
             _ => true,
         }
@@ -470,16 +471,19 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let community = AppState::current(cx).map(|community| community.entity_id());
+        let Some(card) = cards::get(key, cx) else {
+            return div().into_any_element();
+        };
+        // An account card belongs to no community, so a switch keeps it.
+        let community = AppState::current(cx)
+            .map(|community| community.entity_id())
+            .filter(|_| !matches!(card.placement, cards::CardPlacement::Group(_)));
         if let Some((open, made_for, view)) = &self.card
             && *open == key
             && *made_for == community
         {
             return view.clone().into_any_element();
         }
-        let Some(card) = cards::get(key, cx) else {
-            return div().into_any_element();
-        };
         let view = (card.build)(window, cx);
         self.card = Some((key, community, view.clone()));
         view.into_any_element()

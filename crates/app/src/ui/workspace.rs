@@ -521,6 +521,22 @@ impl Workspace {
 
     /// Shows a page and records the visit.
     pub fn select_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        // A page that completes its own visits is a visit it settles.
+        if pages::settles(page, cx) {
+            let community = self
+                .community
+                .as_ref()
+                .map(|community| community.read(cx).origin.to_string());
+            self.navigate(
+                Target {
+                    community,
+                    place: Place::Page(page),
+                },
+                window,
+                cx,
+            );
+            return;
+        }
         self.show_page(page, window, cx);
         self.open_page_route(page, None, window, cx);
         self.record(cx);
@@ -534,8 +550,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (Some(routes), Some(view)) = (pages::routes(page, cx), self.views.get(&page).cloned())
-        else {
+        let Some(view) = self.views.get(&page).cloned() else {
+            return;
+        };
+        let Some(routes) = pages::routes(page, cx) else {
+            // A page that settles its visits hears each one, routes or
+            // not (a new `navigation` each attempt).
+            if pages::settles(page, cx) {
+                crate::external_plugins::ExternalPlugins::page_attempt(&view, window, cx);
+            }
             return;
         };
         (routes.open)(&view, params.as_ref(), window, cx);
@@ -981,11 +1004,15 @@ impl Workspace {
                 version: routes.map(|routes| routes.version),
             },
         };
-        self.history.replace(target.clone());
+        self.history.resolve(target.clone());
         // A route the page does not take fails the visit as `unavailable`.
         if routes.is_none_or(|routes| !(routes.validate)(&params)) {
             self.fail_presenting(target, Reason::Page, cx);
             return true;
+        }
+        // The page keeps it as its route, so a view made anew opens there.
+        if let Some(view) = self.views.get(&page) {
+            crate::external_plugins::ExternalPlugins::page_resolved(view, &params, cx);
         }
         self.page_route = Some(params);
         cx.notify();
@@ -1159,7 +1186,14 @@ impl Workspace {
     /// "Retry navigation": the kept target again, reconnecting its
     /// community if the connection failed.
     fn retry_navigation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // With nothing failed, the current visit starts over (`retry()`
+        // always starts a new attempt).
         let Some(failed) = self.failure.take() else {
+            if let Some(target) = self.history.current().cloned() {
+                let keep = std::mem::replace(&mut self.keep_focus, self.attempt_keeps_focus);
+                self.apply(target, window, cx);
+                self.keep_focus = keep;
+            }
             return;
         };
         self.retry_session(cx);

@@ -192,9 +192,22 @@ impl History {
         true
     }
 
-    /// Puts `target` in place of the current entry (`replace: true`),
-    /// keeping the entries after it.
+    /// Puts `target` in place of the current entry (`replace: true`) as a
+    /// new entry, keeping the entries after it.
     pub fn replace(&mut self, target: Target) {
+        self.next_id += 1;
+        let id = self.next_id;
+        match self.entries.get_mut(self.index) {
+            Some(current) => *current = (id, target),
+            None => {
+                self.push(target);
+            }
+        }
+    }
+
+    /// Puts what the current entry turned out to be in its place, the
+    /// same entry (`navigationHost.resolve`).
+    pub fn resolve(&mut self, target: Target) {
         match self.entries.get_mut(self.index) {
             Some((_, current)) => *current = target,
             None => {

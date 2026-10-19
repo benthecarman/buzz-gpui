@@ -1194,7 +1194,8 @@ pub fn create(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
     // A hosted type's provider makes and runs it (`agent/provision`,
     // `agent/activate`), as the Agents page's create does.
     if crate::agents2::is_hosted(&kind, cx) {
-        let picture = made.picture;
+        // No picture is none at all (`recordPicture`).
+        let picture = made.picture.filter(|picture| !picture.is_empty());
         let task = service.update(cx, |agents, cx| {
             agents.create_hosted(&kind, &name, picture, cx)
         });
@@ -1289,8 +1290,7 @@ pub fn save(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
         true => {
             let settings = change.config.is_some()
                 || !change.attention.is_empty()
-                || change.attention_enabled.is_some()
-                || !change.restart.is_empty();
+                || change.attention_enabled.is_some();
             agents.save_hosted(&pubkey, change.name, change.picture, settings, cx)
         }
         false => agents.save(&pubkey, change, cx),
@@ -1385,7 +1385,6 @@ pub fn activity(cx: &App) -> Value {
         .collect();
     Value::Array(
         work.iter()
-            .take(200)
             .map(|work| {
                 json!({
                     "community": communities

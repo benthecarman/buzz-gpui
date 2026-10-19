@@ -1837,7 +1837,12 @@ pub fn take_away(added: Added, cx: &mut App) {
         Added::Tool(key) => crate::ui::composer_tools::unregister(key, cx),
         Added::Shortcut(key) => crate::shortcuts::unregister_external(key),
         Added::Completion(key) => composer_completions::unregister(key),
-        Added::AccountAction(key) => crate::ui::account_actions::unregister(key, cx),
+        Added::AccountAction(key) => {
+            crate::ui::account_actions::unregister(key, cx);
+            crate::ui::navigation::with_workspace(cx, move |workspace, _, cx| {
+                workspace.withdraw_action(key, cx)
+            });
+        }
         Added::ReactionPicker(key) => crate::ui::emoji_picker::unregister_reaction_picker(key, cx),
         Added::NamingPolicy(key) => crate::ui::identity::unregister_policy(key),
     }

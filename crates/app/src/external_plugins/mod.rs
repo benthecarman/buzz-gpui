@@ -1420,6 +1420,20 @@ impl ExternalPlugins {
         contribute::recheck_card(key, cx);
     }
 
+    /// A plugin page resolved its visit to `route` itself: its view keeps
+    /// it, without telling the page what it already knows.
+    pub fn page_resolved(view: &AnyView, route: &Value, cx: &mut App) {
+        if let Ok(view) = view.clone().downcast::<view::ExternalView>() {
+            view.update(cx, |view, _| view.set_route(route.clone()));
+        }
+    }
+
+    /// Tells a plugin page that settles its own visits about a new one
+    /// (`page/route` with no route, and the visit's `entry`).
+    pub fn page_attempt(view: &AnyView, window: &mut Window, cx: &mut App) {
+        view::open_route(view, None, window, cx);
+    }
+
     /// Whether added plugin `id` is starting: its contributions are on
     /// their way.
     pub fn starting(id: &str, cx: &App) -> bool {
@@ -2722,7 +2736,13 @@ fn exit_notice(path: &Path) -> SharedString {
 fn take_away(added: Vec<Added>, cx: &mut App) {
     for added in added {
         match added {
-            Added::Panel(key) => channel_panels::unregister(key, cx),
+            Added::Panel(key) => {
+                channel_panels::unregister(key, cx);
+                // What it shows closes with it ("what is gone is taken away").
+                crate::ui::navigation::with_workspace(cx, move |workspace, window, cx| {
+                    workspace.withdraw_panel(key, window, cx)
+                });
+            }
             Added::Page(page) => pages::unregister(page, cx),
             Added::Other(added) => contribute::take_away(added, cx),
             Added::Agent(added) => agents::take_away(added, cx),
