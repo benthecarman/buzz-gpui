@@ -27,6 +27,12 @@ pub(super) struct Listed {
     failed: HashMap<String, String>,
     /// Agents whose record is being written, so a sync writes each once.
     writing: HashSet<String>,
+    /// Origins whose read no longer stands, as the live connection
+    /// dropped or the cache was cleared (`agentLibrary.clear()`): their
+    /// choices wait for the read again.
+    stale: HashSet<String>,
+    /// By origin, the session generation the last read was made in.
+    read_in: HashMap<String, u64>,
 }
 
 impl Listed {
@@ -35,6 +41,21 @@ impl Listed {
         self.edits.remove(origin);
         self.reading.remove(origin);
         self.failed.remove(origin);
+        self.stale.remove(origin);
+        self.read_in.remove(origin);
+    }
+
+    /// The community's read no longer stands (`agentLibrary.clear()`).
+    pub(super) fn set_stale(&mut self, origin: &str) {
+        self.stale.insert(origin.to_owned());
+    }
+
+    /// Whether the last read was made before the session's cache was
+    /// cleared.
+    pub(super) fn read_before(&self, origin: &str, session: u64) -> bool {
+        self.read_in
+            .get(origin)
+            .is_some_and(|read| *read != session)
     }
 
     /// The community's listings: as read, or until the first read
@@ -103,6 +124,7 @@ impl Agents2 {
         cx.notify();
         let http = RelayHttp::new(binding.session.origin().clone(), binding.identity.clone());
         let viewer = binding.viewer.clone();
+        let session = binding.session.generation();
         let read = Runtime::handle(cx).spawn(async move { listings::read(&http, &viewer).await });
         let origin = origin.to_owned();
         cx.spawn(async move |this, cx| {
@@ -114,6 +136,8 @@ impl Agents2 {
                     return;
                 }
                 this.listed.reading.remove(&origin);
+                this.listed.stale.remove(&origin);
+                this.listed.read_in.insert(origin.clone(), session);
                 let read = match read {
                     Ok(read) => read,
                     // Its edits stay for the next read, which a sync asks
@@ -282,6 +306,8 @@ impl Agents2 {
     pub fn listing_state(&self, origin: &str) -> ListingRead {
         if self.listed.reading.contains_key(origin) {
             ListingRead::Loading
+        } else if self.listed.stale.contains(origin) {
+            ListingRead::Idle
         } else if let Some(error) = self.listed.failed.get(origin) {
             ListingRead::Error(error.clone())
         } else if self.listed.rows.contains_key(origin) {

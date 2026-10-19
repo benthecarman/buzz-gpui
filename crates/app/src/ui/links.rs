@@ -368,7 +368,7 @@ pub fn with_mode<T>(mode: LinkMode, draw: impl FnOnce() -> T) -> T {
 }
 
 /// Opens web link `url` as the mode it was drawn in says.
-fn open_web(
+pub(crate) fn open_web(
     mode: LinkMode,
     url: &str,
     modifiers: Modifiers,

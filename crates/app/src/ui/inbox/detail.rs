@@ -172,6 +172,9 @@ impl InboxDetail {
                     let mut page =
                         ChannelPage::new(community.clone(), channel, on_open_thread, window, cx);
                     page.secondary = true;
+                    // A reader's links open nowhere in Buzz
+                    // (`onOpenLink={() => false}`).
+                    page.link_mode = crate::ui::links::LinkMode::Closed;
                     page
                 });
                 self._subscriptions
@@ -186,14 +189,16 @@ impl InboxDetail {
                     let _ = page.update(cx, |_, cx| cx.emit(Closed));
                 });
                 let panel = cx.new(|cx| {
-                    ThreadPanel::exact(
+                    let mut panel = ThreadPanel::exact(
                         community.clone(),
                         channel.id.clone(),
                         message,
                         on_close,
                         window,
                         cx,
-                    )
+                    );
+                    panel.link_mode = crate::ui::links::LinkMode::Closed;
+                    panel
                 });
                 self.reader = Some(Reader::Thread(panel));
             }

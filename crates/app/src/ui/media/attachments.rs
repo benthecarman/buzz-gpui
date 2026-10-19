@@ -457,6 +457,12 @@ fn file_tile(
     let media = rows.directory.media.clone();
     let insecure = attachment.insecure;
     let relay = !insecure && media.is_relay_media(&attachment.url);
+    // A file elsewhere opens as its message's links do: in a panel that
+    // shows it, else the browser (`onOpenLink(source)`).
+    let (mode, origin) = (
+        super::super::links::mode(),
+        Some(super::super::navigation::LinkOrigin::of(row)),
+    );
     let name = attachment
         .name
         .clone()
@@ -514,12 +520,19 @@ fn file_tile(
                 ),
         )
         .when(relay, |d| d.child(Icon::new(IconName::Download).size(20.)))
-        .on_click(move |_, _, cx| {
+        .on_click(move |event, window, cx| {
             if insecure {
                 return;
             }
             if !relay {
-                cx.open_url(&url);
+                super::super::links::open_web(
+                    mode,
+                    &url,
+                    event.modifiers(),
+                    origin.clone(),
+                    window,
+                    cx,
+                );
                 return;
             }
             FAILED_DOWNLOADS.with_borrow_mut(|failed| failed.remove(&url));

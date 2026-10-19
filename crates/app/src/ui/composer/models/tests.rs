@@ -86,7 +86,7 @@ fn discards_pending_metadata_after_the_mentioned_agent_changes() {
     let key = |pubkey: &str| -> Key {
         vec![(
             pubkey.into(),
-            Some(("type".into(), pubkey.into(), "{}".into())),
+            Some(("type".into(), pubkey.into(), "{}".into(), 0)),
         )]
     };
     let loading = |pubkey: &str| Choice {

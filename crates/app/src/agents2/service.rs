@@ -1284,6 +1284,7 @@ impl Agents2 {
             return;
         };
         let read = bound.community.read(cx);
+        let session = read.session.generation();
         let next = identity
             .filter(|_| read.snapshot.status == SessionStatus::Ready)
             .map(|identity| (identity, read.snapshot.live));
@@ -1291,7 +1292,20 @@ impl Agents2 {
             // Retries what failed whenever the connection recovers.
             (Some(binding), Some((_, live))) => {
                 let recovered = *live && !binding.live;
+                let dropped = !*live && binding.live;
                 binding.live = *live;
+                // The agent list read no longer stands once the live
+                // connection drops or the cache is cleared, and is read
+                // again when it is back (`agentLibrary.clear()`,
+                // `reconnect()`).
+                let cleared = self.listed.read_before(origin, session);
+                if dropped || cleared {
+                    self.listed.set_stale(origin);
+                    cx.notify();
+                }
+                if (recovered || cleared) && *live {
+                    self.refresh_listings(origin, cx);
+                }
                 if recovered {
                     self.sync(cx);
                 }

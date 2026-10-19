@@ -115,9 +115,12 @@ impl AgentTabs {
         self.views.clear();
     }
 
-    /// Whether the agent can move to another provider.
+    /// Whether the agent can move to another provider: a local one, as
+    /// no hosted provider takes over a local key (`canRetype`).
     fn can_retype(agent: &Agent, cx: &App) -> bool {
-        types(cx).iter().any(|kind| kind.key != agent.agent_type)
+        types(cx)
+            .iter()
+            .any(|kind| kind.key != agent.agent_type && kind.kind.remote().is_none())
     }
 
     /// What Settings is framed with: the Provider select, and the staged
@@ -226,7 +229,11 @@ impl AgentTabs {
         let Some(agent) = current(&self.pubkey, cx) else {
             return div().into_any_element();
         };
-        let available = types(cx);
+        // Local providers only, besides the agent's own (`!type.remote`).
+        let available: Vec<_> = types(cx)
+            .into_iter()
+            .filter(|kind| kind.key == agent.agent_type || kind.kind.remote().is_none())
+            .collect();
         let others = available.iter().any(|kind| kind.key != agent.agent_type);
         let selected = self
             .staged

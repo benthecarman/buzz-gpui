@@ -287,8 +287,8 @@ keeps the answer until anything in it changes:
   `type`, `agent`, `contribution` (the tab id) and `conversation`
   (`{"channel","root"}` when the agent was opened from a message). Buzz sends
   `view/agent` (`view`, `agent`) when the agent shown changes, such as a
-  change saved elsewhere. A tab not shown is closed (`view/close`) and opens
-  again when it is. To save, send `agent/save` with the `view` and the whole
+  change saved elsewhere. A tab not selected is closed (`view/close`) and
+  opens again when it is selected. To save, send `agent/save` with the `view` and the whole
   new `config`. With `role:
   "settings"` the tab is the agent's Settings, first, with Buzz's Provider
   field at its top. When the user picks this type there for an agent of
@@ -821,6 +821,12 @@ passes a function, or reaches into the app, it works differently:
   selected when it was sent, so opening it later (a click, Back or
   Forward) selects that community again; buzz-app's leaves the selection
   alone.
+
+- **Views stay open while their page is hidden.** A plugin page, and the
+  agent tab shown on the Agents page or in an agent's profile, stays
+  open when you go elsewhere, and is shown again as it was; buzz-app
+  unmounts them and opens them afresh when you come back. A page hears
+  `page/route` when it is visited again.
 
 - **Statuses are read for anyone.** `statuses/get` answers for every key
   asked about; buzz-app's `statuses.current` answers only for people

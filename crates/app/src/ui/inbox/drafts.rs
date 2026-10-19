@@ -547,6 +547,9 @@ impl DraftDetail {
                             cx,
                         );
                         panel.require_ready_root = true;
+                        // A reader's links open nowhere in Buzz
+                        // (`onOpenLink={() => false}`).
+                        panel.link_mode = crate::ui::links::LinkMode::Closed;
                         panel
                     });
                     let composer = panel.read(cx).composer_entity();
@@ -586,6 +589,7 @@ impl DraftDetail {
                             cx,
                         );
                         page.secondary = true;
+                        page.link_mode = crate::ui::links::LinkMode::Closed;
                         page
                     });
                     let composer = page.read(cx).composer_entity();

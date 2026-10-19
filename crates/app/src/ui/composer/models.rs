@@ -33,9 +33,10 @@ pub struct Choice {
 }
 
 /// The pubkeys a lookup was for, each with its agent's type, name and
-/// config when it is one of the viewer's agents of a registered type: a
-/// change to the agent asks again (`[snapshot, types, key]`).
-type Key = Vec<(String, Option<(String, String, String)>)>;
+/// config when it is one of the viewer's agents of a registered type,
+/// and that registration: a change to the agent or a type registered anew
+/// asks again (`[snapshot, types, key]`).
+type Key = Vec<(String, Option<(String, String, String, usize)>)>;
 
 /// One lookup of the mentioned agents' choices.
 struct Lookup {
@@ -310,6 +311,7 @@ impl Composer {
                             kind.key.to_string(),
                             agent.name.clone(),
                             agent.config.to_string(),
+                            std::sync::Arc::as_ptr(&kind.kind) as *const () as usize,
                         )
                     }),
                 )

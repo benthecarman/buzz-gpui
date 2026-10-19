@@ -1681,7 +1681,17 @@ impl Review {
                                         .size(IconButtonSize::Sm)
                                         .icon_size(17.)
                                         .tooltip("Open image in browser")
-                                        .on_click(move |_, _, cx| cx.open_url(&browser_url)),
+                                        // As a link opens: in a panel that
+                                        // shows it, else the browser.
+                                        .on_click(move |event, window, cx| {
+                                            super::super::navigation::open_web_link_from(
+                                                &browser_url,
+                                                event.modifiers(),
+                                                None,
+                                                window,
+                                                cx,
+                                            )
+                                        }),
                                 )
                             }),
                     ),

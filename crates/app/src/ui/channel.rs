@@ -108,6 +108,8 @@ pub struct ChannelPage {
     pub pane: Option<PaneButton>,
     /// Shown inside another channel's tab pane, so without its header.
     pub secondary: bool,
+    /// How links in its rows open: a reader's open nowhere in Buzz.
+    pub link_mode: crate::ui::links::LinkMode,
     /// The Messages page's conversation, which shows live-update
     /// recovery above its composer (`LiveStatus`).
     pub live_status: bool,
@@ -383,6 +385,7 @@ impl ChannelPage {
             on_open_thread,
             pane: None,
             secondary: false,
+            link_mode: crate::ui::links::LinkMode::Normal,
             live_status: false,
             launchers: Vec::new(),
             menu_panels: Vec::new(),
@@ -1316,6 +1319,8 @@ impl Render for ChannelPage {
         )
         .absolute()
         .size_0();
+        // Rows are drawn in layout, so they take the link mode with them.
+        let link_mode = self.link_mode;
         // A preview's Join prompt waits for its content, then floats over
         // the history's end, which keeps room for it.
         let preview = self.preview();
@@ -1406,7 +1411,9 @@ impl Render for ChannelPage {
                                 div()
                                     .relative()
                                     .px(inset)
-                                    .child(message::render(item, &rows, cx))
+                                    .child(crate::ui::links::with_mode(link_mode, || {
+                                        message::render(item, &rows, cx)
+                                    }))
                                     .child(drawn.probe(index))
                                     // The end space scrolls with the history,
                                     // clear of a preview's Join prompt.

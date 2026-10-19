@@ -112,6 +112,8 @@ pub struct ThreadPanel {
     viewer: String,
     channel: String,
     root_id: EventId,
+    /// How links in its rows open: a reader's open nowhere in Buzz.
+    pub link_mode: crate::ui::links::LinkMode,
     view: ThreadView,
     snapshot: Arc<ThreadSnapshot>,
     entries: Vec<Entry>,
@@ -292,6 +294,7 @@ impl ThreadPanel {
             viewer,
             channel,
             root_id,
+            link_mode: crate::ui::links::LinkMode::Normal,
 
             view,
             snapshot,
@@ -1221,6 +1224,8 @@ impl Render for ThreadPanel {
                 .absolute()
                 .size_0()
             };
+            // Rows are drawn in layout, so they take the link mode with them.
+            let link_mode = self.link_mode;
             let jump = self.jump.render(
                 "thread-jump-to-latest",
                 typing::has_agents(&self.activity, cx),
@@ -1287,7 +1292,9 @@ impl Render for ThreadPanel {
                             .pl(px(24.))
                             .pr(if narrow_panel { px(12.) } else { px(24.) })
                             .children(status)
-                            .child(render_entry(entry, &rows, &branch, &weak, cx))
+                            .child(crate::ui::links::with_mode(link_mode, || {
+                                render_entry(entry, &rows, &branch, &weak, cx)
+                            }))
                             .child(drawn.probe(index))
                             // The last reply stays clear of a preview's Join.
                             .when(index + 1 == entry_count, |d| d.pb(preview_inset))
