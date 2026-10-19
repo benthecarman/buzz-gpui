@@ -1200,12 +1200,25 @@ pub fn create(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
         });
         return Ok(cx.spawn(async move |cx| {
             let pubkey = task.await.map_err(|error| (3, error))?;
+            // As `agents/list` gives a hosted agent.
             Ok(cx.update(|cx| {
-                service
+                let listed = service
                     .read(cx)
-                    .find(&pubkey)
-                    .map(|agent| entry_at(agent, true))
-                    .unwrap_or_else(|| json!({ "pubkey": pubkey, "place": "hosted" }))
+                    .elsewhere(cx)
+                    .into_iter()
+                    .find(|agent| agent.pubkey == pubkey);
+                let viewer = crate::community::AppState::current(cx)
+                    .map(|community| community.read(cx).session.viewer().to_owned());
+                json!({
+                    "pubkey": pubkey,
+                    "name": listed.as_ref().map_or(name.as_str(), |agent| agent.name.as_str()),
+                    "type": kind,
+                    "owner": viewer,
+                    "relay": listed.as_ref().map(|agent| agent.relay.clone()),
+                    "picture": listed.as_ref().and_then(|agent| agent.picture.clone()),
+                    "place": "hosted",
+                    "hosted": true,
+                })
             }))
         }));
     }
@@ -1277,7 +1290,18 @@ pub fn remove(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
         .and_then(Value::as_str)
         .ok_or((INVALID_PARAMS, "pubkey is required".to_owned()))?
         .to_owned();
-    let task = agents2(cx)?.update(cx, |agents, cx| agents.remove(&pubkey, cx));
+    let service = agents2(cx)?;
+    // A hosted agent is removed through its provider (`agent/remove`).
+    let hosted = service.update(cx, |agents, cx| {
+        agents
+            .elsewhere(cx)
+            .iter()
+            .any(|agent| agent.pubkey == pubkey && crate::agents2::is_hosted(&agent.agent_type, cx))
+    });
+    let task = service.update(cx, |agents, cx| match hosted {
+        true => agents.remove_hosted(&pubkey, cx),
+        false => agents.remove(&pubkey, cx),
+    });
     Ok(cx.background_spawn(
         async move { task.await.map(|()| Value::Null).map_err(|error| (3, error)) },
     ))
