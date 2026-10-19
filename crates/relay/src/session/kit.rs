@@ -24,7 +24,6 @@ use crate::reader::{ReadOptions, Reader};
 use crate::socket::Filter;
 use crate::store::{Partition, Store};
 use nostr::prelude::EventId;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, watch};
 
@@ -61,9 +60,14 @@ pub(super) struct KitShared {
     creation: watch::Sender<Arc<CreationSnapshot>>,
     /// The creation in this session whose Create is unconfirmed.
     running: Mutex<Option<Progress>>,
-    /// A creation is being admitted now.
-    admitting: AtomicBool,
+    /// The admission of the creation being admitted now, which a Create
+    /// made meanwhile shares (`admitting`).
+    admission: Mutex<Option<Shared>>,
 }
+
+/// One run's admission, once it settles.
+type Admission = Option<Result<String, String>>;
+type Shared = watch::Receiver<Admission>;
 
 impl KitShared {
     fn set_creation(&self) {
@@ -273,21 +277,18 @@ impl Session {
             let mut admitted = Admitted {
                 sender: Some(sender),
                 opened: None,
+                sharing: None,
             };
             if let Err(error) = run(&session, input, &mut admitted).await {
-                match (admitted.sender.take(), admitted.opened) {
-                    (Some(sender), _) => {
-                        let _ = sender.send(Err(error));
-                    }
+                if admitted.sender.is_some() {
+                    admitted.settle(Err(error));
+                } else if let Some(id) = admitted.opened.take() {
                     // Admitted: the form is gone, so setup reports here,
                     // and the receipt goes so it cannot fill the budget.
-                    (None, Some(id)) => {
-                        if let Ok(ctx) = session.kit_context().await {
-                            let _ = Receipts::remove(&ctx.store, &ctx.partition, &id);
-                        }
-                        shared.notice(SetupNotice { id, name, error });
+                    if let Ok(ctx) = session.kit_context().await {
+                        let _ = Receipts::remove(&ctx.store, &ctx.partition, &id);
                     }
-                    (None, None) => {}
+                    shared.notice(SetupNotice { id, name, error });
                 }
             }
         });
@@ -300,13 +301,36 @@ struct Admitted {
     sender: Option<oneshot::Sender<Result<String, String>>>,
     /// The channel, once admitted.
     opened: Option<String>,
+    /// Hands this run's admission to Creates made while it runs.
+    sharing: Option<(Arc<KitShared>, watch::Sender<Admission>)>,
+}
+
+impl Admitted {
+    /// Answers the form, and every Create that shared it; another
+    /// creation may start from here (`admitting = undefined`).
+    fn settle(&mut self, result: Result<String, String>) {
+        if let Some((shared, sharing)) = self.sharing.take() {
+            *shared.admission.lock().expect("kit lock") = None;
+            sharing.send_replace(Some(result.clone()));
+        }
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(result);
+        }
+    }
+}
+
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        // A run that ended without settling never blocks the next one.
+        if self.sharing.is_some() {
+            self.settle(Err(CLOSED.into()));
+        }
+    }
 }
 
 fn admit(admitted: &mut Admitted, id: &str) {
     admitted.opened = Some(id.to_owned());
-    if let Some(sender) = admitted.sender.take() {
-        let _ = sender.send(Ok(id.to_owned()));
-    }
+    admitted.settle(Ok(id.to_owned()));
 }
 
 /// `restoredChannelCreation`: the newest 9007 the outbox still holds for a
@@ -424,12 +448,13 @@ async fn run(
     let shared = session.kit.clone();
     let ctx = session.kit_context().await?;
     ctx.outbox.ready().await.map_err(|e| e.to_string())?;
-    let running = shared.running.lock().expect("kit lock").clone();
-    if let Some(checking) = running {
-        return retry_running(session, &ctx, checking, admitted).await;
-    }
+    let running = shared.running.lock().expect("kit lock").is_some();
     let running_id = None;
-    let restored = with(&session.commands, move |actor| restored(actor, running_id)).await?;
+    let restored = if running {
+        None
+    } else {
+        with(&session.commands, move |actor| restored(actor, running_id)).await?
+    };
     if let Some(pending) = restored {
         // Only the same channel retries it; anything else waits until it
         // is retried (`channelCreation.create`).
@@ -461,12 +486,37 @@ async fn run(
         }
         return retry_restored(session, &ctx, pending, admitted).await;
     }
-    if shared.admitting.swap(true, Ordering::SeqCst) {
-        return Err("Another channel is still being created.".into());
+    // A Create while another is being admitted gets that one's admission,
+    // whatever its input (`if (admitting) return admitting`).
+    let joined = {
+        let mut slot = shared.admission.lock().expect("kit lock");
+        match slot.as_ref() {
+            Some(admission) => Some(admission.clone()),
+            None => {
+                let (sharing, admission) = watch::channel(None);
+                *slot = Some(admission);
+                admitted.sharing = Some((shared.clone(), sharing));
+                None
+            }
+        }
+    };
+    if let Some(mut admission) = joined {
+        let id = admission
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| CLOSED.to_owned())?
+            .clone()
+            .unwrap_or_else(|| Err(CLOSED.into()))?;
+        admitted.settle(Ok(id));
+        return Ok(());
     }
+    let running = shared.running.lock().expect("kit lock").clone();
+    if let Some(checking) = running {
+        return retry_running(session, &ctx, checking, admitted).await;
+    }
+    // Admitted or failed, the admission settles: another creation may
+    // start while setup runs.
     let admission = start(session, &ctx, input, admitted).await;
-    // Admitted or failed: another creation may start while setup runs.
-    shared.admitting.store(false, Ordering::SeqCst);
     complete(session, &ctx, admission?).await
 }
 

@@ -86,8 +86,29 @@ pub fn memory_listing(value: &Value) -> Result<MemoryListing, MemoryError> {
             created_at,
         });
     }
-    listing.entries.sort_by(|a, b| a.slug.cmp(&b.slug));
+    listing.entries.sort_by(|a, b| slug_order(&a.slug, &b.slug));
     Ok(listing)
+}
+
+/// Slugs as buzz-app's `localeCompare` orders them: `_`, `-`, `/`,
+/// digits, then letters regardless of case, and then lowercase first.
+fn slug_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let primary = |slug: &str| -> Vec<u32> {
+        slug.chars()
+            .map(|c| match c {
+                '_' => 0,
+                '-' => 1,
+                '/' => 2,
+                '0'..='9' => 3 + c as u32 - '0' as u32,
+                c => 16 + c.to_ascii_lowercase() as u32,
+            })
+            .collect()
+    };
+    primary(a).cmp(&primary(b)).then_with(|| {
+        let case =
+            |slug: &str| -> Vec<bool> { slug.chars().map(|c| c.is_ascii_uppercase()).collect() };
+        case(a).cmp(&case(b))
+    })
 }
 
 /// NIP-AE slugs: `core`, or `mem/` and lowercase path parts (`memorySlug`).
@@ -194,6 +215,35 @@ mod tests {
             "entries": [{"slug": "mem/Bad", "body": "", "eventId": id, "createdAt": 1}],
         });
         assert!(memory_listing(&bad_slug).is_err());
+    }
+
+    #[test]
+    fn listings_sort_as_locale_compare() {
+        let id = "a".repeat(64);
+        let entry = |slug: &str| json!({"slug": slug, "body": "", "eventId": id, "createdAt": 1});
+        let value = json!({
+            "partial": false,
+            "entries": [
+                entry("mem/a1"),
+                entry("mem/a/b"),
+                entry("mem/b"),
+                entry("mem/a-b"),
+                entry("core"),
+                entry("mem/a_b"),
+                entry("mem/a"),
+            ],
+        });
+        let listing = memory_listing(&value).unwrap();
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|e| e.slug.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "core", "mem/a", "mem/a_b", "mem/a-b", "mem/a/b", "mem/a1", "mem/b"
+            ]
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! within [`lifecycle::RUN_TIMEOUT`].
 
 use super::util::{CLOSED, NOT_CONNECTED, now, post_event, sign};
-use super::{Actor, Message, Session};
+use super::{Actor, Message, RosterStatus, Session};
 use crate::discovery::{ChannelSummary, ResolutionStart, metadata_name, open_metadata};
 use crate::dm;
 use crate::event::{Verified, kinds};
@@ -1152,6 +1152,14 @@ impl Ops {
             return Ok(PublicChannels::default());
         }
         let ctx = self.context().await?;
+        // Only once the channel list is in (`list.status`), so a channel
+        // you joined never shows as one to join.
+        if !self
+            .with(|actor| actor.roster == RosterStatus::Ready)
+            .await?
+        {
+            return Err("Channel list is not ready for channel search".to_owned());
+        }
         let page = Filter::from_iter([
             ("kinds".to_owned(), json!([kinds::CHANNEL_METADATA])),
             ("authors".to_owned(), json!([ctx.relay])),

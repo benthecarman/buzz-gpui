@@ -235,7 +235,7 @@ impl ExternalView {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
-        let extra = json!({ "type": kind, "config": config });
+        let extra = json!({ "type": kind, "config": config, "disabled": false });
         Self::open(
             plugin,
             kind,
@@ -247,6 +247,59 @@ impl ExternalView {
             cx,
         )
         .into()
+    }
+
+    /// The New agent dialog's config or its creating state changed
+    /// (`Create`'s `config` and `disabled` props): an `agentCreate` view
+    /// hears `view/agentCreate`, and a reopened one starts from it.
+    pub fn agent_create_changed(view: &AnyView, config: &Value, disabled: bool, cx: &mut App) {
+        let Ok(view) = view.clone().downcast::<Self>() else {
+            return;
+        };
+        let changed = view.update(cx, |view, _| {
+            let Value::Object(extra) = &mut view.extra else {
+                return None;
+            };
+            if extra.get("config") == Some(config)
+                && extra.get("disabled") == Some(&Value::Bool(disabled))
+            {
+                return None;
+            }
+            extra.insert("config".into(), config.clone());
+            extra.insert("disabled".into(), Value::Bool(disabled));
+            Some((view.plugin.clone(), view.id.clone()))
+        });
+        if let Some((plugin, id)) = changed {
+            ExternalPlugins::notify_running(
+                &plugin,
+                "view/agentCreate",
+                json!({ "view": id, "config": config, "disabled": disabled }),
+                cx,
+            );
+        }
+    }
+
+    /// The agent an `agentTab` view shows changed (its `agent` prop): it
+    /// hears `view/agent`, and a reopened one starts from it.
+    pub fn agent_changed(view: &AnyView, agent: &crate::agents2::Agent, cx: &mut App) {
+        let Ok(view) = view.clone().downcast::<Self>() else {
+            return;
+        };
+        let changed = view.update(cx, |view, _| match &mut view.agent {
+            Some((shown, _)) if shown.agent != *agent => {
+                shown.agent = agent.clone();
+                Some((view.plugin.clone(), view.id.clone()))
+            }
+            _ => None,
+        });
+        if let Some((plugin, id)) = changed {
+            ExternalPlugins::notify_running(
+                &plugin,
+                "view/agent",
+                json!({ "view": id, "agent": super::agents::agent_json(agent) }),
+                cx,
+            );
+        }
     }
 
     /// A composer capture: the plugin's view in place of one composer's

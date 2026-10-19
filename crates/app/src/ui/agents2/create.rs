@@ -212,6 +212,10 @@ impl CreateAgent {
         let dialog = cx.weak_entity();
         let change: crate::agents2::registry::CreateChange = std::rc::Rc::new(move |config, cx| {
             let _ = dialog.update(cx, |this, cx| {
+                // Nothing changes while the agent is being made (`disabled`).
+                if this.pending {
+                    return;
+                }
                 this.config = config;
                 this.dirty = true;
                 cx.notify();
@@ -1031,6 +1035,15 @@ impl Render for CreateAgent {
         let c = *cx.colors();
         let kind = self.kind(cx);
         self.ensure_form(kind.as_ref(), window, cx);
+        // The form follows the config and whether the agent is being made.
+        if let Some((_, form)) = &self.form {
+            crate::external_plugins::ExternalView::agent_create_changed(
+                form,
+                &self.config,
+                self.pending,
+                cx,
+            );
+        }
         let name_empty = self.name.read(cx).value().trim().is_empty();
         let hosts = Agents2::global(cx)
             .map(|service| service.read(cx).hosts(cx))

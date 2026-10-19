@@ -609,7 +609,11 @@ impl Render for AgentTabs {
                     let key: SharedString =
                         format!("{}#{}:{}", shown.agent_type, self.stage, tab.id).into();
                     let view = match self.views.get(&key) {
-                        Some(view) => view.clone(),
+                        // A kept tab shows the agent as it is now.
+                        Some(view) => {
+                            crate::external_plugins::ExternalView::agent_changed(view, &shown, cx);
+                            view.clone()
+                        }
                         None => {
                             let settings_host = (tab.id == SETTINGS_TAB).then_some(host);
                             let view = (tab.build)(

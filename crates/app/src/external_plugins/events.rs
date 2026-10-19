@@ -161,7 +161,7 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
     let filters = filters(params, true)?;
     let http = RelayHttp::new(community.read(cx).origin.clone(), identity(cx)?);
     let session = community.read(cx).session.clone();
-    // The channels you can read, for the outbox's pending events.
+    // The channels you can read, for the outbox's events.
     let readable: HashSet<String> = community
         .read(cx)
         .snapshot
@@ -176,9 +176,19 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
             .map_err(|error| (2, error.to_string()))?;
         // Only signed events that check out, as `session.read` verifies.
         let verifier = buzz_relay_client::Verifier::new(4);
+        let mut discovery = Vec::new();
         events.retain(|value| {
-            serde_json::from_value::<Event>(value.clone())
-                .is_ok_and(|event| verifier.verify(event).is_ok())
+            let Some(verified) = serde_json::from_value::<Event>(value.clone())
+                .ok()
+                .and_then(|event| verifier.verify(event).ok())
+            else {
+                return false;
+            };
+            use buzz_relay_client::kinds::{CHANNEL_MEMBERS, CHANNEL_METADATA};
+            if matches!(verified.kind_u16(), CHANNEL_METADATA | CHANNEL_MEMBERS) {
+                discovery.push(verified);
+            }
+            true
         });
         // A message search across channels resolves the channels its
         // results are in first, open ones you have not joined included,
@@ -236,8 +246,10 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
             events.retain(|event| single(event).is_some_and(|id| resolved.contains(&id)));
         }
         // Only from channels you can read (`eventVisibility`): each `h`,
-        // and a roster or admin list's `d`; channel metadata (39000) may
-        // introduce an open one, as buzz-app accepts it from the read.
+        // and a roster or admin list's `d`. The read's own channel
+        // metadata and rosters count first, as `session.read` accepts
+        // them into discovery (`acceptDiscovery`), so one may introduce
+        // an open channel or take one away.
         let named = |event: &Value| -> Vec<String> {
             let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0);
             event["tags"]
@@ -255,6 +267,7 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
         let mut channels: Vec<String> = events.iter().flat_map(named).collect();
         channels.sort();
         channels.dedup();
+        session.accept_discovery(discovery).await;
         if !channels.is_empty() {
             let open: HashSet<String> = session
                 .accessible_channels(channels)
@@ -263,14 +276,15 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
                 .collect();
             events.retain(|event| named(event).iter().all(|id| open.contains(id)));
         }
-        // Your own events still on their way count too, as `session.read`
-        // merges what the outbox holds.
+        // Your own events count too, as `session.read` merges what the
+        // outbox holds: those on their way and those it saw delivered
+        // (`local`).
         if let Some(outbox) = session.outbox().await {
             let known: HashSet<String> = events
                 .iter()
                 .filter_map(|event| event.get("id").and_then(Value::as_str).map(str::to_owned))
                 .collect();
-            for op in outbox.pending().iter() {
+            for op in outbox.visible().iter() {
                 // A send still waiting for its slot is not signed yet; it
                 // counts all the same (`operation.event`).
                 let value = match &op.signed {

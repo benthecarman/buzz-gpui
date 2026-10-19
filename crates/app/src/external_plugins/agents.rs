@@ -1028,7 +1028,8 @@ pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
     use crate::ui::archives;
     let community = super::capabilities::community(cx)?;
     let origin = community.read(cx).origin.clone();
-    let (status, error) = match agents2(cx)?.read(cx).status() {
+    // The hosts' agents (`native`).
+    let (hosts, host_error) = match agents2(cx)?.read(cx).status() {
         Status::Unavailable => ("unavailable", None),
         Status::Loading => ("loading", None),
         Status::Ready => ("ready", None),
@@ -1048,24 +1049,43 @@ pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
     // Each with its picture, as the library rows carry it (`avatar`).
     let service = agents2(cx)?;
     let service = service.read(cx);
-    // And the agents your list names in this community from other
-    // devices, which this one does not run (`agentLibrary`'s relay
-    // inventory, unmanaged).
+    // That list is the `library`: either source being ready makes the
+    // choices ready, and complete needs the list read and the hosts
+    // settled (`createAgentChoices`).
+    use crate::agents2::listings::ListingRead;
     let http = origin.http();
-    for (pubkey, name) in service.listed_elsewhere(&http) {
-        if seen.insert(pubkey.clone()) {
-            identities.push((pubkey, name, false));
+    let list = service.listing_state(&http);
+    // And, while that list is read, the agents it names in this
+    // community from other devices, which this one does not run
+    // (`agentLibrary`'s relay inventory, unmanaged).
+    if list == ListingRead::Ready {
+        for (pubkey, name) in service.listed_elsewhere(&http) {
+            if seen.insert(pubkey.clone()) {
+                identities.push((pubkey, name, false));
+            }
         }
     }
-    // Complete once that list was read too; its failure is the error,
-    // which settles it as a finished read would.
-    let (reading, read, failed) = service.listing_state(&http);
-    let pending = status == "loading" || reading || (!read && failed.is_none());
-    let complete = status == "ready" && read && failed.is_none();
-    let error = error.or_else(|| {
-        failed
-            .map(|failed| format!("Relay inventory unavailable; showing local library ({failed})"))
-    });
+    let list_error = match &list {
+        ListingRead::Error(failed) => Some(format!(
+            "Relay inventory unavailable; showing local library ({failed})"
+        )),
+        _ => None,
+    };
+    let errors: Vec<String> = list_error.into_iter().chain(host_error).collect();
+    let status = if list == ListingRead::Ready || hosts == "ready" {
+        "ready"
+    } else if !errors.is_empty() {
+        "error"
+    } else if list == ListingRead::Loading || hosts == "loading" {
+        "loading"
+    } else if list == ListingRead::Idle {
+        "idle"
+    } else {
+        "unavailable"
+    };
+    let pending = matches!(list, ListingRead::Idle | ListingRead::Loading) || hosts == "loading";
+    let complete = list == ListingRead::Ready && matches!(hosts, "ready" | "unavailable");
+    let error = (!errors.is_empty()).then(|| errors.join(" "));
     let avatar = |pubkey: &str| {
         service
             .agents()

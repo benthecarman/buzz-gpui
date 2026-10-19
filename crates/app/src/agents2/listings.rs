@@ -43,6 +43,19 @@ pub struct Listing {
     pub prior: Option<RecordBody>,
 }
 
+/// How far a community's list read got (`AgentLibrarySnapshot.status`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListingRead {
+    /// No session to read it with.
+    Unavailable,
+    /// Not read yet.
+    Idle,
+    Loading,
+    Ready,
+    /// The last read failed, and why.
+    Error(String),
+}
+
 /// One of the owner's agents in the selected community that is not on
 /// any connected host: it runs on another of the owner's devices, so it
 /// is shown read-only and never run here.

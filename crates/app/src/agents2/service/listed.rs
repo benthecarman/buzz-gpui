@@ -3,7 +3,7 @@
 //! another of the owner's devices (buzz-app's `readListings`, `list`,
 //! `listedAgents`).
 
-use super::super::listings::{self, Elsewhere, Listing};
+use super::super::listings::{self, Elsewhere, Listing, ListingRead};
 use super::{Agents2, http_origin, selected_origin};
 use crate::runtime::Runtime;
 use buzz_relay_client::RelayHttp;
@@ -18,7 +18,7 @@ pub(super) struct Listed {
     /// The viewer's records in each community, as last read and written
     /// since.
     rows: HashMap<String, Vec<Listing>>,
-    /// By origin until its records are first read: the listings written
+    /// By origin while its records are being read: the listings written
     /// or removed meanwhile, which the read must not undo.
     edits: HashMap<String, HashMap<String, Option<Listing>>>,
     /// By origin, the binding generation whose read is under way.
@@ -49,17 +49,18 @@ impl Listed {
     }
 
     /// Replaces or removes the agent's listing, and keeps the change until
-    /// the community's records are first read.
+    /// the community's records are read, first or again.
     pub(super) fn set_row(&mut self, origin: &str, pubkey: &str, row: Option<Listing>) {
-        let Some(rows) = self.rows.get_mut(origin) else {
+        if !self.rows.contains_key(origin) || self.reading.contains_key(origin) {
             self.edits
                 .entry(origin.to_owned())
                 .or_default()
-                .insert(pubkey.to_owned(), row);
-            return;
-        };
-        rows.retain(|entry| entry.pubkey != pubkey);
-        rows.extend(row);
+                .insert(pubkey.to_owned(), row.clone());
+        }
+        if let Some(rows) = self.rows.get_mut(origin) {
+            rows.retain(|entry| entry.pubkey != pubkey);
+            rows.extend(row);
+        }
     }
 }
 
@@ -81,6 +82,12 @@ impl Agents2 {
                 self.read_listings(&origin, cx);
             }
         }
+    }
+
+    /// Reads the community's records again, even once read (buzz-app's
+    /// `library.refresh`); one under way answers for it.
+    pub fn refresh_listings(&mut self, origin: &str, cx: &mut Context<Self>) {
+        self.read_listings(origin, cx);
     }
 
     fn read_listings(&mut self, origin: &str, cx: &mut Context<Self>) {
@@ -111,6 +118,10 @@ impl Agents2 {
                     // for.
                     Err(error) => {
                         tracing::warn!(%error, "The agent list could not be read");
+                        // Once read, the rows already hold them.
+                        if this.listed.rows.contains_key(&origin) {
+                            this.listed.edits.remove(&origin);
+                        }
                         this.listed.failed.insert(origin.clone(), error);
                         cx.notify();
                         return;
@@ -118,10 +129,25 @@ impl Agents2 {
                 };
                 this.listed.failed.remove(&origin);
                 let edits = this.listed.edits.remove(&origin).unwrap_or_default();
+                // A record being written keeps the row it replaces, which
+                // its write updates once it lands.
+                let writing = &this.listed.writing;
+                let previous = this.listed.rows.remove(&origin).unwrap_or_default();
+                let kept: Vec<Listing> = previous
+                    .into_iter()
+                    .filter(|row| writing.contains(&row.pubkey))
+                    .collect();
                 let mut rows: Vec<Listing> = read
                     .into_iter()
-                    .filter(|row| !edits.contains_key(&row.pubkey))
+                    .filter(|row| {
+                        !edits.contains_key(&row.pubkey)
+                            && !kept.iter().any(|kept| kept.pubkey == row.pubkey)
+                    })
                     .collect();
+                rows.extend(
+                    kept.into_iter()
+                        .filter(|row| !edits.contains_key(&row.pubkey)),
+                );
                 rows.extend(edits.into_values().flatten());
                 this.listed.rows.insert(origin.clone(), rows);
                 cx.notify();
@@ -249,14 +275,24 @@ impl Agents2 {
             .collect()
     }
 
-    /// The agent list read at `origin`: whether it is under way, whether
-    /// one finished, and why the last one failed.
-    pub fn listing_state(&self, origin: &str) -> (bool, bool, Option<String>) {
-        (
-            self.listed.reading.contains_key(origin),
-            self.listed.rows.contains_key(origin),
-            self.listed.failed.get(origin).cloned(),
-        )
+    /// How far the agent list read at `origin` got: one under way shows
+    /// as loading, even over an earlier one (`library.refresh`).
+    pub fn listing_state(&self, origin: &str) -> ListingRead {
+        if self.listed.reading.contains_key(origin) {
+            ListingRead::Loading
+        } else if let Some(error) = self.listed.failed.get(origin) {
+            ListingRead::Error(error.clone())
+        } else if self.listed.rows.contains_key(origin) {
+            ListingRead::Ready
+        } else if self
+            .bound
+            .get(origin)
+            .is_some_and(|bound| bound.binding.is_some())
+        {
+            ListingRead::Idle
+        } else {
+            ListingRead::Unavailable
+        }
     }
 
     /// [`Self::elsewhere`] at `origin`.

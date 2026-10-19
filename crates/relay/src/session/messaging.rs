@@ -47,6 +47,30 @@ impl Session {
             .unwrap_or_default()
     }
 
+    /// Takes the channel metadata and rosters (39000, 39002) a read
+    /// brought before its access check, as `session.read` accepts its
+    /// batch into discovery first (`acceptDiscovery`). Discovery trusts
+    /// only the relay's own key; other events here are ignored.
+    pub async fn accept_discovery(&self, events: Vec<Verified>) {
+        let events: Vec<Verified> = events
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event.kind_u16(),
+                    crate::kinds::CHANNEL_METADATA | crate::kinds::CHANNEL_MEMBERS
+                )
+            })
+            .collect();
+        if events.is_empty() {
+            return;
+        }
+        let _ = self
+            .with_actor(move |actor| {
+                actor.accept(&events);
+            })
+            .await;
+    }
+
     /// Runs `work` on the actor and hands back its answer.
     async fn with_actor<R: Send + 'static>(
         &self,

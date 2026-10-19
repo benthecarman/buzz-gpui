@@ -1172,9 +1172,11 @@ pub fn lifecycle(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>
 }
 
 /// `community/refresh`: reads one of the community's views again, as
-/// its Retry would: `unread`, `inbox`, `reminders`, `emoji` or `kit`.
-pub fn refresh(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let session = community(cx)?.read(cx).session.clone();
+/// its Retry would: `unread`, `inbox`, `reminders`, `emoji`, `agents` or
+/// `kit`.
+pub fn refresh(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let community = community(cx)?;
+    let session = community.read(cx).session.clone();
     let what = params
         .get("what")
         .and_then(Value::as_str)
@@ -1189,6 +1191,19 @@ pub fn refresh(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
         "sidebar" => session.refresh_sidebar(),
         "channels" => session.refresh_channels(),
         "roster" => session.refresh_roster(),
+        // Your agent list, read again even once read, and the archive if
+        // it was read (`agentChoices.refresh`: archive reads stay lazy).
+        "agents" => {
+            let origin = community.read(cx).origin.http();
+            // The hosts' lists too (`native?.refresh()`).
+            super::agents::agents2(cx)?.update(cx, |agents, cx| {
+                agents.refresh_listings(&origin, cx);
+                agents.refresh(cx).detach();
+            });
+            if crate::ui::archives::status(&community, cx).is_some() {
+                crate::ui::archives::ensure(&community, true, cx);
+            }
+        }
         "kit" => {
             return Ok(on_tokio(cx, async move {
                 session
@@ -1201,7 +1216,7 @@ pub fn refresh(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
         _ => {
             return Err((
                 INVALID_PARAMS,
-                "what is unread, inbox, reminders, emoji, hiddenDms, sidebar, channels, roster or kit"
+                "what is unread, inbox, reminders, emoji, hiddenDms, sidebar, channels, roster, agents or kit"
                     .to_owned(),
             ));
         }

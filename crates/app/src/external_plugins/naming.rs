@@ -18,13 +18,22 @@ use std::rc::Rc;
 const MAX_IDENTITIES: usize = 5_000;
 /// Answers kept, oldest dropped first.
 const MAX_ANSWERS: usize = 16;
+/// How long a failed request waits before it is asked again.
+const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 type Labels = HashMap<String, Label>;
 type Entry = (&'static str, u64);
 
+enum Answer {
+    Pending,
+    /// The request failed or timed out at this time.
+    Failed(std::time::Instant),
+    Ready(Rc<Labels>),
+}
+
 #[derive(Default)]
 struct Answers {
-    entries: HashMap<Entry, Option<Rc<Labels>>>,
+    entries: HashMap<Entry, Answer>,
     order: VecDeque<Entry>,
 }
 
@@ -45,13 +54,25 @@ pub fn init(cx: &mut App) {
             let answered = labels.is_some();
             ANSWERS.with_borrow_mut(|answers| {
                 if let Some(answer) = answers.entries.get_mut(&entry) {
-                    *answer = labels.map(Rc::new);
+                    *answer = match labels {
+                        Some(labels) => Answer::Ready(Rc::new(labels)),
+                        None => Answer::Failed(std::time::Instant::now()),
+                    };
                 }
             });
-            if answered {
-                identity::policy_changed();
-                cx.update(|cx| cx.refresh_windows());
+            if !answered {
+                // Names are resolved again once it may be asked again.
+                let retry = cx.background_executor().timer(RETRY_AFTER);
+                cx.spawn(async move |cx| {
+                    retry.await;
+                    identity::policy_changed();
+                    cx.update(|cx| cx.refresh_windows());
+                })
+                .detach();
+                continue;
             }
+            identity::policy_changed();
+            cx.update(|cx| cx.refresh_windows());
         }
     })
     .detach();
@@ -103,12 +124,20 @@ fn policy(key: &'static str, requester: Requester) -> identity::Policy {
         }
         (viewer, candidates).hash(&mut hasher);
         let entry = (key, hasher.finish());
-        let known = ANSWERS.with_borrow(|answers| answers.entries.get(&entry).cloned());
+        // A failed request is asked again 30 seconds later.
+        let known = ANSWERS.with_borrow(|answers| match answers.entries.get(&entry) {
+            Some(Answer::Ready(labels)) => Some(Some((**labels).clone())),
+            Some(Answer::Pending) => Some(None),
+            Some(Answer::Failed(at)) if at.elapsed() < RETRY_AFTER => Some(None),
+            _ => None,
+        });
         if let Some(answer) = known {
-            return answer.map(|labels| (*labels).clone());
+            return answer;
         }
         ANSWERS.with_borrow_mut(|answers| {
-            answers.entries.insert(entry, None);
+            if answers.entries.insert(entry, Answer::Pending).is_some() {
+                return;
+            }
             answers.order.push_back(entry);
             while answers.order.len() > MAX_ANSWERS {
                 if let Some(old) = answers.order.pop_front() {
