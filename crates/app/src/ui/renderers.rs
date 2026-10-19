@@ -144,8 +144,23 @@ pub fn text_changed() {
     TEXT_GENERATION.set(TEXT_GENERATION.get() + 1);
 }
 
+/// Puts `item` in place of the one with its key, keeping its turn in
+/// registration order, or adds it last.
+macro_rules! put {
+    ($list:expr, $item:expr) => {{
+        let item = $item;
+        match $list
+            .iter()
+            .position(|existing| existing.key() == item.key())
+        {
+            Some(at) => $list[at] = item,
+            None => $list.push(item),
+        }
+    }};
+}
+
 pub fn register_text(renderer: Rc<dyn TextRenderer>) {
-    REGISTRY.with_borrow_mut(|r| r.text.push(renderer));
+    REGISTRY.with_borrow_mut(|r| put!(r.text, renderer));
     text_changed();
 }
 
@@ -252,11 +267,11 @@ pub fn register_inline(renderer: Rc<dyn InlineRenderer>) {
 }
 
 pub fn register_attachment(renderer: Rc<dyn AttachmentRenderer>) {
-    REGISTRY.with_borrow_mut(|r| r.attachments.push(renderer));
+    REGISTRY.with_borrow_mut(|r| put!(r.attachments, renderer));
 }
 
 pub fn register_action(action: Rc<dyn MessageAction>) {
-    REGISTRY.with_borrow_mut(|r| r.actions.push(action));
+    REGISTRY.with_borrow_mut(|r| put!(r.actions, action));
 }
 
 /// The actions that apply to `row`; a matcher that fails leaves the menu

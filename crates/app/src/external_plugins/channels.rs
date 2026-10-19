@@ -296,7 +296,9 @@ pub fn action(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
 /// channel, and answers once the roster lists them.
 pub fn add_member(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    // An open channel you have not joined too; the relay refuses one
+    // you may not reach (`canReadRemote`).
+    let channel = readable(params, community.read(cx))?;
     let pubkey = super::capabilities::pubkey(params, "pubkey")
         .ok_or_else(|| invalid("Choose a valid person or agent."))?
         .to_owned();
@@ -1027,7 +1029,9 @@ fn role_name(role: buzz_relay_client::lifecycle::MemberRole) -> &'static str {
 /// them, which you may also do to your own agents (`canRemove`).
 pub fn members(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let community = community(cx)?;
-    let channel = channel(params, community.read(cx))?;
+    // An open channel you have not joined too; the relay refuses one
+    // you may not reach (`canReadRemote`).
+    let channel = readable(params, community.read(cx))?;
     let (session, profiles) = {
         let community = community.read(cx);
         (

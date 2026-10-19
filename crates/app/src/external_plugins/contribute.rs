@@ -707,7 +707,7 @@ impl crate::ui::renderers::TextRenderer for Inline {
                         "text": piece,
                         // The plain-text segment it was found in
                         // (`content.text`), and where in it, in characters.
-                        "segment": text.chars().take(10_000).collect::<String>(),
+                        "segment": text,
                         "start": text[..matched.start()].chars().count(),
                         "message": capabilities::message(message.row, message.profiles),
                         "reaction": reaction,
@@ -1982,8 +1982,8 @@ pub fn register(
     }
     for action in &contributions.message_actions {
         let action_key = key(&action.id);
-        // A restart registers it again under the same key.
-        crate::ui::renderers::unregister(action_key);
+        // Declared again (an update or a restart), it keeps its place in
+        // registration order.
         crate::ui::renderers::register_action(Rc::new(Action {
             key: action_key,
             plugin: plugin.to_owned(),
@@ -2037,8 +2037,7 @@ pub fn register(
     }
     for renderer in &contributions.attachment_renderers {
         let renderer_key = key(&renderer.id);
-        // A restart registers it again under the same key.
-        crate::ui::renderers::unregister(renderer_key);
+        // Declared again, it keeps its place in registration order.
         crate::ui::renderers::register_attachment(Rc::new(AttachmentView {
             key: renderer_key,
             plugin: plugin.to_owned(),
@@ -2218,7 +2217,7 @@ pub fn register(
                 continue;
             };
             let renderer_key = key(&renderer.id);
-            crate::ui::renderers::unregister(renderer_key);
+            // Declared again, it keeps its place in registration order.
             TEXT_KEYS.with_borrow_mut(|keys| keys.insert(renderer_key.to_owned()));
             crate::ui::renderers::register_text(Rc::new(Inline {
                 key: renderer_key,

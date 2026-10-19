@@ -1031,6 +1031,29 @@ impl Prep<'_> {
                 }
             }
         }
+        // With Emoji on, its renderer claims custom emoji first, so a
+        // plugin piece running into one is not drawn (`inlineMatches`).
+        if emoji_on {
+            let mut emoji = Vec::new();
+            let mut j = 0;
+            while j < value.len() {
+                match self
+                    .custom_emoji(&value[j..])
+                    .filter(|_| value[j..].starts_with(':'))
+                {
+                    Some((_, length)) => {
+                        emoji.push(j..j + length);
+                        j += length;
+                    }
+                    None => j += value[j..].chars().next().map_or(1, char::len_utf8),
+                }
+            }
+            drawn.retain(|(range, _)| {
+                !emoji
+                    .iter()
+                    .any(|span| span.start < range.end && range.start < span.end)
+            });
+        }
         let mut drawn = drawn.into_iter().peekable();
         let mut i = 0;
         while i < value.len() {

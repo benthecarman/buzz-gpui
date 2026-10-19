@@ -499,7 +499,9 @@ pub fn react(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
     let (community, channel, message) = message_target(params, cx)?;
     let emoji = text(params, "emoji")
         .map(str::trim)
-        .filter(|emoji| !emoji.is_empty() && emoji.chars().count() <= 64)
+        // The session checks the content itself (`validReactionContent`),
+        // a `:shortcode:` of up to 64 characters included.
+        .filter(|emoji| !emoji.is_empty())
         .ok_or_else(|| invalid("emoji is required"))?
         .to_owned();
     // A custom emoji outside the community's catalog, such as one on
@@ -785,8 +787,7 @@ fn attachments(params: &Value) -> Result<Vec<buzz_relay_client::Attachment>, Fai
     };
     let list = list
         .as_array()
-        .filter(|list| list.len() <= 16)
-        .ok_or_else(|| invalid("attachments must be a list of at most 16"))?;
+        .ok_or_else(|| invalid("attachments must be a list"))?;
     list.iter()
         .map(|item| {
             let field = |key: &str| {
