@@ -146,21 +146,53 @@ pub fn attested_owner_of(
     created_at: u64,
     tags: &[Vec<String>],
 ) -> Option<String> {
-    use secp256k1::{Secp256k1, XOnlyPublicKey, schnorr::Signature};
-    use sha2::{Digest, Sha256};
     let mut auth = tags
         .iter()
         .filter(|tag| tag.first().map(String::as_str) == Some("auth"));
     let tag = auth.next()?;
-    if auth.next().is_some() || tag.len() != 4 {
+    if auth.next().is_some() {
+        return None;
+    }
+    auth_owner(target, tag, |conditions| {
+        conditions_hold(conditions, kind, created_at)
+    })
+}
+
+/// The owner one `["auth", owner, conditions, sig]` tag attests for
+/// `target` (`authTagOwner`): well-formed conditions and a valid owner
+/// signature, whatever kind or time they name. NIP-IA archival ignores
+/// kind clauses and checks time bounds when the request is signed
+/// ([`within_time_bounds`]).
+pub fn auth_tag_owner(target: &str, tag: &[String]) -> Option<String> {
+    auth_owner(target, tag, |conditions| {
+        conditions.is_empty() || conditions.split('&').all(|part| clause(part).is_some())
+    })
+}
+
+/// Whether `conditions`' time clauses allow an event made at
+/// `created_at` (`withinTimeBounds`); kind clauses are not checked.
+pub fn within_time_bounds(conditions: &str, created_at: u64) -> bool {
+    if conditions.is_empty() {
+        return true;
+    }
+    let clauses: Option<Vec<(&str, u64)>> = conditions.split('&').map(clause).collect();
+    clauses.is_some_and(|clauses| {
+        clauses.iter().all(|(name, value)| match *name {
+            "kind=" => true,
+            "created_at<" => created_at < *value,
+            _ => created_at > *value,
+        })
+    })
+}
+
+fn auth_owner(target: &str, tag: &[String], holds: impl Fn(&str) -> bool) -> Option<String> {
+    use secp256k1::{Secp256k1, XOnlyPublicKey, schnorr::Signature};
+    use sha2::{Digest, Sha256};
+    if tag.len() != 4 || tag[0] != "auth" {
         return None;
     }
     let (owner, conditions, sig) = (&tag[1], &tag[2], &tag[3]);
-    if !is_hex(owner, 64)
-        || !is_hex(sig, 128)
-        || owner == target
-        || !conditions_hold(conditions, kind, created_at)
-    {
+    if !is_hex(owner, 64) || !is_hex(sig, 128) || owner == target || !holds(conditions) {
         return None;
     }
     let digest: [u8; 32] = Sha256::digest(format!("nostr:agent-auth:{target}:{conditions}")).into();

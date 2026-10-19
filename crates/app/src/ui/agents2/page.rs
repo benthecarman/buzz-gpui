@@ -145,6 +145,7 @@ pub(crate) fn agent_target(pubkey: &str, cx: &App) -> Target {
         place: Place::Route {
             page: Page::AGENTS,
             params: routes::agent_params(pubkey),
+            version: None,
         },
     }
 }
@@ -326,6 +327,7 @@ impl Agents2Page {
             place: Place::Route {
                 page: Page::AGENTS,
                 params: routes::provider_params(&key),
+                version: None,
             },
         };
         navigation::with_workspace(cx, move |workspace, window, cx| {

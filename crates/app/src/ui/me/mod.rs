@@ -67,7 +67,7 @@ pub fn register(cx: &mut App) {
             validate: |params| Selection::parse(params).is_some(),
             open: |_, params, _, cx| {
                 if let Some(selection) = params.and_then(Selection::parse) {
-                    MeModel::global(cx).update(cx, |me, cx| me.select(selection, cx));
+                    MeModel::global(cx).update(cx, |me, cx| me.show(selection, cx));
                 }
             },
         },
@@ -115,6 +115,15 @@ impl Selection {
                 .strip_prefix("new:")
                 .filter(|_| route.len() > 4 && route.len() <= 260)
                 .map(|section| Self::NewIn(section.to_owned())),
+        }
+    }
+
+    /// The route params for this selection (`meTarget`).
+    pub fn params(&self) -> String {
+        match self {
+            Self::New => "new".to_owned(),
+            Self::NewIn(section) => format!("new:{section}"),
+            Self::Session(id) => id.clone(),
         }
     }
 
@@ -246,8 +255,18 @@ impl MeModel {
             .unwrap_or_default()
     }
 
-    /// Goes to `selection` in Me (`navigator.open(meTarget(...))`).
+    /// Goes to `selection` in Me (`navigator.open(meTarget(...))`): a
+    /// visit of its own while Me shows, so Back returns to the one before.
     pub fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
+        let params = serde_json::Value::String(selection.params());
+        self.show(selection, cx);
+        crate::ui::navigation::with_workspace(cx, move |workspace, _, cx| {
+            workspace.record_route(Page::ME, params, cx)
+        });
+    }
+
+    /// Shows `selection`, as its visit opens.
+    pub fn show(&mut self, selection: Selection, cx: &mut Context<Self>) {
         if let Some(scope) = self.scope(cx) {
             self.selections.insert(scope, selection);
         }

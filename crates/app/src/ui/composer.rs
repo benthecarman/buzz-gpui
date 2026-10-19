@@ -2877,26 +2877,36 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let files = self.files.read(cx);
-        if self.capture.is_some() || self.editing.is_some() || self.sending {
-            return Err("The composer is busy.".to_owned());
-        }
-        if self.no_attachments {
-            return Err("This composer takes no attachments.".to_owned());
-        }
-        if files.items.iter().any(|item| item.voice.is_some()) {
-            return Err("A voice note is already attached.".to_owned());
-        }
-        if files.items.len() >= MAX_FILES {
-            let full = format!("Attach at most {MAX_FILES} files per message.");
-            self.attach_error = Some(full.clone().into());
-            cx.notify();
-            return Err(full);
+        if let Some(refusal) = self.capture_refusal(cx) {
+            return Err(refusal);
         }
         self.capture = Some(Capture::Plugin(view));
         window.focus(&self.capture_focus, cx);
         cx.notify();
         Ok(())
+    }
+
+    /// Why a plugin capture cannot start now, if it cannot: the checks
+    /// of [`Self::start_plugin_capture`], made before its view opens. A
+    /// full message also shows Buzz's notice.
+    pub fn capture_refusal(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let files = self.files.read(cx);
+        if self.capture.is_some() || self.editing.is_some() || self.sending {
+            return Some("The composer is busy.".to_owned());
+        }
+        if self.no_attachments {
+            return Some("This composer takes no attachments.".to_owned());
+        }
+        if files.items.iter().any(|item| item.voice.is_some()) {
+            return Some("A voice note is already attached.".to_owned());
+        }
+        if files.items.len() >= MAX_FILES {
+            let full = format!("Attach at most {MAX_FILES} files per message.");
+            self.attach_error = Some(full.clone().into());
+            cx.notify();
+            return Some(full);
+        }
+        None
     }
 
     /// Whether the plugin capture showing is the view `capture`.
@@ -2914,18 +2924,23 @@ impl Composer {
     }
 
     /// Ends the plugin capture `capture` (`accept`), attaching `file` if
-    /// it made one.
+    /// it made one. `false` when that capture is not showing, or the
+    /// composer was disabled meanwhile, which ends it with nothing.
     pub fn accept_plugin_capture(
         &mut self,
         capture: EntityId,
         file: Option<Captured>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if !self.capturing(capture) {
-            return;
+            return false;
         }
         self.capture = None;
+        if self.disabled(cx) {
+            cx.notify();
+            return false;
+        }
         if let Some(file) = file {
             use buzz_relay_client::upload::Source;
             // A recording plays from memory until it is sent, as Buzz's own.
@@ -2955,6 +2970,7 @@ impl Composer {
         }
         self.focus(window, cx);
         cx.notify();
+        true
     }
 
     fn discard_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5653,6 +5669,11 @@ impl Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A plugin capture ends when the composer is disabled, as the
+        // recorder's does (`if (disabled) cancel()`).
+        if matches!(self.capture, Some(Capture::Plugin(_))) && self.disabled(cx) {
+            self.capture = None;
+        }
         let completions = super::composer_completions::generation();
         if completions != self.completions_generation {
             self.completions_generation = completions;

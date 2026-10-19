@@ -763,6 +763,7 @@ impl Workspace {
                 Some(params) => Place::Route {
                     page,
                     params: params.clone(),
+                    version: None,
                 },
                 None => Place::Page(page),
             },
@@ -896,6 +897,11 @@ impl Workspace {
         self.attempts += 1;
         self.settling = None;
         self.checking = None;
+        // What an earlier attempt still had going ends with it.
+        self.pending = None;
+        self.pending_listing = false;
+        self.resolving = None;
+        self._revealing = None;
         self.failure = Some(Failed {
             target,
             reason,
@@ -936,11 +942,48 @@ impl Workspace {
             place: Place::Route {
                 page,
                 params: params.clone(),
+                version: None,
             },
         });
         self.page_route = Some(params);
         cx.notify();
         true
+    }
+
+    /// A page showing `page` moved to route `params` itself, as Me does
+    /// when a conversation is picked: a new visit, already shown, so Back
+    /// returns to the one before. Nothing while another page shows.
+    pub(crate) fn record_route(
+        &mut self,
+        page: Page,
+        params: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        if self.page != page {
+            return;
+        }
+        let community = self
+            .community
+            .as_ref()
+            .map(|community| community.read(cx).origin.to_string());
+        let version = pages::routes(page, cx).map(|routes| routes.version);
+        let target = Target {
+            community,
+            place: Place::Route {
+                page,
+                params: params.clone(),
+                version,
+            },
+        };
+        if self.history.current() == Some(&target) {
+            return;
+        }
+        self.history.push(target);
+        self.attempts += 1;
+        self.failure = None;
+        self.page_route = Some(params);
+        self.publish_visit();
+        cx.notify();
     }
 
     /// Fails a visit its page never settled within the open timeout.
@@ -1091,7 +1134,7 @@ impl Workspace {
 
     /// Retries a failed community session, as Retry navigation does
     /// before it opens the place again.
-    pub(crate) fn retry_session(&self, cx: &App) {
+    fn retry_session(&self, cx: &App) {
         if let Some(community) = &self.community {
             let community = community.read(cx);
             if matches!(
@@ -1156,18 +1199,20 @@ impl Workspace {
     }
 
     /// Shows `target` without recording it.
-    /// Waits on settings card `key`'s check, under the open timeout, then
-    /// opens `target` if it shows and this visit is still the latest.
-    fn check_card(
+    /// Waits, under the open timeout, while `waiting` holds (a settings
+    /// card still checking, a plugin still starting), then presents
+    /// `target` again if this visit is still the latest; one still
+    /// waiting at the timeout fails as `timeout`.
+    fn wait_then_present(
         &mut self,
         target: Target,
-        key: &'static str,
+        waiting: fn(&Target, &App) -> bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use super::settings::cards::{self, CardVisibility};
         let attempt = self.attempts;
-        let held = cards::retain_visibility(cx);
+        // Settings' checks run meanwhile, as they do while it shows.
+        let held = super::settings::cards::retain_visibility(cx);
         self.checking = Some(cx.spawn_in(window, async move |this, cx| {
             let _held = held;
             let started = std::time::Instant::now();
@@ -1175,12 +1220,9 @@ impl Workspace {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(100))
                     .await;
-                let shown = cx
-                    .update(|_, cx| cards::get(key, cx).map(|card| card.visibility(cx)))
-                    .ok()
-                    .flatten();
+                let still = cx.update(|_, cx| waiting(&target, cx)).unwrap_or(false);
                 let timed_out = started.elapsed() >= channel_states::OPEN_TIMEOUT;
-                if shown == Some(CardVisibility::Pending) && !timed_out {
+                if still && !timed_out {
                     continue;
                 }
                 let _ = this.update_in(cx, |this, window, cx| {
@@ -1188,27 +1230,26 @@ impl Workspace {
                         return;
                     }
                     this.checking = None;
-                    if shown == Some(CardVisibility::Visible) {
-                        // The card shows: Settings opens on it, within
-                        // the same visit.
-                        this.settings_page(Some(Section::Card(key)), window, cx);
-                        this.show_page(Page::SETTINGS, window, cx);
+                    if still {
+                        this.fail_presenting(target, Reason::Timeout, cx);
                     } else {
-                        this.failure = Some(Failed {
-                            target: Some(target),
-                            reason: if timed_out {
-                                Reason::Timeout
-                            } else {
-                                Reason::Page
-                            },
-                            ingress: false,
-                        });
-                        cx.notify();
+                        this.present(target, window, cx);
                     }
                 });
                 return;
             }
         }));
+        cx.notify();
+    }
+
+    /// The visit fails as it presents, kept for Retry navigation.
+    fn fail_presenting(&mut self, target: Target, reason: Reason, cx: &mut Context<Self>) {
+        self.failure = Some(Failed {
+            target: Some(target),
+            reason,
+            ingress: false,
+        });
+        self.settling = None;
         cx.notify();
     }
 
@@ -1222,13 +1263,7 @@ impl Workspace {
         self.checking = None;
         self.attempts += 1;
         self.publish_visit();
-        self.settling = match &target.place {
-            Place::Page(page) | Place::Route { page, .. } if pages::settles(*page, cx) => {
-                self.arm_settle_timeout(cx);
-                Some(*page)
-            }
-            _ => None,
-        };
+        self.settling = None;
         if let Some(origin) = &target.community {
             let state = cx.global::<AppState>();
             let index = state
@@ -1251,20 +1286,81 @@ impl Workspace {
                 self.sync(window, cx);
             }
         }
-        // Every attempt checks the place is still there, as buzz-app's
-        // presentation does: a page whose plugin went, or a settings card
-        // hidden or failed, is `unavailable`; a card still checking is
-        // waited for.
-        let missing = match &target.place {
+        self.present(target, window, cx);
+    }
+
+    /// Whether `target`'s page or settings card waits on its plugin,
+    /// still starting, or on its card's check.
+    fn presenting_waits(target: &Target, cx: &App) -> bool {
+        use super::settings::cards::{self, CardVisibility};
+        let starting = |key: &str| {
+            crate::external_plugins::ExternalPlugins::starting(crate::plugins::plugin_of(key), cx)
+        };
+        match &target.place {
             Place::Page(page) | Place::Route { page, .. } => {
-                *page != Page::SETTINGS && pages::spec(*page, cx).is_none()
+                pages::spec(*page, cx).is_none() && starting(page.key())
             }
             Place::Settings(super::settings::Section::Card(key)) => {
-                use super::settings::cards::{self, CardVisibility};
+                match cards::get(key, cx).map(|card| card.visibility(cx)) {
+                    Some(CardVisibility::Pending) => true,
+                    None => starting(key),
+                    _ => false,
+                }
+            }
+            Place::Unresolved(request) => {
+                crate::external_plugins::ExternalPlugins::resolve_request(request, cx).is_none()
+                    && ["page", "section"]
+                        .iter()
+                        .filter_map(|key| request.get(key).and_then(serde_json::Value::as_str))
+                        .any(starting)
+            }
+            _ => false,
+        }
+    }
+
+    /// Shows `target` for the current attempt once its place is there, as
+    /// buzz-app's presentation checks on every attempt (Retry, Back and
+    /// Forward too): a request kept for a place Buzz lacked resolves anew;
+    /// a page, route or settings card that is gone fails as
+    /// `unavailable`; a plugin still starting, or a card still checking,
+    /// is waited for, and a card whose check failed is checked again.
+    fn present(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        use super::settings::cards::{self, CardVisibility};
+        if Self::presenting_waits(&target, cx) {
+            self.wait_then_present(target, Self::presenting_waits, window, cx);
+            return;
+        }
+        let missing = match &target.place {
+            Place::Unresolved(request) => {
+                match crate::external_plugins::ExternalPlugins::resolve_request(request, cx) {
+                    Some(place) => {
+                        let resolved = Target {
+                            community: target.community.clone(),
+                            place,
+                        };
+                        return self.present(resolved, window, cx);
+                    }
+                    None => true,
+                }
+            }
+            Place::Page(page) => *page != Page::SETTINGS && pages::spec(*page, cx).is_none(),
+            Place::Route {
+                page,
+                params,
+                version,
+            } => {
+                pages::spec(*page, cx).is_none()
+                    || pages::routes(*page, cx).is_none_or(|routes| {
+                        version.is_some_and(|version| version != routes.version)
+                            || !(routes.validate)(params)
+                    })
+            }
+            Place::Settings(super::settings::Section::Card(key)) => {
                 match cards::get(key, cx).map(|card| card.visibility(cx)) {
                     Some(CardVisibility::Visible) => false,
-                    Some(CardVisibility::Pending) => {
-                        self.check_card(target.clone(), key, window, cx);
+                    Some(CardVisibility::Error) => {
+                        crate::external_plugins::ExternalPlugins::recheck_card(key, cx);
+                        self.wait_then_present(target, Self::presenting_waits, window, cx);
                         return;
                     }
                     _ => true,
@@ -1273,15 +1369,16 @@ impl Workspace {
             _ => false,
         };
         if missing {
-            self.failure = Some(Failed {
-                target: Some(target),
-                reason: Reason::Page,
-                ingress: false,
-            });
-            self.settling = None;
-            cx.notify();
+            self.fail_presenting(target, Reason::Page, cx);
             return;
         }
+        self.settling = match &target.place {
+            Place::Page(page) | Place::Route { page, .. } if pages::settles(*page, cx) => {
+                self.arm_settle_timeout(cx);
+                Some(*page)
+            }
+            _ => None,
+        };
         match target.place {
             Place::Channels(route) => self.show_route(route, window, cx),
             Place::Page(page) => {
@@ -1291,22 +1388,14 @@ impl Workspace {
                     self.restore_selection(window, cx);
                 }
             }
-            Place::Route { page, ref params } => {
-                let valid = pages::spec(page, cx).is_some()
-                    && pages::routes(page, cx).is_some_and(|routes| (routes.validate)(params));
-                if !valid {
-                    self.page = Page::MESSAGES;
-                    self.failure = Some(Failed {
-                        target: Some(target.clone()),
-                        reason: Reason::Invalid,
-                        ingress: false,
-                    });
-                    cx.notify();
-                    return;
-                }
+            Place::Route {
+                page, ref params, ..
+            } => {
                 self.show_page(page, window, cx);
                 self.open_page_route(page, Some(params.clone()), window, cx);
             }
+            // Resolved above.
+            Place::Unresolved(_) => {}
             Place::Settings(section) => {
                 if matches!(self.onboarding, Some((Step::Identity, _))) {
                     return;
@@ -1612,6 +1701,7 @@ impl Workspace {
                     place: Place::Route {
                         page: super::projects::PAGE,
                         params: route.params(),
+                        version: None,
                     },
                 };
                 self.navigate(target, window, cx);

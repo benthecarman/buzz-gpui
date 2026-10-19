@@ -193,6 +193,25 @@ pub fn status(community: &Entity<Community>, cx: &App) -> Option<Status> {
 }
 
 /// `archiveHides`: a known-archived identity that is not the viewer.
+/// Every identity the community's archive hides from the viewer: all
+/// archived ones but the viewer's own.
+pub fn hidden(community: &Entity<Community>, cx: &App) -> Vec<String> {
+    let viewer = community.read(cx).session.viewer().to_string();
+    let key = key(community, cx);
+    cx.try_global::<Archives>()
+        .and_then(|archives| archives.0.get(&key))
+        .map(|entry| {
+            entry
+                .snapshot
+                .archived
+                .iter()
+                .filter(|pubkey| **pubkey != viewer)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn hides(community: &Entity<Community>, pubkey: &str, cx: &App) -> bool {
     let viewer = community.read(cx).session.viewer().to_string();
     let key = key(community, cx);

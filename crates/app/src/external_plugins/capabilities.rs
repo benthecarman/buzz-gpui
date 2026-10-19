@@ -912,6 +912,41 @@ fn as_invalid((code, error): Failure) -> Failure {
     }
 }
 
+/// A plugin or page id as targets take it: `[a-z0-9][a-z0-9._-]{0,127}`.
+fn token_shaped(token: &str) -> bool {
+    (1..=128).contains(&token.len())
+        && token.bytes().enumerate().all(|(at, byte)| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || (at > 0 && matches!(byte, b'.' | b'_' | b'-'))
+        })
+}
+
+/// A settings section: a token, or a grouped card's `plugin/card` key.
+fn section_shaped(section: &str) -> bool {
+    match section.split_once('/') {
+        Some((plugin, card)) => token_shaped(plugin) && token_shaped(card),
+        None => token_shaped(section),
+    }
+}
+
+/// JSON as targets keep it: at most 8 levels deep, 1024 values and
+/// 8 KiB.
+fn json_bounded(value: &Value, depth: usize, nodes: &mut usize) -> bool {
+    fn walk(value: &Value, depth: usize, nodes: &mut usize) -> bool {
+        if depth > 8 || *nodes == 0 {
+            return false;
+        }
+        *nodes -= 1;
+        match value {
+            Value::Array(items) => items.iter().all(|item| walk(item, depth + 1, nodes)),
+            Value::Object(fields) => fields.values().all(|item| walk(item, depth + 1, nodes)),
+            _ => true,
+        }
+    }
+    value.to_string().len() <= 8_192 && walk(value, depth, nodes)
+}
+
 fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
     use crate::ui::pages::Page;
     use crate::ui::settings::Section;
@@ -932,6 +967,11 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
             Some("updates") => Section::Updates,
             Some("about") => Section::About,
             Some(card) => {
+                // Shaped as a section or a `plugin/card` key, or the target
+                // is malformed (`parseOpenTarget`).
+                if !section_shaped(card) {
+                    return Err(invalid("section is not a settings section"));
+                }
                 let card = crate::ui::settings::cards::get(card, cx)
                     .ok_or_else(|| (MISSING, format!("Settings has no section {card}")))?;
                 Section::Card(card.key)
@@ -939,17 +979,50 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
         }),
         Some("page") => {
             let key = text(params, "page").ok_or_else(|| invalid("page is required"))?;
+            if !key
+                .split_once('/')
+                .is_some_and(|(plugin, page)| token_shaped(plugin) && token_shaped(page))
+            {
+                return Err(invalid("page must be a plugin/page key"));
+            }
+            let version = match params.get("version") {
+                None | Some(Value::Null) => None,
+                Some(version) => Some(
+                    version
+                        .as_u64()
+                        .filter(|version| *version >= 1)
+                        .and_then(|version| u32::try_from(version).ok())
+                        .ok_or_else(|| invalid("version must be a positive whole number"))?,
+                ),
+            };
+            let route = params.get("params").filter(|params| !params.is_null());
+            if route.is_some_and(|route| !json_bounded(route, 0, &mut 1024)) {
+                return Err(invalid("params must be JSON of at most 8 KiB"));
+            }
+            // Messages' version-1 placeholders open their own pages now.
+            if key == crate::ui::pages::Page::MESSAGES.key() && version.is_none_or(|v| v == 1) {
+                match route.and_then(Value::as_str) {
+                    Some("Inbox") => {
+                        return Ok(Place::Page(crate::ui::pages::Page::new("buzz.inbox/inbox")));
+                    }
+                    Some("Bestie") => {
+                        return Ok(Place::Page(crate::ui::pages::Page::new(
+                            "buzz.bestie/bestie",
+                        )));
+                    }
+                    _ => {}
+                }
+            }
             let spec = crate::ui::pages::all(cx)
                 .into_iter()
                 .find(|spec| spec.page.key() == key)
                 .ok_or_else(|| (MISSING, format!("There is no page {key}")))?;
-            match params.get("params").filter(|params| !params.is_null()) {
+            match route {
                 None => Place::Page(spec.page),
                 Some(route) => {
                     let routes = crate::ui::pages::routes(spec.page, cx)
                         .ok_or_else(|| (MISSING, format!("The page {key} takes no routes")))?;
-                    let version = params.get("version").and_then(Value::as_u64);
-                    if version.is_some_and(|version| version != u64::from(routes.version)) {
+                    if version.is_some_and(|version| version != routes.version) {
                         return Err((
                             MISSING,
                             format!("The page {key} takes routes of version {}", routes.version),
@@ -966,6 +1039,7 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
                         _ => Place::Route {
                             page: spec.page,
                             params: route.clone(),
+                            version: Some(routes.version),
                         },
                     }
                 }
@@ -1055,12 +1129,18 @@ fn place_json(target: &Target, cx: &App) -> Value {
                 "version": 1,
             })
         }
-        Place::Route { page, params } => json!({
+        Place::Route {
+            page,
+            params,
+            version,
+        } => json!({
             "to": "page",
             "page": page.key(),
             "params": params,
-            "version": crate::ui::pages::routes(*page, cx).map(|routes| routes.version),
+            "version": version.or_else(|| crate::ui::pages::routes(*page, cx).map(|routes| routes.version)),
         }),
+        // The request as given, for a place Buzz could not resolve.
+        Place::Unresolved(request) => request.clone(),
     };
     place["community"] = json!(target.community);
     place
@@ -1087,13 +1167,9 @@ pub fn navigation_state(cx: &App) -> Value {
     };
     let workspace = workspace.read(cx);
     let (here, back, forward) = workspace.location();
-    let attempt = workspace.visit().0;
     let failed = workspace.failed().map(|(failed, retryable)| {
         json!({
-            "place": match &failed.target {
-                Some(target) => Some(place_json(target, cx)),
-                None => failed_request(attempt),
-            },
+            "place": failed.target.as_ref().map(|target| place_json(target, cx)),
             "reason": reason_name(failed.reason),
             "retryable": retryable,
             "ingress": failed.ingress,
@@ -1114,27 +1190,13 @@ pub fn navigation_state(cx: &App) -> Value {
     })
 }
 
-/// `navigation/retry`: opens the visit that failed again, checking its
-/// place anew as `ui/navigate` does (buzz-app's `retry()` starts a new
-/// attempt).
+/// `navigation/retry`: opens the visit that failed again as a new
+/// attempt at the same entry, its place checked anew (buzz-app's
+/// `retry()`).
 pub fn retry_navigation(cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let workspace = navigation::workspace(cx).ok_or((1, "The window is not open.".to_owned()))?;
-    let request = {
-        let workspace = workspace.read(cx);
-        let attempt = workspace.visit().0;
-        workspace
-            .failed()
-            .filter(|(failed, retryable)| *retryable && !failed.ingress)
-            .and_then(|(failed, _)| match &failed.target {
-                Some(target) => Some(place_json(target, cx)),
-                None => failed_request(attempt),
-            })
-    };
-    if let Some(request) = request {
-        workspace.read(cx).retry_session(cx);
-        return navigate(&request, cx);
-    }
-    let before = workspace.read(cx).visit().0;
+    let before = navigation::workspace(cx)
+        .map(|workspace| workspace.read(cx).visit().0)
+        .ok_or((1, "The window is not open.".to_owned()))?;
     navigation::with_workspace(cx, |workspace, window, cx| {
         workspace.retry_failed(window, cx)
     });
@@ -1774,9 +1836,9 @@ pub fn git_authorization(params: &Value, cx: &App) -> Result<Value, Failure> {
 /// `["auth", owner, "", signature]` an agent attaches to what it signs
 /// (`prepareRemoteAgentAuthorization`).
 pub fn attest(params: &Value, cx: &App) -> Result<Value, Failure> {
-    let pubkey = text(params, "pubkey")
-        .ok_or_else(|| invalid("pubkey is required"))?
-        .to_ascii_lowercase();
+    let pubkey = pubkey(params, "pubkey")
+        .ok_or_else(|| invalid("pubkey is not an agent key you can attest"))?
+        .to_owned();
     let auth = identity(cx)?
         .attest_agent(&pubkey)
         .map_err(|_| invalid("pubkey is not an agent key you can attest"))?;
@@ -2116,92 +2178,24 @@ pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Fail
 }
 
 /// `ui/navigate`: shows a page, Settings or a conversation, as a new
-/// visit or, with `replace`, in place of the current one.
-/// `ui/navigate`: answers once the visit settles, as buzz-app's
-/// `open()` resolves with an `OpenResult`: `opened`, `failed` with its
-/// `reason`, or `superseded` by another visit. Back and Forward answer
-/// at once.
+/// visit or, with `replace`, in place of the current one. Answers once
+/// the visit settles, as buzz-app's `open()` resolves with an
+/// `OpenResult`: `opened`, `failed` with its `reason`, or `superseded` by
+/// another visit. Back and Forward answer at once. The window checks the
+/// place on every attempt: it waits for a plugin still starting or a
+/// settings card still checking, and fails one it does not have.
 pub fn navigate(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    // A settings card of a plugin still starting is waited for too.
-    if text(params, "to") == Some("settings")
-        && let Some(key) = text(params, "section")
-            .filter(|key| key.contains('/'))
-            .map(str::to_owned)
-        && crate::ui::settings::cards::get(&key, cx).is_none()
-        && super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
-    {
-        let params = params.clone();
-        let before = visit(cx);
-        return Ok(cx.spawn(async move |cx| {
-            for _ in 0..150 {
-                let waiting = cx.update(|cx| {
-                    super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
-                });
-                if !waiting {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                // A visit begun meanwhile supersedes this one.
-                if cx.update(|cx| visit(cx)) != before {
-                    return Ok(json!({ "status": "superseded" }));
-                }
-            }
-            match cx.update(|cx| navigate(&params, cx)) {
-                Ok(task) => task.await,
-                Err(failure) => Err(failure),
-            }
-        }));
-    }
-    // A page of a plugin still starting is waited for, as buzz-app waits
-    // while its owner activates.
-    if text(params, "to") == Some("page")
-        && let Some(key) = text(params, "page").map(str::to_owned)
-        && !crate::ui::pages::all(cx)
-            .iter()
-            .any(|spec| spec.page.key() == key)
-        && super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
-    {
-        let params = params.clone();
-        let before = visit(cx);
-        return Ok(cx.spawn(async move |cx| {
-            for _ in 0..150 {
-                let waiting = cx.update(|cx| {
-                    super::ExternalPlugins::starting(crate::plugins::plugin_of(&key), cx)
-                });
-                if !waiting {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                // A visit begun meanwhile supersedes this one.
-                if cx.update(|cx| visit(cx)) != before {
-                    return Ok(json!({ "status": "superseded" }));
-                }
-            }
-            match cx.update(|cx| open_now(&params, cx)) {
-                Ok(task) => task.await,
-                Err((code @ (INVALID_PARAMS | MISSING | NOT_JOINED), error)) => {
-                    Ok(cx.update(|cx| failed_open(code, error, &params, cx)))
-                }
-                Err(failure) => Err(failure),
-            }
-        }));
-    }
-    open_now(params, cx)
-}
-
-/// [`navigate`] without waiting on a settings card.
-fn open_now(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let before = navigation::workspace(cx).map(|workspace| workspace.read(cx).visit().0);
     let tracked = match start_navigation(params, cx) {
         Ok(tracked) => tracked,
-        // A target that cannot be opened fails the open, as buzz-app's
-        // `open()` resolves `invalid-target`, rather than the request.
-        Err((code @ (INVALID_PARAMS | MISSING | NOT_JOINED), error)) => {
-            return Ok(Task::ready(Ok(failed_open(code, error, params, cx))));
+        // A target that does not parse changes nothing, as buzz-app's
+        // `open()` resolves `invalid-target` (`parseOpenTarget`).
+        Err((INVALID_PARAMS, error)) => {
+            return Ok(Task::ready(Ok(json!({
+                "status": "failed",
+                "reason": "invalid-target",
+                "error": error,
+            }))));
         }
         Err(failure) => return Err(failure),
     };
@@ -2211,50 +2205,21 @@ fn open_now(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
     Ok(settle(before, cx))
 }
 
-/// A navigation that could not start, as buzz-app's `open()` resolves it:
-/// `denied` for a community you have not joined, `unavailable` for a
-/// place Buzz does not have, else `invalid-target`. The window records
-/// the failed visit, so `navigation/get` shows it.
-pub(super) fn failed_open(code: i64, error: String, params: &Value, cx: &mut App) -> Value {
-    use crate::ui::channel_states::Reason;
-    let reason = match code {
-        NOT_JOINED => Reason::Denied,
-        MISSING => Reason::Page,
-        // A target that does not parse changes nothing (`parseOpenTarget`).
-        _ => return json!({ "status": "failed", "reason": "invalid-target", "error": error }),
-    };
+/// What `ui/navigate` keeps of a request for a place Buzz does not have:
+/// the place, without how it was asked for.
+fn unresolved(params: &Value) -> Place {
     let mut request = params.clone();
     if let Some(request) = request.as_object_mut() {
-        request.remove("focus");
+        for key in ["focus", "replace", "community"] {
+            request.remove(key);
+        }
     }
-    // Kept with its attempt, for `navigation/get` and `navigation/retry`.
-    navigation::with_workspace(cx, move |workspace, _, cx| {
-        workspace.fail_open(None, reason, cx);
-        FAILED_REQUEST.set(Some((workspace.visit().0, request)));
-    });
-    json!({ "status": "failed", "reason": reason_name(reason), "error": error })
+    Place::Unresolved(request)
 }
 
-thread_local! {
-    /// The `ui/navigate` request whose place Buzz could not resolve, by
-    /// the attempt that failed with it.
-    static FAILED_REQUEST: std::cell::RefCell<Option<(u64, Value)>> = const { std::cell::RefCell::new(None) };
-}
-
-/// The request behind the failed visit, when that visit is attempt
-/// `attempt` and Buzz had no place for it.
-fn failed_request(attempt: u64) -> Option<Value> {
-    FAILED_REQUEST.with_borrow(|failed| {
-        failed
-            .as_ref()
-            .filter(|(at, _)| *at == attempt)
-            .map(|(_, request)| request.clone())
-    })
-}
-
-/// The window's current visit, by attempt.
-fn visit(cx: &App) -> Option<u64> {
-    navigation::workspace(cx).map(|workspace| workspace.read(cx).visit().0)
+/// The place a kept request names now, if Buzz has it (`Place::Unresolved`).
+pub(super) fn resolve_request(request: &Value, cx: &App) -> Option<Place> {
+    place_of(request, cx).ok()
 }
 
 /// How the visit after attempt `before` turns out (`OpenResult`).
@@ -2315,7 +2280,10 @@ fn start_navigation(params: &Value, cx: &mut App) -> Result<bool, Failure> {
     }
     // `community: null` leaves for Personal space first (`scope: null`).
     if params.get("community") == Some(&Value::Null) {
-        let place = place_of(params, cx)?;
+        let place = match place_of(params, cx) {
+            Err((MISSING, _)) => unresolved(params),
+            place => place?,
+        };
         if matches!(place, Place::Conversation { .. }) {
             return Err(invalid("a conversation needs its community"));
         }
@@ -2335,10 +2303,23 @@ fn start_navigation(params: &Value, cx: &mut App) -> Result<bool, Failure> {
         });
         return Ok(true);
     }
-    let target = Target {
-        community: scope(params, cx)?,
-        place: place_of(params, cx)?,
+    // A place Buzz does not have, or a community you have not joined, is
+    // a visit all the same that fails as it presents (`unavailable`,
+    // `denied`), as buzz-app pushes a target before presenting it.
+    let community = match scope(params, cx) {
+        Err((NOT_JOINED, error)) => Some(
+            text(params, "community")
+                .and_then(|relay| buzz_relay_client::RelayOrigin::parse(relay).ok())
+                .map(|origin| origin.to_string())
+                .ok_or_else(|| invalid(error))?,
+        ),
+        scoped => scoped?,
     };
+    let place = match place_of(params, cx) {
+        Err((MISSING, _)) => unresolved(params),
+        place => place?,
+    };
+    let target = Target { community, place };
     let replace = params.get("replace").and_then(Value::as_bool) == Some(true);
     if text(params, "focus") == Some("preserve") {
         navigation::with_workspace(cx, move |workspace, window, cx| {

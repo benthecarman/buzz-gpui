@@ -1152,7 +1152,9 @@ impl Ops {
         exact: bool,
         limit: usize,
     ) -> Result<PublicChannels, String> {
-        let needle = query.trim().trim_start_matches('#').to_lowercase();
+        // One leading `#`, after lowercasing (`replace(/^#/, "")`).
+        let lower = query.trim().to_lowercase();
+        let needle = lower.strip_prefix('#').unwrap_or(&lower).to_owned();
         if needle.is_empty() {
             return Ok(PublicChannels::default());
         }

@@ -79,8 +79,8 @@ pub struct DraftViewer {
     /// Audio files, read into memory to play under this key.
     sounds: Vec<String>,
     /// Whether each audio file shown was on the relay when its slide
-    /// first showed: one opened before its upload keeps playing here
-    /// (`keepLocal`).
+    /// showed: one shown before its upload keeps playing here while its
+    /// slide shows (`keepLocal`).
     hosted: HashMap<String, bool>,
     /// The picture's bounds as last drawn, where a close flies from.
     drawn: Option<Bounds<Pixels>>,
@@ -152,6 +152,9 @@ impl DraftViewer {
         if let Some(player) = self.players.get(&self.selected) {
             player.update(cx, |player, cx| player.pause(cx));
         }
+        // A slide shown again starts afresh, from the relay if it is
+        // there now (`DraftMedia` mounts anew).
+        self.hosted.remove(&next.id);
         let reduce = cx.reduce_motion();
         if !reduce {
             self.leaving = Some(Leaving {

@@ -1285,11 +1285,37 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
                             profiles: &rows.directory.profiles,
                             reaction: Some(&group),
                         };
-                        let (_, key) = renderers::text_matches(&content, message)
-                            .into_iter()
-                            .find(|(range, _)| *range == (0..content.len()))?;
-                        let place = format!("{}/quick/{content}", row.id.to_hex());
-                        renderers::render_text(&key, &content, &place, cx)
+                        // Every piece a renderer claims, with the text
+                        // between, as `InlineText` draws it.
+                        let matches = renderers::text_matches(&content, message);
+                        let place = format!("{}/reaction", row.id.to_hex());
+                        let mut drawn = false;
+                        let mut pieces = Vec::new();
+                        let mut at = 0;
+                        for (range, key) in matches {
+                            if range.start > at {
+                                pieces.push(content[at..range.start].to_owned().into_any_element());
+                            }
+                            let piece = &content[range.clone()];
+                            pieces.push(match renderers::render_text(&key, piece, &place, cx) {
+                                Some(element) => {
+                                    drawn = true;
+                                    element
+                                }
+                                None => piece.to_owned().into_any_element(),
+                            });
+                            at = range.end;
+                        }
+                        if at < content.len() {
+                            pieces.push(content[at..].to_owned().into_any_element());
+                        }
+                        drawn.then(|| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .children(pieces)
+                                .into_any_element()
+                        })
                     });
                 let glyph = match (&quick.image, claimed) {
                     (_, Some(claimed)) => claimed,

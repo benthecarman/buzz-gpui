@@ -200,10 +200,14 @@ async fn consent(
             .cloned()
     };
     let profile = newest(0, agent).and_then(|event| verifier.verify(event).ok());
+    // NIP-IA ownership ignores kind clauses; time bounds apply when the
+    // request is signed (`authTagOwner`).
     let auth = profile.as_ref().and_then(|profile| {
-        (buzz_relay_client::profiles::attested_owner(profile).as_deref() == Some(viewer))
-            .then(|| profile.tags_named("auth").next().map(|tag| tag.to_vec()))
-            .flatten()
+        let mut tags = profile.tags_named("auth");
+        let tag = tags.next()?.to_vec();
+        (tags.next().is_none()
+            && buzz_relay_client::profiles::auth_tag_owner(agent, &tag).as_deref() == Some(viewer))
+        .then_some(tag)
     });
     let role = newest(13534, authority).and_then(|roster| {
         roster
@@ -252,6 +256,11 @@ async fn request(
     target: &str,
     archive: bool,
 ) -> Result<(), Refusal> {
+    // Permission first, as buzz-app asks it before anything else.
+    let path = consent(http, &owner.pubkey_hex(), authority, target)
+        .await
+        .map_err(Refusal::Failed)?
+        .ok_or(Refusal::NoConsent)?;
     let wanted = if archive { Archived::Yes } else { Archived::No };
     if archived(http, authority, target)
         .await
@@ -260,10 +269,6 @@ async fn request(
     {
         return Ok(());
     }
-    let path = consent(http, &owner.pubkey_hex(), authority, target)
-        .await
-        .map_err(Refusal::Failed)?
-        .ok_or(Refusal::NoConsent)?;
     let mut tags = vec![
         vec!["-".to_owned()],
         vec!["p".to_owned(), target.to_owned()],
@@ -277,6 +282,15 @@ async fn request(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    // The credential's time bounds must hold for the request itself.
+    if let Some(auth) = tags.get(2)
+        && !buzz_relay_client::profiles::within_time_bounds(
+            auth.get(2).map_or("", String::as_str),
+            now,
+        )
+    {
+        return Err(Refusal::NoConsent);
+    }
     let kind = if archive { 9035 } else { 9036 };
     let failed = |error: String| Refusal::Failed(error);
     let unsigned = owner
@@ -372,9 +386,7 @@ pub(crate) async fn set_archived(
     request(&http, owner, &authority, target, archive)
         .await
         .map_err(|refusal| match refusal {
-            Refusal::NoConsent => {
-                "Only the identity's owner or a relay admin can change its archive.".to_owned()
-            }
+            Refusal::NoConsent => "You can no longer archive this identity".to_owned(),
             Refusal::Failed(error) => error,
         })
 }

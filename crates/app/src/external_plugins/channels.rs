@@ -111,10 +111,14 @@ pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
                     .map(|agents| {
                         agents
                             .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_ascii_lowercase)
-                            .collect()
+                            .map(|key| {
+                                super::capabilities::pubkey(&json!({ "key": key }), "key")
+                                    .map(str::to_owned)
+                                    .ok_or_else(|| invalid("setup.agents must be agent keys"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()
                     })
+                    .transpose()?
                     .unwrap_or_default(),
                 group_id: field("group"),
                 template_id: field("template"),
@@ -513,16 +517,19 @@ pub fn add_session_agents(
         .iter()
         .map(|key| {
             key.as_str()
-                .map(str::to_ascii_lowercase)
-                .ok_or_else(|| invalid("agents must be pubkeys"))
+                .filter(|key| {
+                    key.len() == 64
+                        && key
+                            .bytes()
+                            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                })
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("Choose an agent from your agent library."))
         })
         .collect::<Result<_, _>>()?;
+    // Your agents, or ones already in the parent channel: the session
+    // checks that against a fresh roster (`addAgents`).
     let rules = crate::ui::me::recipients::rules(&community, cx);
-    if let Some(stranger) = agents.iter().find(|key| !rules.selectable.contains(key)) {
-        return Err(invalid(format!(
-            "{stranger} is not one of your agents here"
-        )));
-    }
     let session = community.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         session
@@ -550,18 +557,23 @@ pub fn create_session(params: &Value, cx: &App) -> Result<Task<Result<Value, Fai
         .map(|agents| {
             agents
                 .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_ascii_lowercase)
-                .collect()
+                .map(|key| {
+                    key.as_str()
+                        .filter(|key| {
+                            key.len() == 64
+                                && key
+                                    .bytes()
+                                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                        })
+                        .map(str::to_owned)
+                        .ok_or_else(|| invalid("Choose an agent from your agent library."))
+                })
+                .collect::<Result<Vec<_>, _>>()
         })
+        .transpose()?
         .unwrap_or_default();
     let community = community(cx)?;
     let rules = crate::ui::me::recipients::rules(&community, cx);
-    if let Some(stranger) = agents.iter().find(|key| !rules.selectable.contains(key)) {
-        return Err(invalid(format!(
-            "{stranger} is not one of your agents here"
-        )));
-    }
     let session = community.read(cx).session.clone();
     let id = uuid::Uuid::new_v4().to_string();
     Ok(on_tokio(cx, async move {
@@ -590,10 +602,9 @@ pub fn create_session(params: &Value, cx: &App) -> Result<Task<Result<Value, Fai
 
 /// `sessions/memberOf`: the channels that list `pubkey` as a member.
 pub fn member_of(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let pubkey = text(params, "pubkey")
-        .filter(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    let pubkey = super::capabilities::pubkey(params, "pubkey")
         .ok_or_else(|| invalid("pubkey is required"))?
-        .to_ascii_lowercase();
+        .to_owned();
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         session

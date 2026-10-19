@@ -199,6 +199,7 @@ impl ProjectsPage {
             place: Place::Route {
                 page: PAGE,
                 params: route.params(),
+                version: None,
             },
         };
         navigation::with_workspace(cx, move |workspace, window, cx| {

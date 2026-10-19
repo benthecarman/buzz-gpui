@@ -14,21 +14,24 @@ use gpui_kit::{App, Entity};
 use std::collections::HashSet;
 
 /// The viewer's agents in this community, as a session may admit them
-/// (`selectable`): the agents its hosts run for this relay.
+/// (`selectable`): the agents its hosts run for this relay, less those
+/// the archive hides (`archived`).
 pub fn rules(community: &Entity<Community>, cx: &App) -> AgentRules {
     let origin = community.read(cx).origin.clone();
     let library = AgentLibrary::from_hosts(cx);
+    // An archived agent is not offered, and refused (`sessionAgentRules`).
+    let archived = crate::ui::archives::hidden(community, cx);
     let mut seen = HashSet::new();
     let selectable = library
         .agents
         .into_iter()
         .filter(|(_, _, relay)| RelayOrigin::parse(relay).is_ok_and(|other| other == origin))
-        .filter(|(key, _, _)| seen.insert(key.clone()))
+        .filter(|(key, _, _)| !archived.contains(key) && seen.insert(key.clone()))
         .map(|(key, _, _)| key)
         .collect();
     AgentRules {
         selectable,
-        archived: Vec::new(),
+        archived,
     }
 }
 

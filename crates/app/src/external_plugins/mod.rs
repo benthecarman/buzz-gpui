@@ -1408,6 +1408,18 @@ impl ExternalPlugins {
         added
     }
 
+    /// The place a `ui/navigate` request kept for a page or section Buzz
+    /// did not have names now, if it has it.
+    pub fn resolve_request(request: &Value, cx: &App) -> Option<crate::ui::navigation::Place> {
+        capabilities::resolve_request(request, cx)
+    }
+
+    /// Checks plugin settings card `key` again when its last check
+    /// failed: it is pending until the plugin answers.
+    pub fn recheck_card(key: &str, cx: &mut App) {
+        contribute::recheck_card(key, cx);
+    }
+
     /// Whether added plugin `id` is starting: its contributions are on
     /// their way.
     pub fn starting(id: &str, cx: &App) -> bool {
@@ -1618,12 +1630,12 @@ impl ExternalPlugins {
                     // An unjoined community fails the open, not the
                     // request (`OpenResult` `invalid-target`).
                     // `in_community` fails only for a community not joined.
-                    ("ui/navigate", (_, error)) => Reply::Now(Ok(capabilities::failed_open(
-                        capabilities::NOT_JOINED,
-                        error,
-                        &params,
-                        cx,
-                    ))),
+                    // A community you have not joined is a visit that
+                    // fails as `denied`.
+                    ("ui/navigate", _) => match capabilities::navigate(&params, cx) {
+                        Ok(task) => Reply::Later(task),
+                        Err(failure) => Reply::Now(Err(failure)),
+                    },
                     // Nothing in a community you have not joined may notify
                     // (`notificationAuthorized`).
                     ("notifications/submit", _) => Reply::Now(Ok(json!(false))),

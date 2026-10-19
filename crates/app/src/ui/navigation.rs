@@ -72,7 +72,14 @@ pub enum Place {
     Route {
         page: Page,
         params: serde_json::Value,
+        /// The route version the params were made for, when a plugin
+        /// named one; a page whose routes moved on no longer takes them.
+        version: Option<u32>,
     },
+    /// A plugin's `ui/navigate` request for a page or settings section
+    /// Buzz does not have (yet): a visit all the same, as buzz-app pushes
+    /// a target before presenting it, resolved anew on every attempt.
+    Unresolved(serde_json::Value),
 }
 
 /// What a conversation place shows besides its channel.

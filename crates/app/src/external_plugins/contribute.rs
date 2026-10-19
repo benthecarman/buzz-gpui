@@ -667,11 +667,16 @@ impl crate::ui::renderers::TextRenderer for Inline {
             None => message.row.id.to_hex(),
         };
         let reaction = message.reaction.map(|group| {
+            // `MessageReaction`, as `ReactionLabel` passes a quick one.
             json!({
                 "content": group.content,
-                "emojiUrl": group.emoji.as_ref().map(|emoji| emoji.url.clone()),
-                "count": group.events.len(),
-                "authors": group.events.iter().map(|reaction| reaction.author.to_hex()).collect::<Vec<_>>(),
+                "emoji": group.emoji.as_ref().map(|emoji| json!({
+                    "shortcode": emoji.shortcode,
+                    "url": emoji.url,
+                })),
+                "events": group.events.iter().map(|reaction| json!({
+                    "authorId": reaction.author.to_hex(),
+                })).collect::<Vec<_>>(),
             })
         });
         let mut found = Vec::new();
@@ -1099,6 +1104,22 @@ pub fn set_card_visibility(plugin: &str, params: &Value, cx: &mut App) {
     CARD_STATES.with_borrow_mut(|states| states.insert(format!("{plugin}/{card}"), state));
     cards::changed(cx);
     cx.refresh_windows();
+}
+
+/// A settings card whose check failed is checked again (`ensure`): it
+/// is pending until its plugin answers `settings/visibility`.
+pub fn recheck_card(key: &str, cx: &mut App) {
+    use crate::ui::settings::cards::{self, CardVisibility};
+    let failed = CARD_STATES.with_borrow_mut(|states| match states.get_mut(key) {
+        Some(state) if *state == CardVisibility::Error => {
+            *state = CardVisibility::Pending;
+            true
+        }
+        _ => false,
+    });
+    if failed {
+        cards::changed(cx);
+    }
 }
 
 /// `page/badge`: the text on a page's row, or none.
@@ -1601,13 +1622,19 @@ pub fn capture(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capa
     let accept: super::view::Accept = Rc::new({
         let made = made.clone();
         move |file, window, cx| {
-            if let Some(capture) = made.get() {
-                let _ = weak.update(cx, |composer, cx| {
+            made.get().is_some_and(|capture| {
+                weak.update(cx, |composer, cx| {
                     composer.accept_plugin_capture(capture, file, window, cx)
-                });
-            }
+                })
+                .unwrap_or(false)
+            })
         }
     });
+    // Refused before the view opens, so a plugin never starts recording
+    // for a capture that cannot be.
+    if let Some(refusal) = composer.update(cx, |composer, cx| composer.capture_refusal(cx)) {
+        return Err((3, refusal));
+    }
     let (view, view_id) = super::view::ExternalView::capture(plugin, id, accept, cx);
     let capture = view.entity_id();
     made.set(Some(capture));
@@ -1740,10 +1767,14 @@ pub fn accept(
     };
     let window =
         crate::ui::navigation::main_window(cx).ok_or((1, "The window is not open.".to_owned()))?;
-    window
+    let accepted = window
         .update(cx, |_, window, cx| accept(file, window, cx))
         .map_err(|_| (1, "The window is not open.".to_owned()))?;
-    Ok(Value::Null)
+    if accepted {
+        Ok(Value::Null)
+    } else {
+        Err((3, "The capture has ended.".to_owned()))
+    }
 }
 
 /// `composer/focus`: puts the caret back in the composer (`focus`).

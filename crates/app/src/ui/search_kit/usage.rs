@@ -258,6 +258,11 @@ pub fn visit_key(place: &Place) -> String {
         Place::Conversation { channel, .. } => format!("channel:{channel}"),
         Place::Page(page) | Place::Route { page, .. } => page.key().to_owned(),
         Place::Settings(_) => crate::ui::pages::Page::SETTINGS.key().to_owned(),
+        Place::Unresolved(request) => request
+            .get("page")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
         // Messages without a conversation open.
         Place::Channels(_) => crate::ui::pages::Page::MESSAGES.key().to_owned(),
     }
