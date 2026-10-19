@@ -159,6 +159,10 @@ pub struct Composer {
     community: Entity<Community>,
     channel: String,
     thread_root: Option<EventId>,
+    /// The thread's verified root, once known, when the thread opened at
+    /// one of its replies: what tools, accessories and completions hear
+    /// as its `thread` (`threadRootId={snapshot.root.id}`).
+    plugin_root: Option<EventId>,
     input: Entity<TextareaState>,
     /// The Markdown styling of `input`'s text.
     markdown: LiveMarkdown,
@@ -497,6 +501,7 @@ impl Composer {
             community,
             channel,
             thread_root,
+            plugin_root: None,
             input,
             markdown,
             placeholder,
@@ -593,6 +598,31 @@ impl Composer {
     /// are not.
     pub fn conversation_view(&mut self) {
         self.session_conversation = true;
+    }
+
+    /// The thread plugins hear this composer replies in.
+    fn plugin_thread(&self) -> Option<String> {
+        self.plugin_root
+            .or(self.thread_root)
+            .map(|root| root.to_hex())
+    }
+
+    /// The thread's verified root: tools and accessories open again with
+    /// it as their `thread`, as buzz-app mounts its composer keyed by it.
+    pub fn set_thread_root(&mut self, root: EventId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.plugin_root.or(self.thread_root) == Some(root) {
+            return;
+        }
+        self.plugin_root = Some(root);
+        let context = super::composer_tools::ToolContext {
+            community: self.community.clone(),
+            channel: self.channel.clone(),
+            thread: self.plugin_thread(),
+            composer: cx.weak_entity(),
+        };
+        self.tools = super::composer_tools::build(context.clone(), &[], window, cx);
+        self.accessories = super::composer_tools::build_accessories(context, &[], window, cx);
+        cx.notify();
     }
 
     /// Not one after all, as the Inbox's fallback thread reader is not.
@@ -1587,7 +1617,7 @@ impl Composer {
                 (items, found.status, found.retry)
             }
             Trigger::Plugin(key) => {
-                let thread = self.thread_root.map(|root| root.to_hex());
+                let thread = self.plugin_thread();
                 let answer = super::composer_completions::get(key).and_then(|completion| {
                     let chars = |byte: usize| text[..byte.min(text.len())].chars().count();
                     let community = self.community.read(cx).origin.websocket().to_string();
@@ -5759,7 +5789,7 @@ impl Render for Composer {
             let context = super::composer_tools::ToolContext {
                 community: self.community.clone(),
                 channel: self.channel.clone(),
-                thread: self.thread_root.map(|root| root.to_hex()),
+                thread: self.plugin_thread(),
                 composer: cx.weak_entity(),
             };
             self.tools = super::composer_tools::build(context.clone(), &self.tools, window, cx);

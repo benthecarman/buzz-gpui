@@ -879,12 +879,18 @@ impl Workspace {
     /// external plugins, which are skipped.
     /// A page registered again after it was taken away is built anew
     /// when shown, as it remounts.
+    /// A failed visit mounts nothing until Retry, which builds it with its
+    /// route.
     fn ensure_page_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.views.contains_key(&self.page) {
+        if self.failure.is_some() || self.views.contains_key(&self.page) {
             return;
         }
         if let Some(build) = pages::spec(self.page, cx).and_then(|spec| spec.build) {
             let view = build(window, cx);
+            // It opens at the visit's route, as it remounts with it.
+            if let Some(route) = &self.page_route {
+                crate::external_plugins::ExternalPlugins::page_resolved(&view, route, cx);
+            }
             self.views.insert(self.page, view);
         }
     }

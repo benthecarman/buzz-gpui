@@ -952,11 +952,16 @@ impl ThreadPanel {
             let name = super::workflows::sender_name(&profiles, root);
             reply_placeholder(root, &self.viewer, &name)
         });
+        let root = self.snapshot.root.as_ref().map(|root| root.id);
         self.composer.update(cx, |composer, cx| {
             composer.set_context(context, cx);
             composer.set_can_send(can_send, cx);
             if let Some(placeholder) = placeholder {
                 composer.set_placeholder(placeholder, window, cx);
+            }
+            // Plugins hear the thread's root, not the reply it opened at.
+            if let Some(root) = root {
+                composer.set_thread_root(root, window, cx);
             }
         });
     }
