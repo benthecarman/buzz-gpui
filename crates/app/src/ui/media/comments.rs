@@ -433,7 +433,13 @@ impl Render for Comments {
                         } else {
                             transparent_black()
                         })
-                        .child(message::render_in(Layout::Nested, item, &rows, cx))
+                        .child(
+                            // Its links open nowhere in Buzz
+                            // (`onOpenLink={() => false}`).
+                            crate::ui::links::with_mode(crate::ui::links::LinkMode::Closed, || {
+                                message::render_in(Layout::Nested, item, &rows, cx)
+                            }),
+                        )
                 }))
                 .when(count == 0, |d| {
                     d.child(note("No comments yet. Add the first below."))

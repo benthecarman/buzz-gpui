@@ -209,7 +209,7 @@ pub fn register_text(renderer: Rc<dyn TextRenderer>) {
 /// order; where two overlap, the earlier registration wins.
 pub fn text_matches(text: &str, message: InMessage) -> Vec<(std::ops::Range<usize>, String)> {
     let renderers = REGISTRY.with_borrow(|r| r.text.clone());
-    if renderers.is_empty() {
+    if renderers.is_empty() || PLAIN.get() {
         return Vec::new();
     }
     let mut found: Vec<(std::ops::Range<usize>, String)> = Vec::new();
@@ -408,8 +408,25 @@ pub fn custom_body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> Op
         .find_map(|renderer| guarded(renderer.key(), || renderer.render(row, directory, cx)))
 }
 
+thread_local! {
+    /// What is drawn now is plain Markdown, no message's: no text or link
+    /// renderer takes part (Projects bodies, agent replies).
+    static PLAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Draws without text or link renderers, as plain Markdown does.
+pub fn without_renderers<T>(draw: impl FnOnce() -> T) -> T {
+    let before = PLAIN.replace(true);
+    let drawn = draw();
+    PLAIN.set(before);
+    drawn
+}
+
 /// A contributed link chip, when one outranks the bundled links.
 pub fn link(url: &str, cx: &App) -> Option<AnyElement> {
+    if PLAIN.get() {
+        return None;
+    }
     let candidates = REGISTRY.with_borrow(|r| {
         resolve(
             &r.links,

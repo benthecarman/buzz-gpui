@@ -337,6 +337,52 @@ pub struct Chip<'a> {
     pub origin: Option<navigation::LinkOrigin>,
 }
 
+/// How links drawn now open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LinkMode {
+    /// Through panels and navigation, as a message's do.
+    Normal,
+    /// Web links go to the browser, never a panel, as plain Markdown
+    /// anchors do (Projects bodies, agent replies).
+    Browser,
+    /// That, and `buzz://` links say they cannot open here (media review
+    /// comments, `onOpenLink={() => false}`).
+    Closed,
+}
+
+thread_local! {
+    static MODE: std::cell::Cell<LinkMode> = const { std::cell::Cell::new(LinkMode::Normal) };
+}
+
+/// Draws with links opening as `mode` says.
+pub fn with_mode<T>(mode: LinkMode, draw: impl FnOnce() -> T) -> T {
+    let before = MODE.replace(mode);
+    let drawn = draw();
+    MODE.set(before);
+    drawn
+}
+
+/// Opens web link `url` as the mode it was drawn in says.
+fn open_web(
+    mode: LinkMode,
+    url: &str,
+    modifiers: Modifiers,
+    origin: Option<navigation::LinkOrigin>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match mode {
+        LinkMode::Normal => navigation::open_web_link_from(url, modifiers, origin, window, cx),
+        LinkMode::Browser | LinkMode::Closed => cx.open_url(url),
+    }
+}
+
+/// Opens `buzz://` link `url` as the mode it was drawn in says: `false`
+/// when it cannot open here.
+fn open_buzz(mode: LinkMode, url: &str, window: &mut Window, cx: &mut App) -> bool {
+    mode != LinkMode::Closed && navigation::try_open_url(url, window, cx)
+}
+
 /// A plain anchor for links no renderer takes: underlined body text.
 fn plain_anchor(
     id: SharedString,
@@ -347,6 +393,7 @@ fn plain_anchor(
     c: &buzz_ui::Colors,
 ) -> AnyElement {
     let target = url.to_string();
+    let mode = MODE.get();
     let openable = url.starts_with("buzz:")
         || url.starts_with("http://")
         || url.starts_with("https://")
@@ -359,15 +406,11 @@ fn plain_anchor(
         .when(openable, |d| {
             d.cursor_pointer().on_click(move |event, window, cx| {
                 if target.starts_with("buzz:") {
-                    navigation::open_url(&target, window, cx)
+                    if mode != LinkMode::Closed {
+                        navigation::open_url(&target, window, cx)
+                    }
                 } else {
-                    navigation::open_web_link_from(
-                        &target,
-                        event.modifiers(),
-                        origin.clone(),
-                        window,
-                        cx,
-                    )
+                    open_web(mode, &target, event.modifiers(), origin.clone(), window, cx)
                 }
             })
         })
@@ -378,6 +421,7 @@ fn plain_anchor(
 /// The link chip a body shows for `url`.
 pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     let c = *cx.colors();
+    let mode = MODE.get();
     let url = chip.url;
     let authored = chip.label.as_ref().map(|l| l.text.clone());
     let kind = link_kind(url);
@@ -409,6 +453,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         let target = url.to_string();
         let origin = chip.origin.clone();
         let middle = target.clone();
+        let mode = MODE.get();
         return div()
             .id(chip.id)
             .cursor_pointer()
@@ -416,21 +461,15 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             .child(custom)
             .on_click(move |event, window, cx| {
                 if target.starts_with("buzz:") {
-                    navigation::try_open_url(&target, window, cx);
+                    open_buzz(mode, &target, window, cx);
                 } else {
-                    navigation::open_web_link_from(
-                        &target,
-                        event.modifiers(),
-                        origin.clone(),
-                        window,
-                        cx,
-                    )
+                    open_web(mode, &target, event.modifiers(), origin.clone(), window, cx)
                 }
             })
             .on_mouse_down(MouseButton::Middle, move |_, window, cx| {
                 if middle.starts_with("buzz:") {
                     cx.stop_propagation();
-                    navigation::try_open_url(&middle, window, cx);
+                    open_buzz(mode, &middle, window, cx);
                 }
             })
             .into_any_element();
@@ -680,25 +719,19 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         .on_click(move |event, window, cx| {
             cx.stop_propagation();
             if internal {
-                let opened = navigation::try_open_url(&target, window, cx);
+                let opened = open_buzz(mode, &target, window, cx);
                 open_state.update(cx, |state, cx| {
                     *state = !opened;
                     cx.notify();
                 });
             } else {
-                navigation::open_web_link_from(
-                    &target,
-                    event.modifiers(),
-                    origin.clone(),
-                    window,
-                    cx,
-                )
+                open_web(mode, &target, event.modifiers(), origin.clone(), window, cx)
             }
         });
     if internal {
         element = element.on_mouse_down(MouseButton::Middle, move |_, window, cx| {
             cx.stop_propagation();
-            let opened = navigation::try_open_url(&middle, window, cx);
+            let opened = open_buzz(mode, &middle, window, cx);
             middle_state.update(cx, |state, cx| {
                 *state = !opened;
                 cx.notify();

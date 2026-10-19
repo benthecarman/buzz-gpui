@@ -494,7 +494,11 @@ fn reply_view<T: TranscriptHost>(
     let community = community.read(cx);
     let directory = Directory::of(community, None, cx);
     let row = Arc::new(reply_row(text, key, community.session.viewer()));
-    markdown::body(&row, &directory, cx)
+    // Plain Markdown (`ActivityTranscript`): no plugin renderers, and web
+    // links go to the browser.
+    crate::ui::links::with_mode(crate::ui::links::LinkMode::Browser, || {
+        crate::ui::renderers::without_renderers(|| markdown::body(&row, &directory, cx))
+    })
 }
 
 fn tool_view<T: TranscriptHost>(

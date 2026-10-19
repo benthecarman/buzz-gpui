@@ -119,8 +119,9 @@ impl MessageActions {
         let picker = cx.new(|cx| EmojiPicker::new(community.clone(), window, cx).for_reactions());
         let subscriptions = vec![
             cx.subscribe_in(&picker, window, |this, _, Picked(pick), window, cx| {
-                if let Some((id, Popup::Picker { .. })) = this.interaction.open.take()
+                if let Some((id, Popup::Picker { from_bar })) = this.interaction.open.take()
                     && let Some(row) = (this.hooks.find)(id, cx)
+                    && this.picker_shown(&row, from_bar, cx)
                 {
                     let emoji = match pick {
                         Pick::Custom(custom) => Some(CustomEmoji {
@@ -137,8 +138,9 @@ impl MessageActions {
                 &picker,
                 window,
                 |this, _, PickedAs(text, custom), window, cx| {
-                    if let Some((id, Popup::Picker { .. })) = this.interaction.open.take()
+                    if let Some((id, Popup::Picker { from_bar })) = this.interaction.open.take()
                         && let Some(row) = (this.hooks.find)(id, cx)
+                        && this.picker_shown(&row, from_bar, cx)
                     {
                         let emoji = CustomEmoji {
                             shortcode: custom.shortcode.clone(),
@@ -168,10 +170,16 @@ impl MessageActions {
                         this.watch_outbox(cx);
                     }
                 }
-                // The dialog goes when its conversation can no longer change.
+                // The dialog goes when its conversation can no longer change,
+                // and so does the reaction picker.
                 if this.deleting.is_some() && !this.writable(cx) {
                     this.deleting = None;
                     (this.hooks.focus_composer)(window, cx);
+                }
+                if matches!(this.interaction.open, Some((_, Popup::Picker { .. })))
+                    && !this.writable(cx)
+                {
+                    this.interaction.open = None;
                 }
                 cx.notify();
             }),
@@ -221,6 +229,13 @@ impl MessageActions {
             .iter()
             .find(|c| c.id == self.channel)
             .cloned()
+    }
+
+    /// The reaction picker is on screen: its conversation takes
+    /// reactions, and the inline "+" shows only beside reactions
+    /// (`MessageReactionControls`, `ReactionTool`).
+    fn picker_shown(&self, row: &MessageRow, from_bar: bool, cx: &App) -> bool {
+        self.writable(cx) && (from_bar || !row.reactions.is_empty())
     }
 
     fn writable(&self, cx: &App) -> bool {
@@ -776,7 +791,7 @@ impl MessageActions {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.ops.reaction_blocked(&row) {
+        if self.ops.reaction_blocked(&row) || !self.writable(cx) {
             return;
         }
         let (session, channel) = (self.session(cx), self.channel.clone());

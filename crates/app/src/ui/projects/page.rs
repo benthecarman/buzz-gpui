@@ -415,8 +415,12 @@ fn code(id: &str, text: &str, window: &Window, c: &Colors) -> AnyElement {
 }
 
 /// `Body`: Markdown with Buzz links routed through navigation.
+/// Plain Markdown, as `ProjectsPage`'s is: no plugin renderers, and web
+/// links go to the browser.
 fn body(text: &str, community: &Community, cx: &App) -> AnyElement {
-    markdown::text(text, "projects", community, cx)
+    crate::ui::links::with_mode(crate::ui::links::LinkMode::Browser, || {
+        crate::ui::renderers::without_renderers(|| markdown::text(text, "projects", community, cx))
+    })
 }
 
 impl Render for ProjectsPage {
