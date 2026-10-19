@@ -400,6 +400,9 @@ fn items(value: &Value) -> Vec<Item> {
 /// Starts taking renderer answers.
 pub fn init(cx: &mut App) {
     super::naming::init(cx);
+    // Held from the start, so a Settings page or visit begun before any
+    // plugin card arrives still checks the cards that come.
+    crate::ui::settings::cards::register_check("buzz.plugins/cards", check_cards, cx);
     let (sender, mut suggestions) = futures::channel::mpsc::unbounded();
     SUGGESTION_INBOX.with_borrow_mut(|inbox| *inbox = Some(sender));
     cx.spawn(async move |cx| {
@@ -900,7 +903,7 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
         self.order
     }
 
-    fn render(&self, row: &Arc<MessageRow>, cx: &App) -> Option<AnyElement> {
+    fn render(&self, row: &Arc<MessageRow>, open_thread: bool, cx: &App) -> Option<AnyElement> {
         let kinds_ok = if self.kinds.is_empty() {
             row.kind == 9
         } else {
@@ -911,17 +914,24 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
         }
         // The message as it is now: an edit or a new reply asks again.
         let target = format!(
-            "{}:{}:{}",
+            "{}:{}:{}:{}",
             row.id.to_hex(),
             hashed(&row.content),
-            row.reply_count
+            row.reply_count,
+            open_thread
         );
         let tree = ask(
             &self.plugin,
             self.key,
             &target,
             "message/accessory",
-            || json!({ "accessory": self.id, "message": message_json(row, cx) }),
+            || {
+                json!({
+                    "accessory": self.id,
+                    "message": message_json(row, cx),
+                    "openThread": open_thread,
+                })
+            },
             cx,
         )?;
         Some(drawn(&self.plugin, &self.id, self.key, &target, &tree, cx))
@@ -1889,28 +1899,31 @@ pub fn register(
     use crate::ui::settings::cards::{self, CardPlacement, SettingsCard};
     let mut added = Vec::new();
     let key = |id: &str| intern(format!("{plugin}/{id}"));
-    CARD_OWNERS.with_borrow_mut(|owners| {
+    let had: Vec<String> = CARD_OWNERS.with_borrow_mut(|owners| {
         let cards: Vec<String> = contributions
             .settings_cards
             .iter()
             .map(|card| card.id.clone())
             .collect();
         if cards.is_empty() {
-            owners.remove(plugin);
+            owners.remove(plugin)
         } else {
-            owners.insert(plugin.to_owned(), cards);
+            owners.insert(plugin.to_owned(), cards)
         }
+        .unwrap_or_default()
     });
     if !contributions.settings_cards.is_empty() {
         cards::register_check("buzz.plugins/cards", check_cards, cx);
         // Cards that come while Settings shows are checked at once, as
         // `retainVisibility` ensures each card that becomes active.
-        if CARDS_HELD.get() > 0 {
-            let cards: Vec<&str> = contributions
-                .settings_cards
-                .iter()
-                .map(|card| card.id.as_str())
-                .collect();
+        // Only the new ones: a card already held stays checked.
+        let cards: Vec<&str> = contributions
+            .settings_cards
+            .iter()
+            .map(|card| card.id.as_str())
+            .filter(|id| !had.iter().any(|old| old == id))
+            .collect();
+        if CARDS_HELD.get() > 0 && !cards.is_empty() {
             ExternalPlugins::notify_running(
                 plugin,
                 "settings/check",

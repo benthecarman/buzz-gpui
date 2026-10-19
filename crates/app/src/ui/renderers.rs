@@ -95,7 +95,10 @@ pub trait MessageAccessory {
     fn order(&self) -> i32 {
         0
     }
-    fn render(&self, row: &Arc<MessageRow>, cx: &App) -> Option<AnyElement>;
+    /// `open_thread`: this place offers to open the message's thread
+    /// (`MessageAccessoryProps.openThread`), as a timeline does and a
+    /// thread does not.
+    fn render(&self, row: &Arc<MessageRow>, open_thread: bool, cx: &App) -> Option<AnyElement>;
 }
 
 /// Replaces an attachment's player (voice notes use one).
@@ -236,14 +239,19 @@ pub fn register_message_accessory(accessory: Rc<dyn MessageAccessory>) {
 /// What the message accessories show beside `row`'s reactions.
 /// Each with whether it comes before Agent Activity's own bubble
 /// (`buzz.agent-activity/activity` at 0), by order then key.
-pub fn message_accessories(row: &Arc<MessageRow>, cx: &App) -> Vec<(bool, AnyElement)> {
+pub fn message_accessories(
+    row: &Arc<MessageRow>,
+    open_thread: bool,
+    cx: &App,
+) -> Vec<(bool, AnyElement)> {
     let accessories = REGISTRY.with_borrow(|r| r.accessories.clone());
     accessories
         .into_iter()
         .filter(|accessory| on(accessory.key()))
         .filter_map(|accessory| {
             let before = (accessory.order(), accessory.key()) < (0, "buzz.agent-activity/activity");
-            guarded(accessory.key(), || accessory.render(row, cx)).map(|element| (before, element))
+            guarded(accessory.key(), || accessory.render(row, open_thread, cx))
+                .map(|element| (before, element))
         })
         .collect()
 }

@@ -72,67 +72,79 @@ impl Agents2 {
             if !valid {
                 return Err("The provider did not return the agent's key".into());
             }
+            // Taken for its whole setting up, as `exclusive(pubkey)` holds it.
             let taken = this
                 .update(cx, |this, _| {
-                    pubkey == viewer
+                    let taken = pubkey == viewer
                         || this.saved().any(|saved| saved.summary.pubkey == pubkey)
                         || this
                             .listed
                             .rows_of(&origin)
                             .iter()
-                            .any(|row| row.pubkey == pubkey)
+                            .any(|row| row.pubkey == pubkey);
+                    taken || !this.hosted_busy.insert(pubkey.clone())
                 })
                 .unwrap_or(true);
             if taken {
                 return Err("The provider returned a key that is already in use".into());
             }
-            let auth: Vec<String> = identity
-                .attest_agent(&pubkey)
-                .map_err(|error| error.to_string())
-                .and_then(|auth| serde_json::from_str(&auth).map_err(|error| error.to_string()))?;
-            let activate = cx.update(|cx| remote.activate(&pubkey, &name, &community, auth, cx));
-            activate.await?;
-            let entry = Listing {
-                pubkey: pubkey.clone(),
-                name: name.clone(),
-                picture: picture.clone(),
-                runtime: Some(type_key.clone()),
-                prior: None,
-            };
-            let http = RelayHttp::new(session.origin().clone(), identity.clone());
-            let write = {
-                let (entry, owner, runtime) = (entry.clone(), identity.clone(), type_key.clone());
-                cx.update(|cx| {
-                    Runtime::handle(cx).spawn(async move {
-                        listings::publish(&http, &owner, &entry, &runtime).await
+            let done = async {
+                let auth: Vec<String> = identity
+                    .attest_agent(&pubkey)
+                    .map_err(|error| error.to_string())
+                    .and_then(|auth| {
+                        serde_json::from_str(&auth).map_err(|error| error.to_string())
+                    })?;
+                let activate =
+                    cx.update(|cx| remote.activate(&pubkey, &name, &community, auth, cx));
+                activate.await?;
+                let entry = Listing {
+                    pubkey: pubkey.clone(),
+                    name: name.clone(),
+                    picture: picture.clone(),
+                    runtime: Some(type_key.clone()),
+                    prior: None,
+                };
+                let http = RelayHttp::new(session.origin().clone(), identity.clone());
+                let write = {
+                    let (entry, owner, runtime) =
+                        (entry.clone(), identity.clone(), type_key.clone());
+                    cx.update(|cx| {
+                        Runtime::handle(cx).spawn(async move {
+                            listings::publish(&http, &owner, &entry, &runtime).await
+                        })
                     })
+                };
+                let prior = write
+                    .await
+                    .unwrap_or_else(|_| Err("The agent list was not updated. Retry.".into()))?;
+                this.update(cx, |this, cx| {
+                    this.listed.set_row(
+                        &origin,
+                        &pubkey,
+                        Some(Listing {
+                            prior: Some(prior),
+                            ..entry
+                        }),
+                    );
+                    cx.notify();
                 })
-            };
-            let prior = write
-                .await
-                .unwrap_or_else(|_| Err("The agent list was not updated. Retry.".into()))?;
-            this.update(cx, |this, cx| {
-                this.listed.set_row(
-                    &origin,
-                    &pubkey,
-                    Some(Listing {
-                        prior: Some(prior),
-                        ..entry
-                    }),
-                );
-                cx.notify();
-            })
-            .map_err(|_| "Agents closed".to_owned())?;
-            // Listed with its picture either way; its profile is the
-            // provider's.
-            if let Some(picture) = picture {
-                let profile =
-                    cx.update(|cx| remote.profile(&pubkey, &community, &name, Some(&picture), cx));
-                if let Err(error) = profile.await {
-                    tracing::warn!(%error, "hosted agent picture not published");
+                .map_err(|_| "Agents closed".to_owned())?;
+                // Listed with its picture either way; its profile is the
+                // provider's.
+                if let Some(picture) = picture {
+                    let profile = cx.update(|cx| {
+                        remote.profile(&pubkey, &community, &name, Some(&picture), cx)
+                    });
+                    if let Err(error) = profile.await {
+                        tracing::warn!(%error, "hosted agent picture not published");
+                    }
                 }
+                Ok::<(), String>(())
             }
-            Ok(pubkey)
+            .await;
+            let _ = this.update(cx, |this, _| this.hosted_busy.remove(&pubkey));
+            done.map(|()| pubkey)
         })
     }
 

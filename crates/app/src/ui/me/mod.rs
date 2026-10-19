@@ -302,6 +302,19 @@ impl MeModel {
             .unwrap_or_default()
     }
 
+    /// Panel `key` was taken away: no saved Me conversation keeps a tab
+    /// for it.
+    pub fn withdraw_panel(&mut self, key: &str, cx: &mut Context<Self>) {
+        let prefix = format!("{key}:");
+        for state in self.tabs.values_mut() {
+            state.panels.retain(|tab| tab.panel != key);
+            if state.selected.starts_with(&prefix) {
+                state.selected = String::new();
+            }
+        }
+        cx.notify();
+    }
+
     pub fn update_tab_state<R>(
         &mut self,
         channel: &str,

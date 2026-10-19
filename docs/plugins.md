@@ -325,7 +325,7 @@ same way, per query.
 | --- | --- | --- |
 | `link/render` | `renderer`, `url`, `label` | `{"tree"}`, or `null` to leave the chip as it is |
 | `message/render` | `renderer`, `message` | `{"tree"}` or `null` |
-| `message/accessory` | `accessory`, `message` | `{"tree"}` to show beside its reactions, or `null`. Asked again when the message is edited or gets a reply. |
+| `message/accessory` | `accessory`, `message`, `openThread` (`true` where this place can open the message's thread, as a timeline can and a thread cannot) | `{"tree"}` to show beside its reactions, or `null`. Asked again when the message is edited or gets a reply. To open the thread, use `ui/navigate` with `to: "conversation"` and the message's `thread`. |
 | `attachment/render` | `renderer`, `attachment` (`url`, `kind`: `image`, `video`, `audio` or `file`, `mime`, `name`, `size`, `duration`, `waveform`, `voiceNote`, `dimensions` `{"width","height"}`, `blurhash`, `previewUrl`), `removable` (a draft the plugin may take out with `attachment/remove`, buzz-app's `onRemove`) | `{"tree"}` or `null` |
 | `inline/render` | `renderer`, `text` (what the pattern matched, up to 200 bytes; at most 32 pieces per segment are asked about), `segment` (the plain-text segment it was found in, `content.text`) and `start` (where, in characters), `message` (the message it is in), `reaction` (a quick reaction drawn, as `{"content","emoji":{"shortcode","url"},"events":[]}`, or `null` for message text) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text. Buzz asks once per piece and message. |
 | `names/resolve` | `policy`, `identities` (`[{"pubkey","name","isAgent","owner"}]`, at most 5,000), `viewer`, `candidates` (the keys in view, or `null` for everyone) | `{"labels": {"<pubkey>": {"name", "qualifier"}}}`. Keys left out show their public name. |
@@ -819,6 +819,11 @@ passes a function, or reaches into the app, it works differently:
   with `source: null`, where buzz-app calls that a public-profile name.
   With a policy on (Identity Naming, by default) the source is
   `agent-directory`, as in buzz-app.
+
+- **Bundled renderers keep their place.** Voice Notes' player and Emoji's
+  custom emoji stay first among renderers when switched off and on
+  again; in buzz-app they register last again, after plugins added
+  meanwhile.
 
 - **`events/query` reads what the relay gives.** Its events are
   verified and filtered to channels you can read, but a reaction, edit or

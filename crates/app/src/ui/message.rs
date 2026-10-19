@@ -656,9 +656,11 @@ fn full(
     }
     // Plugins' message accessories sit beside the reactions too, around
     // Agent Activity's by order then key.
-    let (before, after): (Vec<_>, Vec<_>) = super::renderers::message_accessories(row, cx)
-        .into_iter()
-        .partition(|(before, _)| *before);
+    let open_thread = rows.actions.on_open_thread.is_some();
+    let (before, after): (Vec<_>, Vec<_>) =
+        super::renderers::message_accessories(row, open_thread, cx)
+            .into_iter()
+            .partition(|(before, _)| *before);
     for (_, accessory) in before {
         // Sized to what it shows, not the row.
         body = body.child(div().flex().child(accessory));

@@ -1888,6 +1888,8 @@ impl Actor {
     /// Acts on a change of channel access (`revokeAccess`): what can no
     /// longer be read goes, and everything retained is filtered again.
     fn check_access(&mut self) {
+        // A suspended preview's recheck notice follows discovery.
+        self.publish_live();
         let Some(discovery) = &self.discovery else {
             return;
         };
@@ -2151,10 +2153,38 @@ impl Actor {
                 self.reads_channels(false);
                 self.publish();
             }
-            LiveUpdate::AccessHint { .. } => self.start_scan(ScanOptions {
-                strong: true,
-                ..Default::default()
-            }),
+            LiveUpdate::AccessHint { channels } => {
+                // A public preview whose route closed for revoked access
+                // is unreadable until it is looked up again
+                // (`suspendPreviews`, then `revalidatePreviews`).
+                let suspended: Vec<String> = match &mut self.discovery {
+                    Some(discovery) => channels
+                        .iter()
+                        .filter(|id| discovery.suspend(id))
+                        .cloned()
+                        .collect(),
+                    None => Vec::new(),
+                };
+                if !suspended.is_empty() {
+                    self.check_access();
+                    self.update_interests();
+                    self.reads_channels(false);
+                    self.publish_live();
+                    self.publish();
+                    let ops = actions::Ops {
+                        commands: self.commands.clone(),
+                    };
+                    tokio::spawn(async move {
+                        if let Ok(ctx) = ops.context().await {
+                            let _ = ops.resolve(&ctx, suspended).await;
+                        }
+                    });
+                }
+                self.start_scan(ScanOptions {
+                    strong: true,
+                    ..Default::default()
+                });
+            }
             LiveUpdate::Connected => {
                 self.set_live(true);
                 self.observer_status();
@@ -2182,8 +2212,18 @@ impl Actor {
 
     /// Rebuilds the live view and publishes it if it changed.
     fn publish_live(&mut self) {
+        let mut live = self.live.as_ref().map(Live::snapshot).unwrap_or_default();
+        // A suspended preview says so until it is looked up again.
+        if live.error.is_none()
+            && self
+                .discovery
+                .as_ref()
+                .is_some_and(|discovery| !discovery.suspended_channels().is_empty())
+        {
+            live.error = Some("Public preview access needs rechecking; retry live updates.".into());
+        }
         let next = LiveView {
-            live: self.live.as_ref().map(Live::snapshot).unwrap_or_default(),
+            live,
             roster: self.roster_refresh.clone(),
             heads: self.catch_up_states(),
         };

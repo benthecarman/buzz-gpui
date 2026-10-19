@@ -155,6 +155,8 @@ impl Workspace {
         if let Some(work) = self.me_work(cx) {
             work.update(cx, |work, cx| work.withdraw_panel(key, cx));
         }
+        // Me's other conversations keep their tabs in the Me model.
+        crate::ui::me::MeModel::global(cx).update(cx, |me, cx| me.withdraw_panel(key, cx));
         cx.notify();
     }
 
@@ -1316,6 +1318,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // In a Me conversation, as one of its tabs.
+        if self.page == Page::ME
+            && let Some(work) = self.me_work(cx)
+        {
+            return work.update(cx, |work, cx| {
+                work.open_panel(key, target, channel, root, window, cx)
+            });
+        }
         // Outside a conversation, the panel shows beside the page.
         let current = (self.page == Page::MESSAGES)
             .then(|| self.tab_key(cx))
@@ -1367,10 +1377,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.page != Page::MESSAGES {
-            return false;
+        // A link a panel shows opens it outside a Messages conversation
+        // too: as a Me conversation's tab, or beside the page.
+        let messages = (self.page == Page::MESSAGES)
+            .then(|| self.tab_key(cx))
+            .flatten();
+        if messages.is_none() && channel_panels::resolve(url, cx).is_some() {
+            let (channel, root) = match origin {
+                Some(origin) => (Some(origin.channel), Some(origin.root)),
+                None => (None, None),
+            };
+            return self.open_panel_at(None, url, channel, root, window, cx);
         }
-        let Some((_, current)) = self.tab_key(cx) else {
+        let Some((_, current)) = messages else {
             return false;
         };
         if let Some(panel) = channel_panels::resolve(url, cx) {

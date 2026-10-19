@@ -214,6 +214,39 @@ impl SessionWork {
         this
     }
 
+    /// Opens panel `key` (or the one that shows `target`) as a tab of
+    /// this conversation, as `useConversationTabs` `open` does.
+    pub(crate) fn open_panel(
+        &mut self,
+        key: Option<&str>,
+        target: &str,
+        channel: Option<String>,
+        root: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let panel = match key {
+            Some(key) => channel_panels::get(key, cx),
+            None => channel_panels::resolve(target, cx),
+        };
+        let Some(panel) = panel else {
+            return false;
+        };
+        let tab = PanelTab {
+            panel: panel.key,
+            channel: channel.unwrap_or_else(|| self.channel.id.clone()),
+            target: target.to_string(),
+            root,
+        };
+        let id = tab.id();
+        if self.update_tabs(cx, |state| state.open_panel(tab)) {
+            self.tab_views.remove(&id);
+            self.ensure_tab_views(window, cx);
+        }
+        self.focus_tab(&id, window, cx);
+        true
+    }
+
     /// Panel `key` was taken away: its tabs and drawer here close.
     pub(crate) fn withdraw_panel(&mut self, key: &str, cx: &mut Context<Self>) {
         let prefix = format!("{key}:");
