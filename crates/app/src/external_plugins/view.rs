@@ -1243,11 +1243,16 @@ pub fn open_route(view: &AnyView, params: Option<&Value>, _: &mut Window, cx: &m
         if !view.opened {
             return;
         }
-        let entry = crate::ui::workspace::current_visit().0;
+        let (entry, keep) = crate::ui::workspace::current_visit();
         ExternalPlugins::notify_running(
             &view.plugin,
             "page/route",
-            json!({ "view": view.id, "route": view.route, "entry": entry }),
+            json!({
+                "view": view.id,
+                "route": view.route,
+                "entry": entry,
+                "focus": if keep { "preserve" } else { "content" },
+            }),
             cx,
         );
     });

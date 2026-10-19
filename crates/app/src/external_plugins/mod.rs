@@ -1257,6 +1257,13 @@ impl ExternalPlugins {
         plugin.services.clear();
         // Renderer answers and marks belong to the old run.
         contribute::forget(&id);
+        // A new run registers its renderers and actions last, as a reload
+        // in buzz-app disposes the old revision first.
+        for added in &plugin.added {
+            if let Added::Other(contribute::Added::Renderer(key)) = added {
+                crate::ui::renderers::unregister(key);
+            }
+        }
         Self::apply(path, generation, &id, &name, &contributions, cx);
         let state = cx.global_mut::<Self>();
         let Some(plugin) = state.current(path, generation) else {

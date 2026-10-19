@@ -302,6 +302,13 @@ pub fn add_member(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure
     let pubkey = super::capabilities::pubkey(params, "pubkey")
         .ok_or_else(|| invalid("Choose a valid person or agent."))?
         .to_owned();
+    // An archived identity is never added (`addChannelMember`).
+    if crate::ui::archives::hides(&community, &pubkey, cx) {
+        return Err((
+            3,
+            "Archived identities cannot be added. Choose someone else.".to_owned(),
+        ));
+    }
     let session = community.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         session
@@ -464,7 +471,8 @@ pub fn change(
     };
     let task = match method {
         "reminders/create" => {
-            let channel = channel(params, community.read(cx))?;
+            // A message in an open channel you have not joined too.
+            let channel = readable(params, community.read(cx))?;
             let message_id = event_id(params, "message")?;
             let not_before = at("notBefore")?;
             let note = text(params, "note").map(str::to_owned);

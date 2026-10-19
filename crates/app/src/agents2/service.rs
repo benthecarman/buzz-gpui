@@ -763,6 +763,8 @@ pub struct Agents2 {
     /// Deleted agents whose community cleanup is running, and whether it
     /// was asked for again meanwhile.
     cleaning: HashMap<String, bool>,
+    /// Hosted agents with a change on its way (`exclusive(pubkey)`).
+    pub(super) hosted_busy: HashSet<String>,
     /// Where agents' attention handles send their reads and writes.
     attention_calls: futures::channel::mpsc::UnboundedSender<AttentionCall>,
     /// The owner's agent list in each bound community.
@@ -839,6 +841,7 @@ impl Agents2 {
             runners: HashMap::new(),
             serial: 0,
             cleaning: HashMap::new(),
+            hosted_busy: HashSet::new(),
             attention_calls,
             listed: listed::Listed::default(),
             presence: presence::Announcer::default(),

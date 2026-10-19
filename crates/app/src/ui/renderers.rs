@@ -145,22 +145,54 @@ pub fn text_changed() {
 }
 
 /// Puts `item` in place of the one with its key, keeping its turn in
-/// registration order, or adds it last.
+/// registration order, or adds it last. The key leaves every other kind,
+/// so an id declared anew as another kind is only that.
 macro_rules! put {
-    ($list:expr, $item:expr) => {{
+    ($registry:expr, $list:ident, $item:expr) => {{
         let item = $item;
-        match $list
+        let key = item.key().to_owned();
+        $registry.leave_others(&key, stringify!($list));
+        match $registry
+            .$list
             .iter()
-            .position(|existing| existing.key() == item.key())
+            .position(|existing| existing.key() == key)
         {
-            Some(at) => $list[at] = item,
-            None => $list.push(item),
+            Some(at) => $registry.$list[at] = item,
+            None => $registry.$list.push(item),
         }
     }};
 }
 
+impl Registry {
+    /// Takes `key` out of every list but `keep`.
+    fn leave_others(&mut self, key: &str, keep: &str) {
+        if keep != "text" && self.text.iter().any(|item| item.key() == key) {
+            self.text.retain(|item| item.key() != key);
+            text_changed();
+        }
+        if keep != "accessories" {
+            self.accessories.retain(|item| item.key() != key);
+        }
+        if keep != "messages" {
+            self.messages.retain(|item| item.key() != key);
+        }
+        if keep != "links" {
+            self.links.retain(|item| item.key() != key);
+        }
+        if keep != "inline" {
+            self.inline.retain(|item| item.key() != key);
+        }
+        if keep != "attachments" {
+            self.attachments.retain(|item| item.key() != key);
+        }
+        if keep != "actions" {
+            self.actions.retain(|item| item.key() != key);
+        }
+    }
+}
+
 pub fn register_text(renderer: Rc<dyn TextRenderer>) {
-    REGISTRY.with_borrow_mut(|r| put!(r.text, renderer));
+    REGISTRY.with_borrow_mut(|r| put!(r, text, renderer));
     text_changed();
 }
 
@@ -254,11 +286,11 @@ pub fn unregister(key: &str) {
 
 // Extension points: bundled features and plugins people added register.
 pub fn register_message(renderer: Rc<dyn MessageRenderer>) {
-    REGISTRY.with_borrow_mut(|r| r.messages.push(renderer));
+    REGISTRY.with_borrow_mut(|r| put!(r, messages, renderer));
 }
 
 pub fn register_link(renderer: Rc<dyn LinkRenderer>) {
-    REGISTRY.with_borrow_mut(|r| r.links.push(renderer));
+    REGISTRY.with_borrow_mut(|r| put!(r, links, renderer));
 }
 
 #[allow(dead_code)]
@@ -267,11 +299,11 @@ pub fn register_inline(renderer: Rc<dyn InlineRenderer>) {
 }
 
 pub fn register_attachment(renderer: Rc<dyn AttachmentRenderer>) {
-    REGISTRY.with_borrow_mut(|r| put!(r.attachments, renderer));
+    REGISTRY.with_borrow_mut(|r| put!(r, attachments, renderer));
 }
 
 pub fn register_action(action: Rc<dyn MessageAction>) {
-    REGISTRY.with_borrow_mut(|r| put!(r.actions, action));
+    REGISTRY.with_borrow_mut(|r| put!(r, actions, action));
 }
 
 /// The actions that apply to `row`; a matcher that fails leaves the menu

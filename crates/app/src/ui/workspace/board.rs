@@ -152,7 +152,21 @@ impl Workspace {
             self.drawer = None;
         }
         self.withdraw_companion(key, window, cx);
+        if let Some(work) = self.me_work(cx) {
+            work.update(cx, |work, cx| work.withdraw_panel(key, cx));
+        }
         cx.notify();
+    }
+
+    /// Me's open conversation board, if Me has one.
+    fn me_work(&self, cx: &App) -> Option<Entity<crate::ui::me::SessionWork>> {
+        let page = self
+            .views
+            .get(&Page::ME)?
+            .clone()
+            .downcast::<crate::ui::me::MePage>()
+            .ok()?;
+        page.read(cx).work()
     }
 
     /// Account action `key` was taken away: its dialog closes.
@@ -172,10 +186,19 @@ impl Workspace {
         new: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(community) = &self.community else {
+        // Me's conversation keeps its own tabs.
+        if self.page == Page::ME {
+            if let Some(work) = self.me_work(cx) {
+                work.update(cx, |work, cx| work.retarget_panel(panel, old, new, cx));
+            }
+            return;
+        }
+        // Tabs are kept under the channel the board shows, whichever
+        // channel a tab names.
+        let _ = channel;
+        let Some(key) = self.tab_key(cx) else {
             return;
         };
-        let key = (community.entity_id(), channel.to_owned());
         let Some(state) = self.tab_states.get_mut(&key) else {
             return;
         };

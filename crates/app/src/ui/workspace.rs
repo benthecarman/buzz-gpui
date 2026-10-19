@@ -538,8 +538,9 @@ impl Workspace {
             return;
         }
         self.show_page(page, window, cx);
-        self.open_page_route(page, None, window, cx);
+        // The visit is recorded first, so the page hears its entry.
         self.record(cx);
+        self.open_page_route(page, None, window, cx);
     }
 
     /// Hands a routed page its route, or `None` for its start.
@@ -1135,7 +1136,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.remember_outside_settings(&target);
-        self.history.replace(target.clone());
+        // The place already shown is a new attempt at the same entry.
+        if self.history.current() != Some(&target) {
+            self.history.replace(target.clone());
+        }
         self.apply(target, window, cx);
     }
 

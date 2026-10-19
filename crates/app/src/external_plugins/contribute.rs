@@ -133,6 +133,8 @@ thread_local! {
     static TITLES: RefCell<HashMap<String, (String, Option<i32>)>> = RefCell::default();
     /// Each plugin's settings cards, for `settings/check`.
     static CARD_OWNERS: RefCell<HashMap<String, Vec<String>>> = RefCell::default();
+    /// How many holders keep Settings' card checks running now.
+    static CARDS_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The query each `completion/query` request answers, by its
     /// `request` id, for `completion/publish`.
     static QUERIES: RefCell<HashMap<u64, SuggestionKey>> = RefCell::default();
@@ -239,7 +241,8 @@ fn check_cards(cx: &mut App) -> Subscription {
     for (plugin, cards) in owners {
         ExternalPlugins::notify_running(&plugin, "settings/check", json!({ "cards": cards }), cx);
     }
-    Subscription::new(|| {})
+    CARDS_HELD.set(CARDS_HELD.get() + 1);
+    Subscription::new(|| CARDS_HELD.set(CARDS_HELD.get().saturating_sub(1)))
 }
 
 /// A contribution's title and order, by `plugin/id` key.
@@ -1900,6 +1903,21 @@ pub fn register(
     });
     if !contributions.settings_cards.is_empty() {
         cards::register_check("buzz.plugins/cards", check_cards, cx);
+        // Cards that come while Settings shows are checked at once, as
+        // `retainVisibility` ensures each card that becomes active.
+        if CARDS_HELD.get() > 0 {
+            let cards: Vec<&str> = contributions
+                .settings_cards
+                .iter()
+                .map(|card| card.id.as_str())
+                .collect();
+            ExternalPlugins::notify_running(
+                plugin,
+                "settings/check",
+                json!({ "cards": cards }),
+                cx,
+            );
+        }
     }
     // Titles and orders the contribution readers report.
     TITLES.with_borrow_mut(|titles| {
@@ -1987,8 +2005,8 @@ pub fn register(
     }
     for action in &contributions.message_actions {
         let action_key = key(&action.id);
-        // Declared again (an update or a restart), it keeps its place in
-        // registration order.
+        // Declared again by an update, it keeps its place in registration
+        // order.
         crate::ui::renderers::register_action(Rc::new(Action {
             key: action_key,
             plugin: plugin.to_owned(),

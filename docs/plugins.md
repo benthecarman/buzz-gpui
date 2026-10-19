@@ -155,7 +155,8 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   `content`, as buzz-app's `NavigationFocus`). Every later visit to an open
   `handlesNavigation` page, its sidebar or top-bar button, Back, Retry or
   the same `ui/navigate` included, sends `page/route` with the route (or
-  `null`) and the new `entry`, and waits for `page/settle` again.
+  `null`), the new `entry` and its `focus`, and waits for `page/settle`
+  again.
 - A plugin can add at most 16 panels and 8 pages, and at most 16 of each kind
   below. Ids are unique across all of them.
 
@@ -604,7 +605,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `channels/creation` | none | `{"pending","notices"}`: the channel being made now (`{"name","description","visibility","ttlSeconds","labels","setup"}`, `visibility` `open` or `private`), and setups that did not finish, each `{"id","name","error"}` (`channelCreation.snapshot`), including one the outbox still holds from before a restart. `session/watch` with `creation` follows this session's own creation and notices. |
 | `channels/dismissNotice` | `id` | `null`. Hides a setup notice. |
 | `channels/action` | `channel`, `action`: `join`, `leave`, `archive`, `unarchive`, `delete` (by an owner) or `hide` (a DM) | `null` once the relay shows it. Needs `manage-channels`. |
-| `channels/addMember` | `channel` (yours, or an open one you have not joined), `pubkey` (lowercase hex, such as one of your agents) | `null` once the roster lists them. Needs `manage-channels`. |
+| `channels/addMember` | `channel` (yours, or an open one you have not joined), `pubkey` (lowercase hex, such as one of your agents; archived identities are refused) | `null` once the roster lists them. Needs `manage-channels`. |
 | `channels/changeMember` | `channel`, `pubkey`, `change` (`admin`, `member`, `guest` or `remove`), `expected` (their role now: `owner`, `admin`, `member`, `guest` or `bot`) | `null` once done. Needs `manage-channels`. |
 | `channels/details` | `channel` | `{"channel","version","details","canEdit","attempt"}`: `details` is `{"name","description","private","ttlSeconds","labels"}`; `attempt` is a save still `saving` or `unconfirmed`, with its `details`, or `null` |
 | `channels/saveDetails` | `channel`, `version` (from `channels/details`), `details` (the whole draft: `name` (as given, not trimmed), `description` (empty clears it), `private`, and optionally `ttlSeconds` (a whole number of seconds, 1 to 2147483647) and `labels` (text)); or `channel` and `check: true` to check an unconfirmed save | `null` once saved. A save that may have landed stays `unconfirmed` until checked. Needs `manage-channels`. |
@@ -627,7 +628,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `projects/gitAuthorization` | `repository` (a `https://…/git/<owner>/<d>.git` URL of the community) | `{"repository","token"}`: a NIP-98 value for `Authorization: Nostr `, good on that repository's Git routes for 60 seconds, for running Git yourself (`repository` in its canonical form), or `null` for a repository this community does not serve. Needs `publish-events`. |
 | `agents/logProof` | `id` (the agent's log session), `pubkey` (the agent), `relayUrl` (the community's relay), `nonce` (the host's challenge) | `{"signature"}`: your proof, as the agent's owner, for one read of its harness log. Needs `manage-agents`. |
 | `agents/attest` | `pubkey` (an agent key) | `{"auth"}`: your NIP-OA tag `["auth", owner, "", signature]` saying you own that agent, for an agent to attach to what it signs. Needs `manage-agents`. |
-| `agents/presence` | `status` (`online` or `offline`), `pubkeys` (up to 32; the relay keeps only agents you own) | `true` once sent on the live connection, `false` if this community cannot take it: owner presence (kind 20003) for agents Buzz does not run itself, such as hosted ones. Needs `manage-agents`. |
+| `agents/presence` | `status` (`online` or `offline`), `pubkeys` (any number, in one event; the relay keeps only agents you own) | `true` once sent on the live connection, `false` if this community cannot take it: owner presence (kind 20003) for agents Buzz does not run itself, such as hosted ones. Needs `manage-agents`. |
 | `services/list` | none | The services running plugins offer, each `{"plugin","service"}`. Buzz sends `services/changed` with `services`, the same list, when a plugin that offers any starts, stops or restarts, as a buzz-app plugin's `inject` learns a service came or went. |
 | `services/request` | `plugin`, `service`, `method`, `params` | The answer of the plugin that offers it, within 30 seconds |
 | `services/subscribe`, `services/unsubscribe` | `plugin`, `service` | `null`. Buzz then sends `service/event` (`plugin`, `service`, `event`, `data`) each time that plugin publishes an event of it. |
@@ -813,9 +814,11 @@ passes a function, or reaches into the app, it works differently:
   notification sent without `community` opens in the community selected
   when it was sent; buzz-app's leaves the selection alone.
 
-- **A profile without a name has no name source.** `names/get` gives such
-  a key its first characters with `source: null`; buzz-app calls that a
-  public-profile name.
+- **A profile without a name has no name source without a policy.** With
+  no naming policy on, `names/get` gives such a key its first characters
+  with `source: null`, where buzz-app calls that a public-profile name.
+  With a policy on (Identity Naming, by default) the source is
+  `agent-directory`, as in buzz-app.
 
 - **`events/query` reads what the relay gives.** Its events are
   verified and filtered to channels you can read, but a reaction, edit or

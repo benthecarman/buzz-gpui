@@ -11,6 +11,9 @@ use buzz_relay_client::RelayHttp;
 use gpui_kit::*;
 use std::rc::Rc;
 
+/// Why a second change to a hosted agent waits (`exclusive`).
+const CHANGING: &str = "Wait for the agent's last change to finish";
+
 fn provider(type_key: &str, cx: &App) -> Result<Rc<dyn RemoteAgentType>, String> {
     registry::type_of(type_key, cx)
         .and_then(|kind| kind.kind.remote())
@@ -162,28 +165,37 @@ impl Agents2 {
             return Task::ready(Err("Connect to its community first".into()));
         };
         let (identity, session) = (binding.identity.clone(), binding.session.clone());
+        // One change to a hosted agent at a time.
+        if !self.hosted_busy.insert(agent.pubkey.clone()) {
+            return Task::ready(Err(CHANGING.into()));
+        }
         let remove = remote.remove(&agent.pubkey, &agent.relay, cx);
         let pubkey = agent.pubkey;
         cx.spawn(async move |this, cx| {
-            remove.await?;
-            // Archived, its record deleted, its channels left, as a local
-            // agent's deletion cleans up (`removeRelayAgent`).
-            let cleanup = {
-                let pubkey = pubkey.clone();
-                cx.update(|cx| {
-                    Runtime::handle(cx).spawn(async move {
-                        super::super::cleanup::clean_hosted(&session, &identity, &pubkey).await
+            let done = async {
+                remove.await?;
+                // Archived, its record deleted, its channels left, as a local
+                // agent's deletion cleans up (`removeRelayAgent`).
+                let cleanup = {
+                    let pubkey = pubkey.clone();
+                    cx.update(|cx| {
+                        Runtime::handle(cx).spawn(async move {
+                            super::super::cleanup::clean_hosted(&session, &identity, &pubkey).await
+                        })
                     })
+                };
+                cleanup
+                    .await
+                    .unwrap_or_else(|_| Err("Record deletion is not confirmed. Retry.".into()))?;
+                this.update(cx, |this, cx| {
+                    this.listed.set_row(&origin, &pubkey, None);
+                    cx.notify();
                 })
-            };
-            cleanup
-                .await
-                .unwrap_or_else(|_| Err("Record deletion is not confirmed. Retry.".into()))?;
-            this.update(cx, |this, cx| {
-                this.listed.set_row(&origin, &pubkey, None);
-                cx.notify();
-            })
-            .map_err(|_| "Agents closed".to_owned())
+                .map_err(|_| "Agents closed".to_owned())
+            }
+            .await;
+            let _ = this.update(cx, |this, _| this.hosted_busy.remove(&pubkey));
+            done
         })
     }
 
@@ -237,6 +249,9 @@ impl Agents2 {
             return Task::ready(Err("Connect to its community first".into()));
         };
         let (identity, session) = (binding.identity.clone(), binding.session.clone());
+        if !self.hosted_busy.insert(agent.pubkey.clone()) {
+            return Task::ready(Err(CHANGING.into()));
+        }
         let prior = self
             .listed
             .rows_of(&origin)
@@ -246,38 +261,43 @@ impl Agents2 {
         let profile = remote.profile(&agent.pubkey, &agent.relay, &name, picture.as_deref(), cx);
         let (pubkey, runtime) = (agent.pubkey, agent.agent_type);
         cx.spawn(async move |this, cx| {
-            profile.await?;
-            let entry = Listing {
-                pubkey: pubkey.clone(),
-                name,
-                picture,
-                runtime: Some(runtime.clone()),
-                prior,
-            };
-            let http = RelayHttp::new(session.origin().clone(), identity.clone());
-            let write = {
-                let entry = entry.clone();
-                cx.update(|cx| {
-                    Runtime::handle(cx).spawn(async move {
-                        listings::publish(&http, &identity, &entry, &runtime).await
+            let done = async {
+                profile.await?;
+                let entry = Listing {
+                    pubkey: pubkey.clone(),
+                    name,
+                    picture,
+                    runtime: Some(runtime.clone()),
+                    prior,
+                };
+                let http = RelayHttp::new(session.origin().clone(), identity.clone());
+                let write = {
+                    let entry = entry.clone();
+                    cx.update(|cx| {
+                        Runtime::handle(cx).spawn(async move {
+                            listings::publish(&http, &identity, &entry, &runtime).await
+                        })
                     })
+                };
+                let prior = write
+                    .await
+                    .unwrap_or_else(|_| Err("The agent list was not updated. Retry.".into()))?;
+                this.update(cx, |this, cx| {
+                    this.listed.set_row(
+                        &origin,
+                        &pubkey,
+                        Some(Listing {
+                            prior: Some(prior),
+                            ..entry
+                        }),
+                    );
+                    cx.notify();
                 })
-            };
-            let prior = write
-                .await
-                .unwrap_or_else(|_| Err("The agent list was not updated. Retry.".into()))?;
-            this.update(cx, |this, cx| {
-                this.listed.set_row(
-                    &origin,
-                    &pubkey,
-                    Some(Listing {
-                        prior: Some(prior),
-                        ..entry
-                    }),
-                );
-                cx.notify();
-            })
-            .map_err(|_| "Agents closed".to_owned())
+                .map_err(|_| "Agents closed".to_owned())
+            }
+            .await;
+            let _ = this.update(cx, |this, _| this.hosted_busy.remove(&pubkey));
+            done
         })
     }
 }

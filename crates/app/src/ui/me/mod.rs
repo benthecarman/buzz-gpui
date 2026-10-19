@@ -24,7 +24,7 @@ use super::channel_tabs::TabState;
 use super::pages::{self, Navigation, Page, PageRoutes, PageSpec, Placement};
 use crate::community::{AppState, Community};
 use crate::mirror::mirror;
-use board::SessionWork;
+pub(crate) use board::SessionWork;
 use buzz_relay_client::session::{MeKit, MeKitSnapshot};
 use buzz_relay_client::sidebar_store::SidebarState;
 use buzz_relay_client::{ChannelSummary, RosterStatus, SessionStatus};
@@ -353,6 +353,11 @@ pub struct MePage {
 }
 
 impl MePage {
+    /// The conversation open here, if any.
+    pub(crate) fn work(&self) -> Option<Entity<SessionWork>> {
+        self.work.as_ref().map(|(_, _, _, work)| work.clone())
+    }
+
     fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
         let model = MeModel::global(cx);
         let subscription = cx.observe(&model, |_, _, cx| cx.notify());

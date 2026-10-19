@@ -214,6 +214,47 @@ impl SessionWork {
         this
     }
 
+    /// Panel `key` was taken away: its tabs and drawer here close.
+    pub(crate) fn withdraw_panel(&mut self, key: &str, cx: &mut Context<Self>) {
+        let prefix = format!("{key}:");
+        self.update_tabs(cx, |state| {
+            state.panels.retain(|tab| tab.panel != key);
+            if state.selected.starts_with(&prefix) {
+                state.selected = String::new();
+            }
+        });
+        if self.drawer.as_ref().is_some_and(|drawer| drawer.key == key) {
+            self.drawer = None;
+        }
+        cx.notify();
+    }
+
+    /// A panel tab here now shows `new` in place of `old`.
+    pub(crate) fn retarget_panel(
+        &mut self,
+        panel: &str,
+        old: &str,
+        new: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let (old_id, new_id) = (format!("{panel}:{old}"), format!("{panel}:{new}"));
+        if !self.tabs(cx).panels.iter().any(|tab| tab.id() == new_id)
+            && let Some(view) = self.tab_views.remove(&old_id)
+        {
+            self.tab_views.insert(new_id.clone(), view);
+        }
+        self.update_tabs(cx, |state| {
+            if state.panels.iter().any(|tab| tab.id() == new_id) {
+                state.panels.retain(|tab| tab.id() != old_id);
+            } else if let Some(tab) = state.panels.iter_mut().find(|tab| tab.id() == old_id) {
+                tab.target = new.to_owned();
+            }
+            if state.selected == old_id {
+                state.selected = new_id.clone();
+            }
+        });
+    }
+
     fn tabs(&self, cx: &App) -> TabState {
         self.model.read(cx).tab_state(&self.channel.id, cx)
     }

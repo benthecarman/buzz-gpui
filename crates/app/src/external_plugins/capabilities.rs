@@ -585,7 +585,10 @@ pub fn delete(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
 /// (NIP-56), with a `reason` and a `note`.
 pub fn report(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
     use buzz_relay_client::messages::ReportType;
-    let (community, channel, message) = message_target(params, cx)?;
+    // Any message Buzz holds, an open channel's preview included.
+    let community = community(cx)?;
+    let channel = readable(params, community.read(cx))?;
+    let message = event_id(params, "message")?.ok_or_else(|| invalid("message is required"))?;
     let kind = match text(params, "reason") {
         Some("spam") => ReportType::Spam,
         Some("profanity") => ReportType::Profanity,
@@ -1931,7 +1934,8 @@ pub fn agent_presence(params: &Value, cx: &App) -> Result<Task<Result<Value, Fai
     };
     // Any keys, as buzz-app sends them: the relay keeps only the agents
     // you own, hosted and elsewhere ones included.
-    let agents = pubkeys(params, 32)?;
+    // Every key given, in one event, as `publishAgentPresence` signs it.
+    let agents = pubkeys(params, usize::MAX)?;
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         session
@@ -2678,10 +2682,19 @@ pub fn open_panel(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, F
     // The conversation and thread it opens for, such as an accessory's.
     let channel = text(params, "channel").map(str::to_owned);
     let root = text(params, "thread").map(str::to_owned);
-    navigation::with_workspace(cx, move |workspace, window, cx| {
-        workspace.open_panel_at(key.as_deref(), &target, channel, root, window, cx);
-    });
-    Ok(json!(true))
+    // Answered with whether it opened, as the window decides now.
+    let (Some(window), Some(workspace)) = (navigation::main_window(cx), navigation::workspace(cx))
+    else {
+        return Ok(json!(false));
+    };
+    let opened = window
+        .update(cx, |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_panel_at(key.as_deref(), &target, channel, root, window, cx)
+            })
+        })
+        .unwrap_or(false);
+    Ok(json!(opened))
 }
 
 /// Whether a conversation in `community` may notify now

@@ -465,20 +465,29 @@ fn active() -> Active {
 
 /// `identities` with `facts` in place of their keys' rows, each over
 /// what the row knew (`{...identities.get(key), ...fact}`).
-fn displayed(mut identities: Vec<NamingIdentity>, facts: &[DisplayFact]) -> Vec<NamingIdentity> {
+fn displayed(identities: Vec<NamingIdentity>, facts: &[DisplayFact]) -> Vec<NamingIdentity> {
+    // Every fact counts, a key given twice included, each over its key's
+    // own row (`directory.ts`).
+    let keys: HashSet<String> = facts
+        .iter()
+        .map(|fact| fact.pubkey.to_ascii_lowercase())
+        .collect();
+    let (known, mut identities): (Vec<NamingIdentity>, Vec<NamingIdentity>) = identities
+        .into_iter()
+        .partition(|row| keys.contains(&row.pubkey));
     for fact in facts {
         let key = fact.pubkey.to_ascii_lowercase();
-        let known = identities
-            .iter()
-            .position(|row| row.pubkey == key)
-            .map(|index| identities.remove(index));
+        let row = known.iter().find(|row| row.pubkey == key);
         identities.push(NamingIdentity {
             pubkey: key,
             name: fact.name.clone(),
             is_agent: fact
                 .is_agent
-                .unwrap_or_else(|| known.as_ref().is_some_and(|row| row.is_agent)),
-            owner: fact.owner.clone().or(known.and_then(|row| row.owner)),
+                .unwrap_or_else(|| row.is_some_and(|row| row.is_agent)),
+            owner: fact
+                .owner
+                .clone()
+                .or_else(|| row.and_then(|row| row.owner.clone())),
         });
     }
     identities
