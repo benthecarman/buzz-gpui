@@ -1184,7 +1184,7 @@ fn reason_name(reason: crate::ui::channel_states::Reason) -> &'static str {
     match reason {
         Reason::Denied => "denied",
         Reason::Invalid => "invalid-target",
-        Reason::Page => "unavailable",
+        Reason::Page | Reason::Held => "unavailable",
         Reason::NotFound => "not-found",
         Reason::Timeout => "timeout",
         Reason::HostError => "host-error",
@@ -1440,14 +1440,18 @@ pub fn resolve_channels(params: &Value, cx: &App) -> Result<Task<Result<Value, F
     let ids: Vec<String> = params
         .get("ids")
         .and_then(Value::as_array)
-        .filter(|ids| !ids.is_empty() && ids.len() <= 50)
-        .ok_or_else(|| invalid("ids must be a list of 1 to 50 channel ids"))?
+        .ok_or_else(|| invalid("ids must be a list of channel ids"))?
         .iter()
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect();
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
+        // Nothing to resolve; the relay refuses more than 128 channels
+        // that still need reading (`store.ts` `resolve`).
+        if ids.is_empty() {
+            return Ok(Value::Array(Vec::new()));
+        }
         let found = session
             .resolve_channels(ids)
             .await
@@ -2379,6 +2383,11 @@ fn start_navigation(params: &Value, cx: &mut App) -> Result<bool, Failure> {
         Err((MISSING, _)) => unresolved(params),
         place => place?,
     };
+    // Nothing selected leaves a conversation without its community
+    // (`boundScope`).
+    if community.is_none() && matches!(place, Place::Conversation { .. }) {
+        return Err(invalid("a conversation needs its community"));
+    }
     let target = Target { community, place };
     let replace = params.get("replace").and_then(Value::as_bool) == Some(true);
     if text(params, "focus") == Some("preserve") {

@@ -160,10 +160,21 @@ pub struct Workspace {
     settling: Option<Page>,
     /// A link that arrived before an identity or a community was ready,
     /// with the viewer it arrived for (`deep-links.ts`).
-    held: Option<(String, Option<String>)>,
+    held: Option<Held>,
     /// The last place outside Settings, where its Back row returns.
     outside_settings: Option<Target>,
     _settings_events: Option<Subscription>,
+}
+
+/// A `buzz://` link waiting for an identity or a community.
+#[derive(Clone)]
+struct Held {
+    url: String,
+    viewer: Option<String>,
+    /// It came from outside the window.
+    ingress: bool,
+    /// It was reported unavailable, which leaves it to Retry navigation.
+    reported: bool,
 }
 
 impl Workspace {
@@ -385,17 +396,22 @@ impl Workspace {
         }
         // A link held for an identity is dropped if another one arrived,
         // and opened once a community is ready.
-        if let Some((_, held_for)) = &self.held
-            && held_for.is_some()
-            && *held_for != viewer
+        if let Some(held) = &self.held
+            && held.viewer.is_some()
+            && held.viewer != viewer
         {
             self.held = None;
         }
+        // One from outside is asked again once the identity is read,
+        // which reports it unavailable without a community.
         if viewer.is_some()
-            && let Some((url, _)) = self.held.clone()
+            && let Some(held) = &self.held
+            && !held.reported
             && (self.community.is_some()
-                || matches!(deep_links::parse(&url), Some(Link::Join { .. })))
+                || held.ingress
+                || matches!(deep_links::parse(&held.url), Some(Link::Join { .. })))
         {
+            let url = held.url.clone();
             self.held = None;
             let ingress = true;
             self.open_link(&url, ingress, window, cx);
@@ -860,6 +876,10 @@ impl Workspace {
         self.resolving = None;
         self._revealing = None;
         self.failure = None;
+        // A newer visit drops the link left to Retry navigation.
+        if self.held.as_ref().is_some_and(|held| held.reported) {
+            self.held = None;
+        }
     }
 
     /// What is left of the current attempt's open timeout.
@@ -1225,6 +1245,12 @@ impl Workspace {
                 let keep = std::mem::replace(&mut self.keep_focus, self.attempt_keeps_focus);
                 self.apply(target, window, cx);
                 self.keep_focus = keep;
+            }
+            // A held link is asked again (`openHeld`).
+            None if failed.reason == Reason::Held
+                && let Some(held) = self.held.take() =>
+            {
+                self.open_link(&held.url, true, window, cx)
             }
             // Nothing to open again: the visit fails as before, as a new
             // attempt (`retry`).
@@ -1816,12 +1842,40 @@ impl Workspace {
             // Held until there is an identity, and for a conversation a
             // community to bind it to.
             Some(Link::Join { .. }) if viewer.is_none() => {
-                self.held = Some((url.to_string(), None));
+                self.held = Some(Held {
+                    url: url.to_string(),
+                    viewer: None,
+                    ingress,
+                    reported: false,
+                });
             }
+            // While the identity is still read it waits; otherwise it is
+            // unavailable, kept for Retry navigation (`deep-links.ts`).
             Some(Link::Conversation { .. } | Link::Entity(_))
                 if viewer.is_none() || self.community.is_none() =>
             {
-                self.held = Some((url.to_string(), viewer));
+                let loading = matches!(cx.global::<AppState>().identity, IdentityState::Loading);
+                let mut held = Held {
+                    url: url.to_string(),
+                    viewer,
+                    ingress,
+                    reported: false,
+                };
+                if loading || !ingress {
+                    self.held = Some(held);
+                    return;
+                }
+                self.begin_attempt();
+                self.publish_visit();
+                self.failure = Some(Failed {
+                    target: None,
+                    reason: Reason::Held,
+                    ingress,
+                });
+                held.reported = true;
+                self.held = Some(held);
+                self.page = Page::MESSAGES;
+                cx.notify();
             }
             // Entity links open the Projects page in the selected community.
             Some(Link::Entity(route)) => {
@@ -1863,6 +1917,8 @@ impl Workspace {
             Some(Link::Join { .. }) => self.open_invite(url, window, cx),
             None if url.starts_with("https://") || url.starts_with("http://") => cx.open_url(url),
             None if ingress => {
+                self.begin_attempt();
+                self.publish_visit();
                 self.failure = Some(Failed {
                     target: None,
                     reason: Reason::Invalid,

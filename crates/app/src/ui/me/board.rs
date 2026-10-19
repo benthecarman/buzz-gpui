@@ -214,15 +214,16 @@ impl SessionWork {
         this
     }
 
-    /// Panel tab `id` is open here.
-    pub(crate) fn has_panel_tab(&self, id: &str, cx: &App) -> bool {
-        self.tabs(cx).panels.iter().any(|tab| tab.id() == id)
-    }
-
-    /// Panel tab `id` is open here but not the one shown.
-    pub(crate) fn panel_tab_inactive(&self, id: &str, cx: &App) -> bool {
-        let state = self.tabs(cx);
-        state.panels.iter().any(|tab| tab.id() == id) && state.selected != id
+    /// When `view` is panel tab `id` here, whether that tab is not the
+    /// one selected.
+    pub(crate) fn panel_view_unselected(
+        &self,
+        id: &str,
+        view: gpui_kit::EntityId,
+        cx: &App,
+    ) -> Option<bool> {
+        matches!(self.tab_views.get(id), Some(TabView::Panel(shown)) if shown.entity_id() == view)
+            .then(|| self.tabs(cx).selected != id)
     }
 
     /// A link from the timeline replaces the panels links opened before
@@ -254,6 +255,7 @@ impl SessionWork {
             channel: channel.unwrap_or_else(|| self.channel.id.clone()),
             target: target.to_string(),
             root,
+            tool: false,
         };
         let id = tab.id();
         if self.update_tabs(cx, |state| state.open_panel(tab)) {
@@ -262,6 +264,11 @@ impl SessionWork {
         }
         self.focus_tab(&id, window, cx);
         true
+    }
+
+    /// Tab `to` replaced tool `from` here (`panel/open`).
+    pub(crate) fn inherit_tool(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        self.update_tabs(cx, |state| state.inherit_tool(from, to));
     }
 
     /// Panel `key` was taken away: its tabs and drawer here close.
@@ -295,6 +302,7 @@ impl SessionWork {
         }
         self.update_tabs(cx, |state| {
             if state.panels.iter().any(|tab| tab.id() == new_id) {
+                state.inherit_tool(&old_id, &new_id);
                 state.panels.retain(|tab| tab.id() != old_id);
             } else if let Some(tab) = state.panels.iter_mut().find(|tab| tab.id() == old_id) {
                 tab.target = new.to_owned();

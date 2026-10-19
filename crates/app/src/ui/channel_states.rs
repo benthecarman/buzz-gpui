@@ -130,6 +130,10 @@ pub enum Reason {
     /// The page that shows it says it failed (`PageNavigation.complete`);
     /// `unavailable` to plugins.
     Page,
+    /// An outside link held until there is an identity and a community
+    /// to bind it to, opened by Retry navigation (`deep-links.ts`
+    /// `unavailable`).
+    Held,
 }
 
 /// A navigation that could not open, kept for Retry navigation.
@@ -145,7 +149,9 @@ pub struct Failed {
 impl Failed {
     /// Outside links retry only when they may succeed later.
     pub fn retryable(&self) -> bool {
-        !self.ingress || (self.reason != Reason::Invalid && self.target.is_some())
+        !self.ingress
+            || self.reason == Reason::Held
+            || (self.reason != Reason::Invalid && self.target.is_some())
     }
 
     /// The notice's explanation.

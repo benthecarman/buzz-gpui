@@ -762,6 +762,7 @@ impl MeSidebar {
                             channel: channel.to_owned(),
                             target: crate::agent_activity::target(agent, Some(channel), None),
                             root: None,
+                            tool: false,
                         });
                     });
                     model.select(Selection::Session(channel.to_owned()), cx)

@@ -397,9 +397,11 @@ impl ExternalView {
         // `false` (`panelActive`).
         let own = format!("{}/{}", view.plugin, view.contribution);
         let tab = format!("{own}:{}", opening.target);
-        if crate::ui::navigation::workspace(cx)
-            .is_some_and(|workspace| workspace.read(cx).panel_tab_inactive(&tab, cx))
-        {
+        if crate::ui::navigation::workspace(cx).is_some_and(|workspace| {
+            workspace
+                .read(cx)
+                .panel_tab_inactive(&tab, this.entity_id(), cx)
+        }) {
             return false;
         }
         let Some(panel) = crate::ui::channel_panels::resolve(target, cx) else {
@@ -413,9 +415,12 @@ impl ExternalView {
         let close = (!push).then(|| opening.close.clone());
         let (key, target) = (panel.key, target.to_owned());
         crate::ui::navigation::with_workspace(cx, move |workspace, window, cx| {
-            if workspace.open_panel_at(Some(key), &target, Some(channel), root, window, cx)
-                && let Some(close) = close
-            {
+            let opened = if close.is_some() {
+                workspace.open_panel_replacing(key, &target, Some(channel), root, &tab, window, cx)
+            } else {
+                workspace.open_panel_at(Some(key), &target, Some(channel), root, window, cx)
+            };
+            if opened && let Some(close) = close {
                 // A drawer's close updates the workspace, which is busy.
                 window.defer(cx, move |window, cx| close(window, cx));
             }
@@ -550,10 +555,7 @@ impl ExternalView {
         let opening = self.opening.as_ref();
         let (agent, kind, conversation, pending) = match &self.agent {
             Some((view, kind)) => (
-                Some(super::agents::agent_json(
-                    &view.agent,
-                    crate::agents2::is_hosted(&view.agent.agent_type, cx),
-                )),
+                Some(super::agents::agent_json(&view.agent)),
                 Some(*kind),
                 view.conversation.as_ref().map(|conversation| {
                     json!({ "channel": conversation.channel_id, "root": conversation.root_id })

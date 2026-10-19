@@ -33,7 +33,7 @@ pub trait LinkRenderer {
     fn key(&self) -> &str;
     fn order(&self, url: &str) -> i32;
     fn matches(&self, url: &str) -> bool;
-    fn render(&self, url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement>;
+    fn render(&self, url: &str, cx: &App) -> Option<AnyElement>;
 }
 
 /// Draws a piece of inline text, such as a custom emoji's `:shortcode:`.
@@ -409,7 +409,7 @@ pub fn custom_body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> Op
 }
 
 /// A contributed link chip, when one outranks the bundled links.
-pub fn link(url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement> {
+pub fn link(url: &str, cx: &App) -> Option<AnyElement> {
     let candidates = REGISTRY.with_borrow(|r| {
         resolve(
             &r.links,
@@ -443,7 +443,7 @@ pub fn link(url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement> {
             let order = renderer.order(url);
             order < bundled || (order == bundled && renderer.key() < BUNDLED)
         })
-        .and_then(|renderer| guarded(renderer.key(), || renderer.render(url, label, cx)))
+        .and_then(|renderer| guarded(renderer.key(), || renderer.render(url, cx)))
 }
 
 /// Inline text through the inline renderers, first that takes it.
@@ -649,7 +649,7 @@ mod tests {
         fn matches(&self, url: &str) -> bool {
             url.starts_with("https://")
         }
-        fn render(&self, _: &str, _: Option<&str>, _: &App) -> Option<AnyElement> {
+        fn render(&self, _: &str, _: &App) -> Option<AnyElement> {
             None
         }
     }
@@ -666,7 +666,7 @@ mod tests {
         fn matches(&self, _: &str) -> bool {
             panic!("broken matcher")
         }
-        fn render(&self, _: &str, _: Option<&str>, _: &App) -> Option<AnyElement> {
+        fn render(&self, _: &str, _: &App) -> Option<AnyElement> {
             None
         }
     }

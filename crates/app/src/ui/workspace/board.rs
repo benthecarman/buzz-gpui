@@ -160,21 +160,17 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Panel tab `id` is open in the conversation shown but is not the
-    /// selected tab, so it may not open or push (`panelActive`).
-    pub(crate) fn panel_tab_inactive(&self, id: &str, cx: &App) -> bool {
-        let messages = self.tabs(cx);
-        let in_messages = messages.panels.iter().any(|tab| tab.id() == id);
-        let me = self.me_work(cx);
-        let in_me = me.as_ref().is_some_and(|work| {
-            work.read(cx).panel_tab_inactive(id, cx) || work.read(cx).has_panel_tab(id, cx)
-        });
-        match self.page {
-            Page::MESSAGES if in_messages => messages.selected != id,
-            Page::ME if in_me => me.is_some_and(|work| work.read(cx).panel_tab_inactive(id, cx)),
-            // A tab on a page not shown is not shown.
-            _ => in_messages || in_me,
+    /// `view` is panel tab `id` but not the tab shown, on its page or
+    /// because that page is not shown, so it may not open or push
+    /// (`panelActive`). A drawer or a companion beside a page is shown.
+    pub(crate) fn panel_tab_inactive(&self, id: &str, view: EntityId, cx: &App) -> bool {
+        if matches!(self.tab_views.get(id), Some(TabView::Panel(shown)) if shown.entity_id() == view)
+        {
+            return self.page != Page::MESSAGES || self.tabs(cx).selected != id;
         }
+        self.me_work(cx)
+            .and_then(|work| work.read(cx).panel_view_unselected(id, view, cx))
+            .is_some_and(|unselected| self.page != Page::ME || unselected)
     }
 
     /// Me's open conversation board, if Me has one.
@@ -223,6 +219,7 @@ impl Workspace {
         };
         let (old_id, new_id) = (format!("{panel}:{old}"), format!("{panel}:{new}"));
         if state.panels.iter().any(|tab| tab.id() == new_id) {
+            state.inherit_tool(&old_id, &new_id);
             state.panels.retain(|tab| tab.id() != old_id);
             if state.selected == old_id {
                 state.selected = new_id;
@@ -1362,6 +1359,7 @@ impl Workspace {
             channel: channel.unwrap_or(current),
             target: target.to_string(),
             root,
+            tool: false,
         };
         let id = tab.id();
         if self
@@ -1372,6 +1370,36 @@ impl Workspace {
             self.ensure_tab_views(window, cx);
         }
         self.focus_tab(&id, window, cx);
+        true
+    }
+
+    /// [`Self::open_panel_at`] for a panel replacing tab `old` in its
+    /// place (`panel/open`): one replacing a tool is one too.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_panel_replacing(
+        &mut self,
+        key: &str,
+        target: &str,
+        channel: Option<String>,
+        root: Option<String>,
+        old: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.open_panel_at(Some(key), target, channel, root, window, cx) {
+            return false;
+        }
+        let new = format!("{key}:{target}");
+        match self.page {
+            Page::ME => {
+                if let Some(work) = self.me_work(cx) {
+                    work.update(cx, |work, cx| work.inherit_tool(old, &new, cx));
+                }
+            }
+            _ => {
+                let _ = self.update_tabs(cx, |state| state.inherit_tool(old, &new));
+            }
+        }
         true
     }
 
@@ -1466,6 +1494,7 @@ impl Workspace {
             channel,
             target: url.to_string(),
             root,
+            tool: false,
         };
         let id = tab.id();
         // A retargeted panel is made again with its new opening.

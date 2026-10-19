@@ -496,8 +496,8 @@ fn models_of(value: &Value) -> Option<registry::Models> {
 
 /// An agent as a plugin sees it: the whole record, as `agents/list`
 /// gives it (`AgentViewProps.agent`).
-pub(super) fn agent_json(agent: &Agent, hosted: bool) -> Value {
-    entry_at(agent, hosted)
+pub(super) fn agent_json(agent: &Agent) -> Value {
+    entry_at(agent)
 }
 
 /// A summary answer, `{"text"}`, as a text tree for the answer cache.
@@ -516,9 +516,7 @@ impl PluginType {
     fn cached(&self, what: &str, agent: &Agent) -> (&'static str, String) {
         use std::hash::{DefaultHasher, Hash, Hasher};
         let mut hasher = DefaultHasher::new();
-        agent_json(agent, self.decl.hosted)
-            .to_string()
-            .hash(&mut hasher);
+        agent_json(agent).to_string().hash(&mut hasher);
         (
             intern(format!("{}/{}#{what}", self.plugin, self.id)),
             format!("{}:{:x}", agent.pubkey, hasher.finish()),
@@ -539,7 +537,7 @@ impl PluginType {
                 key,
                 &target,
                 &format!("agent/{what}"),
-                json!({ "type": self.id, "agent": agent_json(agent, self.decl.hosted) }),
+                json!({ "type": self.id, "agent": agent_json(agent) }),
                 parse,
             );
         }
@@ -717,7 +715,7 @@ impl AgentType for PluginType {
         }
         let request = self.requester.request(
             "agent/models",
-            json!({ "type": self.id, "agent": agent_json(agent, self.decl.hosted) }),
+            json!({ "type": self.id, "agent": agent_json(agent) }),
             Duration::from_secs(30),
         );
         Some(cx.background_spawn(async move {
@@ -910,13 +908,10 @@ pub fn register(
     (done, errors)
 }
 
-/// One of the owner's agents for `agents/list`; `place` is `hosted` for
-/// a hosted type's and `here` for one this device runs.
-fn agent_entry(agent: &Agent, cx: &App) -> Value {
-    entry_at(agent, crate::agents2::is_hosted(&agent.agent_type, cx))
-}
-
-fn entry_at(agent: &Agent, hosted: bool) -> Value {
+/// One of the agents this device keeps, for `agents/list` and the type
+/// requests: `place` is `here`, whatever its type later became
+/// (`service.ts` `view`).
+fn entry_at(agent: &Agent) -> Value {
     let skipped: serde_json::Map<String, Value> = agent
         .skipped
         .iter()
@@ -938,7 +933,7 @@ fn entry_at(agent: &Agent, hosted: bool) -> Value {
         "owner": agent.owner,
         "relay": agent.relay,
         "picture": agent.picture,
-        "place": if hosted { "hosted" } else { "here" },
+        "place": "here",
         "config": agent.config,
         "attentionEnabled": agent.attention_enabled,
         "attention": serde_json::to_value(&*agent.attention).unwrap_or(Value::Null),
@@ -985,8 +980,8 @@ pub fn list(cx: &App) -> Result<Value, Failure> {
     Ok(json!({
         "status": status,
         "error": error,
-        "agents": agents.agents().iter().map(|agent| agent_entry(agent, cx)).collect::<Vec<_>>(),
-        "running": agents.running().iter().map(|agent| agent_entry(agent, cx)).collect::<Vec<_>>(),
+        "agents": agents.agents().iter().map(entry_at).collect::<Vec<_>>(),
+        "running": agents.running().iter().map(entry_at).collect::<Vec<_>>(),
         "elsewhere": agents.elsewhere(cx).iter().map(|agent| {
             // A hosted agent runs where its host does, wherever it was
             // listed (`AgentPlace`).
@@ -1062,9 +1057,10 @@ pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
             identities.push((pubkey, name, false));
         }
     }
-    // Complete once that list was read too; its failure is the error.
+    // Complete once that list was read too; its failure is the error,
+    // which settles it as a finished read would.
     let (reading, read, failed) = service.listing_state(&http);
-    let pending = status == "loading" || reading || !read;
+    let pending = status == "loading" || reading || (!read && failed.is_none());
     let complete = status == "ready" && read && failed.is_none();
     let error = error.or_else(|| {
         failed
@@ -1244,7 +1240,7 @@ pub fn create(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
     let task = service.update(cx, |agents, cx| agents.create(&kind, &name, made, None, cx));
     Ok(cx.background_spawn(async move {
         task.await
-            .map(|agent| entry_at(&agent, false))
+            .map(|agent| entry_at(&agent))
             .map_err(|error| (3, error))
     }))
 }
@@ -1777,7 +1773,6 @@ pub fn port(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
     let (pubkey, kind) = (text("pubkey")?.to_owned(), text("type")?.to_owned());
     let service = agents2(cx)?;
     let listed = service.update(cx, |agents, cx| agents.portable(cx));
-    let hosted = crate::agents2::is_hosted(&kind, cx);
     Ok(cx.spawn(async move |cx| {
         let found = listed.await.map_err(|error| (3, error))?;
         let portable = found
@@ -1787,7 +1782,7 @@ pub fn port(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
             .ok_or((3, "That identity cannot be brought over.".to_owned()))?;
         let task = service.update(cx, |agents, cx| agents.port(&portable, &kind, cx));
         task.await
-            .map(|agent| entry_at(&agent, hosted))
+            .map(|agent| entry_at(&agent))
             .map_err(|error| (3, error))
     }))
 }

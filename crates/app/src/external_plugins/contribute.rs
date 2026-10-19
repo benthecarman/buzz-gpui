@@ -904,13 +904,15 @@ impl LinkRenderer for Link {
             .any(|prefix| url.starts_with(prefix.as_str()))
     }
 
-    fn render(&self, url: &str, label: Option<&str>, cx: &App) -> Option<AnyElement> {
+    fn render(&self, url: &str, cx: &App) -> Option<AnyElement> {
+        // Asked with the URL alone, as buzz-app's renderer gets only
+        // `{url}`: the answer is kept per URL.
         let tree = ask(
             &self.plugin,
             self.key,
             url,
             "link/render",
-            || json!({ "renderer": self.id, "url": url, "label": label }),
+            || json!({ "renderer": self.id, "url": url }),
             cx,
         )?;
         Some(drawn(&self.plugin, &self.id, self.key, url, &tree, cx))

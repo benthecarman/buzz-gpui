@@ -125,6 +125,11 @@ impl Workspace {
         // autofocus (`focus: "preserve"`); More pages, a list of
         // buttons, focuses it.
         let tab = !(self.compact_pages || layout::narrow(Self::viewport_width(window)));
+        // A tab picked again where it already shows does nothing
+        // (`PageNavigation` `onReselect`).
+        if tab && page == self.page {
+            return;
+        }
         self.preserve_focus = tab;
         if tab && page == Page::ME {
             let model = crate::ui::me::MeModel::global(cx);

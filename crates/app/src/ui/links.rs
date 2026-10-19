@@ -395,7 +395,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     }
     // A contributed link renderer outranks the bundled one. It draws the
     // chip's content; Buzz keeps the anchor, its menu and hover cards.
-    let custom = super::renderers::link(url, authored.as_deref(), cx);
+    let custom = super::renderers::link(url, cx);
     // Links Buzz does not draw itself, such as `buzz://` entities, are
     // plain unless a renderer took them.
     let Some(kind) = kind else {

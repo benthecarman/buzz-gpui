@@ -104,6 +104,9 @@ pub struct PanelTab {
     pub target: String,
     /// The thread root of the message whose link opened it, as hex.
     pub root: Option<String>,
+    /// A channel tool or channel-menu panel, and what replaced one in
+    /// its tab (`channelContext`): a timeline link leaves it open.
+    pub tool: bool,
 }
 
 impl PanelTab {
@@ -114,6 +117,7 @@ impl PanelTab {
             channel: channel.to_string(),
             target: channel.to_string(),
             root: None,
+            tool: true,
         }
     }
 
@@ -124,7 +128,7 @@ impl PanelTab {
     /// Details a link opened, which a timeline action replaces; channel
     /// tools stay.
     pub(crate) fn transient(&self) -> bool {
-        self.target != self.channel
+        !self.tool
     }
 }
 
@@ -340,6 +344,11 @@ impl TabState {
         let mut retargeted = false;
         match self.panels.iter_mut().find(|open| open.id() == id) {
             Some(open) => {
+                // An open tool stays one (`existing`).
+                let panel = PanelTab {
+                    tool: open.tool || panel.tool,
+                    ..panel
+                };
                 retargeted = *open != panel;
                 *open = panel;
             }
@@ -347,6 +356,15 @@ impl TabState {
         }
         self.select(&id);
         retargeted
+    }
+
+    /// Tab `to` replaced tool `from` in its place, so it is one too.
+    pub fn inherit_tool(&mut self, from: &str, to: &str) {
+        if self.panels.iter().any(|tab| tab.id() == from && tab.tool)
+            && let Some(tab) = self.panels.iter_mut().find(|tab| tab.id() == to)
+        {
+            tab.tool = true;
+        }
     }
 
     /// A timeline action replaces the details links opened, never the
@@ -798,6 +816,7 @@ mod tests {
             channel: "alpha".into(),
             target: "https://github.com/block/buzz".into(),
             root: None,
+            tool: false,
         });
         state.pane_open = false;
         state.retire_details();
