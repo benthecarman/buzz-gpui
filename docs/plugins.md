@@ -828,8 +828,8 @@ passes a function, or reaches into the app, it works differently:
 - **Views stay open while their page is hidden.** A plugin page; the
   agent tab shown on the Agents page or in an agent's profile; the
   Agents page's provider and New agent dialogs; the panel tabs and
-  drawer of the conversation Messages or Me shows; and the accessories
-  above those pages' composers, and a plugin's capture in them
+  drawer of the conversation Messages or Me shows; the Inbox and Drafts
+  readers; and the accessories above those pages' and readers' composers, and a plugin's capture in them
   (`composer/capture`), stay open when you go elsewhere, and are
   shown again as they were. A panel beside the page (an `appLauncher`'s,
   or one opened outside a conversation) stays open as you move between
@@ -840,8 +840,10 @@ passes a function, or reaches into the app, it works differently:
 
 - **A composer outlasts its conversation in tabs and the media review.**
   When a conversation open as a tab is archived or left, or the message
-  a media review shows is deleted, its composer and accessories stay
-  open until the tab or review closes; buzz-app replaces them with an
+  a media review shows is deleted, loses that attachment in an edit, or
+  its conversation is archived, its composer and accessories stay open
+  until the tab or review closes (a review that opens on an attachment
+  no longer there still mounts them); buzz-app replaces them with an
   "unavailable" notice and closes the accessories. Opening a media
   review from Messages also leaves the side tabs, panels and the panel
   beside the page open, which buzz-app closes until the review ends.

@@ -515,8 +515,29 @@ fn removable(plugin: &str, url: &str) -> bool {
     removable
 }
 
+/// The composers `plugin` was handed through its tools: a restart remakes
+/// those tools, which ends their captures.
+pub fn tool_composers(plugin: &str) -> std::collections::HashSet<u64> {
+    COMPOSERS.with_borrow(|composers| {
+        composers
+            .iter()
+            .filter(|(_, grant)| grant.plugin == plugin && grant.tool.is_some())
+            .map(|(id, _)| *id)
+            .collect()
+    })
+}
+
 pub fn forget(plugin: &str) {
     crate::shortcuts::forget_external(plugin);
+    // Its tool's popover goes with the tool, which a new run makes anew.
+    TOOL_POPOVER.with_borrow_mut(|open| {
+        if open
+            .as_ref()
+            .is_some_and(|(_, key, _)| key.starts_with(&format!("{plugin}/")))
+        {
+            *open = None;
+        }
+    });
     COMPOSERS.with_borrow_mut(|composers| composers.retain(|_, grant| grant.plugin != plugin));
     // A new run builds its tools anew, with grants of its own.
     let prefix = format!("{plugin}/");

@@ -326,6 +326,11 @@ impl ExternalView {
     }
 
     /// Keeps `route` as the page's route, as its next `view/open` says.
+    /// The composer a capture or popover belongs to.
+    pub(super) fn composer_id(&self) -> Option<u64> {
+        self.extra.get("composer").and_then(Value::as_u64)
+    }
+
     /// It forgets its route, which a page at another version does not
     /// take (`routeVersion`).
     pub(super) fn clear_route(&mut self) {

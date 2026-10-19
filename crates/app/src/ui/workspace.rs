@@ -1456,6 +1456,8 @@ impl Workspace {
 
     fn apply(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.drawer_open = false;
+        // Every visit closes a media review (`mediaReviewForDestination`).
+        super::media::dismiss_review(window, cx);
         self.begin_attempt();
         self.publish_visit();
         self.settling = None;

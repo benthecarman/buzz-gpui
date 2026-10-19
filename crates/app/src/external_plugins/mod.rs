@@ -1255,6 +1255,8 @@ impl ExternalPlugins {
         };
         // The old run's services went with it (`start` said so).
         plugin.services.clear();
+        // Captures begun through the old run's tools end with them.
+        let tool_composers = contribute::tool_composers(&id);
         // Renderer answers and marks belong to the old run.
         contribute::forget(&id);
         // A new run registers its renderers and actions last, as a reload
@@ -1287,7 +1289,12 @@ impl ExternalPlugins {
                 // A view of what this run no longer declares closes as it is
                 // taken away; this run never hears of it.
                 let (kind, key) = (view.read(cx).kind(), view.read(cx).contribution_key());
-                if declared(kind, &key, cx) == Some(false) {
+                let ended_capture = kind == "capture"
+                    && view
+                        .read(cx)
+                        .composer_id()
+                        .is_some_and(|composer| tool_composers.contains(&composer));
+                if ended_capture || declared(kind, &key, cx) == Some(false) {
                     let view_id = view.read(cx).view_id().to_owned();
                     if let Some(plugin) = cx.global_mut::<Self>().by_id_mut(&id) {
                         plugin.views.remove(&view_id);
@@ -2829,9 +2836,10 @@ fn declared(kind: &str, key: &str, cx: &App) -> Option<bool> {
         "page" => pages::spec(pages::Page::new(intern(key.to_owned())), cx).is_some(),
         "panel" => channel_panels::get(key, cx).is_some(),
         "settings" => crate::ui::settings::cards::get(key, cx).is_some(),
-        "accessory" | "toolPopover" | "reactionPicker" => crate::ui::composer_tools::listed(cx)
-            .iter()
-            .any(|(tool, _, _)| *tool == key),
+        // A restart remakes every composer tool and accessory, so the old
+        // views go and new ones open.
+        "accessory" | "toolPopover" => false,
+        "reactionPicker" => crate::ui::emoji_picker::picks_reactions(key, cx),
         _ => return None,
     })
 }
