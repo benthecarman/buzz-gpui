@@ -445,8 +445,9 @@ Composer tools and accessories are made anew: their views, tool popovers and
 captures begun through a tool close without `view/close`, and each accessory
 opens again as a new view (a new id and `view/open`) when its composer is
 next mounted: at once for a composer that is shown or kept out of sight (an
-unselected tab, closed comments), and when you return for one on a hidden
-page. A
+unselected conversation or thread tab, closed comments), when its tab is next
+selected for one inside a plugin panel tab not selected, and when you return
+for one on a hidden page. A
 reaction picker opens again while its tool still picks reactions, and tool
 states start over.
 
