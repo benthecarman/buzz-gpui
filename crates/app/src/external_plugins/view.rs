@@ -1199,7 +1199,7 @@ pub fn route_valid(params: &Value) -> bool {
             Value::Object(fields) => {
                 fields.len() <= 128
                     && fields.iter().all(|(key, item)| {
-                        key.chars().count() <= 128 && walk(item, depth + 1, nodes)
+                        key.encode_utf16().count() <= 128 && walk(item, depth + 1, nodes)
                     })
             }
             _ => true,

@@ -56,6 +56,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// `maxLength` of the editor.
+/// Why a mention could not be inserted: someone is no longer available.
+pub(crate) const UNAVAILABLE_MEMBER: &str =
+    "A team member is no longer available. Refresh choices before trying again.";
 const MAX_CHARS: usize = 16_000;
 /// Drafts are saved this long after the last keystroke.
 const DRAFT_DELAY: Duration = Duration::from_millis(400);
@@ -620,6 +623,11 @@ impl Composer {
     /// A send is in flight, so the draft cannot change.
     pub fn sending(&self) -> bool {
         self.sending
+    }
+
+    /// The error the composer shows now, if any.
+    pub fn error_text(&self) -> Option<String> {
+        self.error.as_ref().map(ToString::to_string)
     }
 
     #[allow(dead_code)]
@@ -2438,6 +2446,16 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // Everyone must still be mentionable in this conversation
+        // (`mentionAdmission`); a draft not in one yet keeps its own roster.
+        if self.editing.is_none()
+            && !self.channel.is_empty()
+            && recipients.iter().any(|(key, _, _)| !self.admits(key, cx))
+        {
+            self.error = Some(UNAVAILABLE_MEMBER.into());
+            cx.notify();
+            return false;
+        }
         let chosen = self.recipients(cx);
         let added = recipients
             .iter()

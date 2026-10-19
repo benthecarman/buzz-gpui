@@ -163,7 +163,7 @@ impl Scope {
 pub fn init(cx: &mut App) {
     super::cards::register(
         super::cards::SettingsCard {
-            key: "buzz.pairing/pairing",
+            key: "buzz.pairing/mobile",
             title: "Pair mobile",
             // A contributed card without its own icon.
             icon: Some(IconName::ChatCircle),

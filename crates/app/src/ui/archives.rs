@@ -50,8 +50,10 @@ pub fn ensure(community: &Entity<Community>, again: bool, cx: &mut App) {
         .try_global::<Archives>()
         .and_then(|archives| archives.0.get(&key))
         .map(|entry| (entry.status, entry.generation));
+    // A read from before a retry or cache clear is dropped, in flight or
+    // not (`clear()` aborts it).
     let stale = current.is_some_and(|(_, read)| read != generation);
-    if current.is_some_and(|(status, _)| status == Status::Loading)
+    if (current.is_some_and(|(status, _)| status == Status::Loading) && !stale)
         || (current.is_some() && !again && !stale)
     {
         return;
@@ -117,22 +119,27 @@ pub fn ensure(community: &Entity<Community>, again: bool, cx: &mut App) {
                     error: None,
                     generation,
                 });
-            entry.read_at = Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |since| since.as_millis() as u64),
-            );
+            // A newer read replaced this one.
+            if entry.generation != generation {
+                return;
+            }
             match result {
                 Ok(snapshot) => {
                     entry.snapshot = snapshot;
                     entry.status = Status::Ready;
                     entry.error = None;
+                    entry.read_at = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |since| since.as_millis() as u64),
+                    );
                 }
                 // A failed read shows nothing as archived (fail open).
                 Err(error) => {
                     entry.snapshot = ArchiveSnapshot::default();
                     entry.status = Status::Error;
                     entry.error = Some(error);
+                    entry.read_at = None;
                 }
             }
             cx.refresh_windows();
@@ -173,7 +180,10 @@ pub fn snapshot_json(community: &Entity<Community>, cx: &App) -> serde_json::Val
         Some(Status::Ready) => "ready",
         Some(Status::Error) => "error",
     };
-    let head = entry.and_then(|entry| entry.snapshot.head.as_ref());
+    // What a read found is shown with it only once it finished; an error
+    // carries only its message (`identity-archives.ts`).
+    let ready = entry.filter(|entry| entry.status == Status::Ready);
+    let head = ready.and_then(|entry| entry.snapshot.head.as_ref());
     serde_json::json!({
         "status": status,
         // Only a finished read lists anyone (`archived: []` while loading).
@@ -183,17 +193,22 @@ pub fn snapshot_json(community: &Entity<Community>, cx: &App) -> serde_json::Val
             .unwrap_or_default(),
         "eventId": head.map(|(_, id)| id),
         "createdAt": head.map(|(at, _)| at),
-        "readAt": entry.and_then(|entry| entry.read_at),
-        "error": entry.and_then(|entry| entry.error.clone()),
+        "readAt": ready.and_then(|entry| entry.read_at),
+        "error": entry
+            .filter(|entry| entry.status == Status::Error)
+            .and_then(|entry| entry.error.clone()),
     })
 }
 
-/// The read state, if a read was asked for.
+/// The read state, if a read was asked for since the last retry or
+/// cache clear.
 pub fn status(community: &Entity<Community>, cx: &App) -> Option<Status> {
     let key = key(community, cx);
+    let generation = community.read(cx).session.generation();
     cx.try_global::<Archives>()?
         .0
         .get(&key)
+        .filter(|entry| entry.generation == generation)
         .map(|entry| entry.status)
 }
 

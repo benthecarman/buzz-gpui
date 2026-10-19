@@ -91,7 +91,8 @@ impl Section {
     /// community.
     fn listed(self, has_community: bool, cx: &App) -> bool {
         match self {
-            Self::CustomEmoji => has_community,
+            // The Emoji plugin's card (`buzz.emoji/custom-emoji`).
+            Self::CustomEmoji => has_community && crate::plugins::enabled("buzz.emoji"),
             // An open card stays while its check is pending.
             Self::Card(key) => cards::get(key, cx).is_some_and(|card| {
                 (has_community || matches!(card.placement, cards::CardPlacement::Group(_)))

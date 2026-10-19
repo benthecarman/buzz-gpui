@@ -145,8 +145,7 @@ pub fn create(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
 }
 
 /// Refuses a lineup with an agent a template may not add: not one of
-/// your agents or an agent in a channel you are in, or archived, or
-/// while the archive is unknown.
+/// your agents here, or archived, or while the archive is unknown.
 fn lineup_checked(
     community: Entity<crate::community::Community>,
     agents: Vec<String>,
@@ -171,17 +170,9 @@ fn lineup_checked(
                         .to_owned(),
                 ));
             }
+            // Your agents here, none archived (`templateAgentChoices`).
             let rules = crate::ui::me::recipients::rules(&community, cx);
-            let snapshot = &community.read(cx).snapshot;
-            let available = |key: &String| {
-                rules.selectable.contains(key)
-                    || (!rules.archived.contains(key)
-                        && snapshot.profiles.get(key).is_some_and(|profile| profile.is_agent)
-                        && snapshot
-                            .channels
-                            .iter()
-                            .any(|channel| channel.members.contains(key)))
-            };
+            let available = |key: &String| rules.selectable.contains(key);
             let unavailable: Vec<String> = agents
                 .iter()
                 .filter(|key| !available(key))

@@ -193,7 +193,12 @@ pub fn resource_source(uri: &str, label: &str) -> Option<(String, String)> {
         .to_string();
     let linkable = buzz_relay_client::projects::EntityRoute::parse_link(uri).is_some()
         || buzz_relay_client::parse_buzz_link(uri).is_some()
-        || matches!(url::Url::parse(uri), Ok(url) if matches!(url.scheme(), "https" | "http"));
+        // A web link as `safeLinkUrl` gives it back: no credentials, and
+        // written as its normal form (`composerLinkUrl(uri) === uri`).
+        || matches!(url::Url::parse(uri), Ok(url) if matches!(url.scheme(), "https" | "http")
+            && url.as_str() == uri
+            && url.username().is_empty()
+            && url.password().is_none());
     if text.is_empty() || !linkable || uri.contains(char::is_whitespace) || uri.contains(')') {
         return None;
     }
@@ -271,7 +276,10 @@ pub fn insert_resource(
         let links = state
             .tokens()
             .iter()
-            .filter(|span| span.token().id().starts_with("buzz:"))
+            .filter(|span| {
+                let id = span.token().id();
+                id.starts_with("buzz:") || id.starts_with("https:") || id.starts_with("http:")
+            })
             .count();
         (state.value().to_string(), state.selected_range(), links)
     };

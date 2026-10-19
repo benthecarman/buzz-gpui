@@ -1596,7 +1596,12 @@ pub fn insert_mentions(
     if inserted {
         Ok(Value::Null)
     } else {
-        Err((3, "Choose at most 32 recipients".to_owned()))
+        // The composer's own reason: someone not mentionable, or too many.
+        let reason = composer
+            .read(cx)
+            .error_text()
+            .unwrap_or_else(|| "Choose at most 32 recipients".to_owned());
+        Err((3, reason))
     }
 }
 

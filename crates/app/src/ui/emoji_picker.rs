@@ -1502,8 +1502,30 @@ impl EmojiPicker {
             return Some(view.clone());
         }
         let picker = cx.entity().downgrade();
+        // A `:shortcode:` the community's catalog has is that custom
+        // emoji (`catalogEmoji`), so it toggles the same reaction.
         let select: Select = Rc::new(move |emoji, _, cx| {
-            let _ = picker.update(cx, |_, cx| cx.emit(Picked(Pick::Unicode(emoji))));
+            let _ = picker.update(cx, |picker, cx| {
+                let custom = emoji
+                    .strip_prefix(':')
+                    .and_then(|rest| rest.strip_suffix(':'))
+                    .map(str::to_lowercase)
+                    .and_then(|code| {
+                        picker
+                            .community
+                            .read(cx)
+                            .snapshot
+                            .emoji
+                            .entries
+                            .iter()
+                            .find(|entry| entry.shortcode == code)
+                            .cloned()
+                    });
+                cx.emit(Picked(match custom {
+                    Some(custom) => Pick::Custom(custom),
+                    None => Pick::Unicode(emoji),
+                }))
+            });
         });
         let community = self.community.clone();
         let view = (winner.build)(select, &community, window, cx);

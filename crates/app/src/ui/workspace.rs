@@ -853,12 +853,8 @@ impl Workspace {
             );
             if self.history.push(here) {
                 // A visit of the user's own supersedes one still opening.
-                if self.settling.is_some() || self.checking.is_some() {
-                    self.attempts += 1;
-                    self.attempt_started = std::time::Instant::now();
-                    self.settling = None;
-                    self.checking = None;
-                    self.failure = None;
+                if self.visit().1 {
+                    self.begin_attempt();
                 }
                 self.enter_visit(cx);
             }
@@ -1623,7 +1619,7 @@ impl Workspace {
         if listed {
             self.navigate(target, window, cx);
         } else {
-            self.attempts += 1;
+            self.begin_attempt();
             self.pending = Some(target);
             self.pending_listing = true;
             self.arm_open_timeout(false, cx);

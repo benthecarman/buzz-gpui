@@ -940,7 +940,16 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
         Some("settings") => Place::Settings(match text(params, "section") {
             None => Section::default_for(AppState::current(cx).is_some()),
             Some("profile") => Section::Profile,
-            Some("custom-emoji") => Section::CustomEmoji,
+            // The Emoji plugin's card, gone while Emoji is off.
+            Some("custom-emoji" | "buzz.emoji/custom-emoji") => {
+                if !crate::plugins::enabled("buzz.emoji") {
+                    return Err((
+                        MISSING,
+                        "Settings has no section buzz.emoji/custom-emoji".to_owned(),
+                    ));
+                }
+                Section::CustomEmoji
+            }
             Some("communities") => Section::Communities,
             Some("appearance") => Section::Appearance,
             Some("notifications") => Section::Notifications,
@@ -987,6 +996,21 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
             // A route version goes with route params (`route.version`).
             if version.is_some() && route.is_none() {
                 return Err(invalid("version is given without params"));
+            }
+            // The whole target, as buzz-app keeps it, fits in 8 KiB.
+            if let (Some(route), Some((plugin, page))) = (route, key.split_once('/')) {
+                let target = json!({
+                    "version": 1,
+                    "kind": "page",
+                    "pluginId": plugin,
+                    "pageId": page,
+                    "route": { "version": version.unwrap_or(1), "params": route },
+                });
+                if target.to_string().len() > 8_192 {
+                    return Err(invalid(
+                        "params must be JSON of at most 8 KiB, 8 levels and 1024 values",
+                    ));
+                }
             }
             // Messages' version-1 placeholders open their own pages now.
             if key == crate::ui::pages::Page::MESSAGES.key() && version.is_none_or(|v| v == 1) {
@@ -1080,7 +1104,7 @@ fn place_json(target: &Target, cx: &App) -> Value {
             "to": "settings",
             "section": match section {
                 Section::Profile => "profile",
-                Section::CustomEmoji => "custom-emoji",
+                Section::CustomEmoji => "buzz.emoji/custom-emoji",
                 Section::Communities => "communities",
                 Section::Appearance => "appearance",
                 Section::Notifications => "notifications",
@@ -2435,7 +2459,14 @@ pub fn contributions(cx: &App) -> Value {
                 CardVisibility::Pending => "pending",
                 CardVisibility::Error => "error",
             },
-        })).collect::<Vec<_>>(),
+        }))
+        // The Emoji plugin's card, a section of Buzz's own here.
+        .chain(crate::plugins::enabled("buzz.emoji").then(|| json!({
+            "key": "buzz.emoji/custom-emoji",
+            "title": "Custom emoji",
+            "visibility": "visible",
+        })))
+        .collect::<Vec<_>>(),
         "accountActions": crate::ui::account_actions::all(cx).iter().map(|action| json!({
             "key": action.key,
             "title": action.title.to_string(),
@@ -2664,7 +2695,12 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
         text(params, "page"),
     ) {
         (Some(_), _, _) => {
-            let place = place_of(params, cx).map_err(as_invalid)?;
+            // A well-formed place Buzz lacks is accepted, and its click
+            // fails as the visit presents, as buzz-app's would.
+            let place = match place_of(params, cx) {
+                Err((MISSING, _)) => unresolved(params),
+                place => place.map_err(as_invalid)?,
+            };
             // A conversation must be one you are in, in that community
             // (`notificationAuthorized`).
             if let Place::Conversation { channel, .. } = &place {
@@ -2695,13 +2731,16 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
             }
         }
         (None, None, Some(key)) => {
-            let spec = crate::ui::pages::all(cx)
-                .into_iter()
-                .find(|spec| spec.page.key() == key)
-                .ok_or_else(|| invalid(format!("There is no page {key}")))?;
-            Place::Page(spec.page)
+            let request = json!({ "to": "page", "page": key });
+            match place_of(&request, cx) {
+                Err((MISSING, _)) => unresolved(&request),
+                place => place.map_err(as_invalid)?,
+            }
         }
-        (None, None, None) => Place::Page(crate::ui::pages::Page::MESSAGES),
+        // Every notification opens something (`parseOpenTarget`).
+        (None, None, None) => {
+            return Err(invalid("a notification needs to, channel or page"));
+        }
     };
     let target = Target {
         community: community.map(|community| community.read(cx).origin.to_string()),
