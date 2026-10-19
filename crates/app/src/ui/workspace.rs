@@ -171,6 +171,8 @@ pub struct Workspace {
 struct Held {
     url: String,
     viewer: Option<String>,
+    /// The community selected when it first could be bound to one.
+    community: Option<String>,
     /// It came from outside the window.
     ingress: bool,
     /// It was reported unavailable, which leaves it to Retry navigation.
@@ -394,13 +396,32 @@ impl Workspace {
             self.community = current;
             self.load_sidebar_view(cx);
         }
-        // A link held for an identity is dropped if another one arrived,
-        // and opened once a community is ready.
-        if let Some(held) = &self.held
-            && held.viewer.is_some()
-            && held.viewer != viewer
-        {
-            self.held = None;
+        // A link held for an identity, or bound to the community first
+        // selected, is denied once another one is (`flush`); an
+        // invitation binds to no community.
+        let selected = self
+            .community
+            .as_ref()
+            .map(|community| community.read(cx).origin.to_string());
+        let denied = self.held.as_mut().is_some_and(|held| {
+            let invite = matches!(deep_links::parse(&held.url), Some(Link::Join { .. }));
+            if !invite && held.community.is_none() {
+                held.community = selected.clone();
+            }
+            (held.viewer.is_some() && held.viewer != viewer)
+                || (!invite && held.community.is_some() && held.community != selected)
+        });
+        if denied {
+            let ingress = self.held.take().is_some_and(|held| held.ingress);
+            if ingress {
+                self.begin_attempt();
+                self.publish_visit();
+                self.failure = Some(Failed {
+                    target: None,
+                    reason: Reason::Denied,
+                    ingress,
+                });
+            }
         }
         // One from outside is asked again once the identity is read,
         // which reports it unavailable without a community.
@@ -1845,23 +1866,25 @@ impl Workspace {
                 self.held = Some(Held {
                     url: url.to_string(),
                     viewer: None,
+                    community: None,
                     ingress,
                     reported: false,
                 });
             }
-            // While the identity is still read it waits; otherwise it is
-            // unavailable, kept for Retry navigation (`deep-links.ts`).
+            // Until there is an identity it waits; then, without a
+            // community, it is unavailable, kept for Retry navigation
+            // (`deep-links.ts`).
             Some(Link::Conversation { .. } | Link::Entity(_))
                 if viewer.is_none() || self.community.is_none() =>
             {
-                let loading = matches!(cx.global::<AppState>().identity, IdentityState::Loading);
                 let mut held = Held {
                     url: url.to_string(),
-                    viewer,
+                    viewer: viewer.clone(),
+                    community: None,
                     ingress,
                     reported: false,
                 };
-                if loading || !ingress {
+                if viewer.is_none() || !ingress {
                     self.held = Some(held);
                     return;
                 }

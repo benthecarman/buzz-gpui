@@ -411,7 +411,10 @@ impl ExternalView {
             this.update(cx, |view, cx| view.retarget(target.to_owned(), push, cx));
             return true;
         }
-        let (channel, root) = (opening.channel.clone(), opening.root.clone());
+        // A push opens for the conversation alone, without the thread
+        // (`push`: `{channelId, panel, target}`).
+        let channel = opening.channel.clone();
+        let root = (!push).then(|| opening.root.clone()).flatten();
         let close = (!push).then(|| opening.close.clone());
         let (key, target) = (panel.key, target.to_owned());
         crate::ui::navigation::with_workspace(cx, move |workspace, window, cx| {

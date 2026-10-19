@@ -393,13 +393,10 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
             &c,
         );
     }
-    // A contributed link renderer outranks the bundled one. It draws the
-    // chip's content; Buzz keeps the anchor, its menu and hover cards.
-    let custom = super::renderers::link(url, cx);
     // Links Buzz does not draw itself, such as `buzz://` entities, are
     // plain unless a renderer took them.
     let Some(kind) = kind else {
-        let Some(custom) = custom else {
+        let Some(custom) = super::renderers::link(url, cx) else {
             return plain_anchor(
                 chip.id,
                 url,
@@ -486,6 +483,13 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
                     && c.members.iter().any(|m| m == directory.viewer())
             })
     });
+    // A contributed link renderer outranks the bundled one, except for a
+    // Session chip, which is always Buzz's (`MessageLink` `anchor`). It
+    // draws the chip's content; Buzz keeps the anchor, its menu and hover
+    // cards.
+    let custom = (!session_chip)
+        .then(|| super::renderers::link(url, cx))
+        .flatten();
     let preview = link
         .as_ref()
         .and_then(|l| l.message.map(|m| (l.channel.clone(), m)));

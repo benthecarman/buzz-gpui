@@ -162,15 +162,22 @@ impl Workspace {
 
     /// `view` is panel tab `id` but not the tab shown, on its page or
     /// because that page is not shown, so it may not open or push
-    /// (`panelActive`). A drawer or a companion beside a page is shown.
+    /// (`panelActive`), nor while the community's relay is not ready. A
+    /// drawer or a companion beside a page is shown.
     pub(crate) fn panel_tab_inactive(&self, id: &str, view: EntityId, cx: &App) -> bool {
+        let offline = !self.community.as_ref().is_some_and(|community| {
+            matches!(
+                community.read(cx).snapshot.status,
+                buzz_relay_client::SessionStatus::Ready
+            )
+        });
         if matches!(self.tab_views.get(id), Some(TabView::Panel(shown)) if shown.entity_id() == view)
         {
-            return self.page != Page::MESSAGES || self.tabs(cx).selected != id;
+            return offline || self.page != Page::MESSAGES || self.tabs(cx).selected != id;
         }
         self.me_work(cx)
             .and_then(|work| work.read(cx).panel_view_unselected(id, view, cx))
-            .is_some_and(|unselected| self.page != Page::ME || unselected)
+            .is_some_and(|unselected| offline || self.page != Page::ME || unselected)
     }
 
     /// Me's open conversation board, if Me has one.
@@ -219,7 +226,6 @@ impl Workspace {
         };
         let (old_id, new_id) = (format!("{panel}:{old}"), format!("{panel}:{new}"));
         if state.panels.iter().any(|tab| tab.id() == new_id) {
-            state.inherit_tool(&old_id, &new_id);
             state.panels.retain(|tab| tab.id() != old_id);
             if state.selected == old_id {
                 state.selected = new_id;
@@ -1374,7 +1380,8 @@ impl Workspace {
     }
 
     /// [`Self::open_panel_at`] for a panel replacing tab `old` in its
-    /// place (`panel/open`): one replacing a tool is one too.
+    /// place (`panel/open`): one replacing a tool is one too, and one
+    /// already open is only shown, as it is (`existing ?? ...`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_panel_replacing(
         &mut self,
@@ -1386,10 +1393,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let new = format!("{key}:{target}");
+        if self.page == Page::ME {
+            if let Some(work) = self.me_work(cx)
+                && work.read(cx).has_panel_tab(&new, cx)
+            {
+                work.update(cx, |work, cx| work.show_panel_tab(&new, window, cx));
+                return true;
+            }
+        } else if self.page == Page::MESSAGES
+            && self.tabs(cx).panels.iter().any(|tab| tab.id() == new)
+        {
+            let _ = self.update_tabs(cx, |state| state.select(&new));
+            self.focus_tab(&new, window, cx);
+            return true;
+        }
         if !self.open_panel_at(Some(key), target, channel, root, window, cx) {
             return false;
         }
-        let new = format!("{key}:{target}");
         match self.page {
             Page::ME => {
                 if let Some(work) = self.me_work(cx) {

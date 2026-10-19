@@ -214,6 +214,17 @@ impl SessionWork {
         this
     }
 
+    /// Shows panel tab `id`, as it is.
+    pub(crate) fn show_panel_tab(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_tabs(cx, |state| state.select(id));
+        self.focus_tab(id, window, cx);
+    }
+
+    /// Panel tab `id` is open here.
+    pub(crate) fn has_panel_tab(&self, id: &str, cx: &App) -> bool {
+        self.tabs(cx).panels.iter().any(|tab| tab.id() == id)
+    }
+
     /// When `view` is panel tab `id` here, whether that tab is not the
     /// one selected.
     pub(crate) fn panel_view_unselected(
@@ -302,7 +313,6 @@ impl SessionWork {
         }
         self.update_tabs(cx, |state| {
             if state.panels.iter().any(|tab| tab.id() == new_id) {
-                state.inherit_tool(&old_id, &new_id);
                 state.panels.retain(|tab| tab.id() != old_id);
             } else if let Some(tab) = state.panels.iter_mut().find(|tab| tab.id() == old_id) {
                 tab.target = new.to_owned();

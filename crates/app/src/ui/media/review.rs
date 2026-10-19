@@ -526,6 +526,10 @@ impl Review {
             subscriptions.push(cx.subscribe(
                 &picker,
                 |this, _, super::super::emoji_picker::Picked(pick), cx| {
+                    // A closed picker sends nothing (`reaction/select`).
+                    if !this.picker_open {
+                        return;
+                    }
                     this.picker_open = false;
                     this.react(&pick.text(), cx);
                 },
@@ -534,6 +538,9 @@ impl Review {
             subscriptions.push(cx.subscribe(
                 &picker,
                 |this, _, super::super::emoji_picker::PickedAs(text, _), cx| {
+                    if !this.picker_open {
+                        return;
+                    }
                     this.picker_open = false;
                     this.react(text, cx);
                 },
