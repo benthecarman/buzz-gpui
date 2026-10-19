@@ -273,6 +273,9 @@ pub struct Actions {
     /// The page's loaded row by id, while the page lasts: a deleted
     /// message is no longer found.
     pub find_row: Option<FindRow>,
+    /// A reader's conversation offers no Reply (`ChannelPreview` has no
+    /// `onReply`).
+    pub no_reply: bool,
 }
 
 /// A page's loaded row by id.
@@ -1410,7 +1413,7 @@ fn action_bar(item: &Item, rows: &Rc<Rows>, width: f32, cx: &App) -> impl IntoEl
             );
         }
     }
-    if rows.actions.on_command.is_some() {
+    if rows.actions.on_command.is_some() && !rows.actions.no_reply {
         let unavailable = !delivered
             || rows.archived()
             || (rows.channel.is_some() && (!rows.listed() || rows.read_only()));
@@ -1738,7 +1741,9 @@ fn menu_entries(row: &MessageRow, rows: &Rows) -> Vec<Entry> {
     }
     // An agent's message opens its profile on its activity.
     let author = row.author.to_hex();
+    // Not where links open nowhere (`canOpenLink` unset).
     if rows.actions.on_command.is_some()
+        && !links_closed()
         && (row.is_agent_envelope() || rows.names().is_agent(&author))
     {
         entries.push(Entry {

@@ -218,10 +218,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // A plugin page shows the dock only when it opts in.
-        if pages::solo(self.page, cx) {
-            return page;
-        }
+        // Every page shows the dock: one that does not place the companion
+        // itself gets the shell's (`pageOwnsCompanion`).
         let companion = self.companion_panel(window, cx);
         let weak = cx.entity().downgrade();
         Dock {

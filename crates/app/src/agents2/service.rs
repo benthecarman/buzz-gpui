@@ -1299,8 +1299,12 @@ impl Agents2 {
                 // again when it is back (`agentLibrary.clear()`,
                 // `reconnect()`).
                 let cleared = self.listed.read_before(origin, session);
-                if dropped || cleared {
+                if cleared {
+                    self.listed.set_cleared(origin, session);
+                } else if dropped {
                     self.listed.set_stale(origin);
+                }
+                if dropped || cleared {
                     cx.notify();
                 }
                 if (recovered || cleared) && *live {

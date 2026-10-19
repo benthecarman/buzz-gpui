@@ -3,7 +3,7 @@
 //! own working agents on the right, as an avatar stack that opens a
 //! "Working now" list.
 
-use super::agent_activity::row::AgentActivityRow;
+use super::agent_activity::row::{Action, AgentActivityRow};
 use super::identity::Names;
 use super::{media, navigation};
 use crate::agent_activity::current::{CurrentActivity, Root};
@@ -242,6 +242,8 @@ pub struct AgentChooser {
     /// A click on a single agent opens its activity panel instead of the
     /// list (`clickOpensPanel`), as buzz-app's personal workspace does.
     pub click_opens_panel: bool,
+    /// In a reader, where nothing opens: neither a thread nor activity.
+    pub closed: bool,
     /// The list was opened from the keyboard and has focus.
     keyboard: bool,
     /// Focus goes back to the stack on the next frame.
@@ -260,6 +262,7 @@ impl AgentChooser {
             open: false,
             hovered: (false, false),
             click_opens_panel: false,
+            closed: false,
             keyboard: false,
             refocus: false,
             trigger_focus: cx.focus_handle(),
@@ -272,7 +275,7 @@ impl AgentChooser {
     /// panels. Unknown or several scopes open channel activity.
     fn direct_target(&self) -> Option<String> {
         match self.rows.as_slice() {
-            [row] if self.click_opens_panel => Some(row.activity.clone()),
+            [row] if self.click_opens_panel && !self.closed => Some(row.activity.clone()),
             _ => None,
         }
     }
@@ -411,16 +414,20 @@ impl AgentChooser {
                     row.name
                 )
                 .into(),
-                on_open: Some(Rc::new(move |window, cx| {
-                    let _ = chooser.update(cx, |this, cx| this.close(cx));
-                    if let Some(on_open) = &on_open {
-                        on_open(target, window, cx);
-                    }
-                })),
-                on_open_activity: Some(Rc::new(move |window, cx| {
-                    let _ = viewer.update(cx, |this, cx| this.close(cx));
-                    navigation::open_url(&activity, window, cx);
-                })),
+                on_open: (!self.closed).then(|| -> Action {
+                    Rc::new(move |window, cx| {
+                        let _ = chooser.update(cx, |this, cx| this.close(cx));
+                        if let Some(on_open) = &on_open {
+                            on_open(target, window, cx);
+                        }
+                    })
+                }),
+                on_open_activity: (!self.closed).then(|| -> Action {
+                    Rc::new(move |window, cx| {
+                        let _ = viewer.update(cx, |this, cx| this.close(cx));
+                        navigation::open_url(&activity, window, cx);
+                    })
+                }),
             }
         });
         Popover::new()

@@ -498,6 +498,8 @@ impl ChannelPage {
         self.link_mode = crate::ui::links::LinkMode::Closed;
         self.message_actions
             .update(cx, |actions, cx| actions.without_threads(cx));
+        // Nor its working agents' threads or activity.
+        self.activity.update(cx, |chooser, _| chooser.closed = true);
     }
 
     /// The composer itself, for hosts that follow its sends (Inbox drafts).

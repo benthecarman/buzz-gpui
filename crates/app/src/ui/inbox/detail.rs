@@ -197,7 +197,7 @@ impl InboxDetail {
                         window,
                         cx,
                     );
-                    panel.link_mode = crate::ui::links::LinkMode::Closed;
+                    panel.as_reader(cx);
                     panel
                 });
                 self.reader = Some(Reader::Thread(panel));

@@ -113,7 +113,7 @@ pub struct ThreadPanel {
     channel: String,
     root_id: EventId,
     /// How links in its rows open: a reader's open nowhere in Buzz.
-    pub link_mode: crate::ui::links::LinkMode,
+    link_mode: crate::ui::links::LinkMode,
     view: ThreadView,
     snapshot: Arc<ThreadSnapshot>,
     entries: Vec<Entry>,
@@ -190,6 +190,13 @@ pub struct ThreadPanel {
 }
 
 impl ThreadPanel {
+    /// A reader's thread: links open nowhere in Buzz, nor do its working
+    /// agents' threads or activity (`onOpenLink={() => false}`).
+    pub fn as_reader(&mut self, cx: &mut Context<Self>) {
+        self.link_mode = crate::ui::links::LinkMode::Closed;
+        self.activity.update(cx, |chooser, _| chooser.closed = true);
+    }
+
     pub fn new(
         community: Entity<Community>,
         channel: String,

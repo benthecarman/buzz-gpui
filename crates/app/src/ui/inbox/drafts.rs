@@ -549,7 +549,7 @@ impl DraftDetail {
                         panel.require_ready_root = true;
                         // A reader's links open nowhere in Buzz
                         // (`onOpenLink={() => false}`).
-                        panel.link_mode = crate::ui::links::LinkMode::Closed;
+                        panel.as_reader(cx);
                         panel
                     });
                     let composer = panel.read(cx).composer_entity();

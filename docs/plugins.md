@@ -137,8 +137,8 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
 - A page's `placement` is `sidebar` (the default), `topbar` (`toolbar` is the
   same here) or `hidden`; one Buzz does not know is dropped, leaving the
   default. `primary: false` also keeps it out of navigation. `layout` is `document` (the default, padded) or
-  `workspace` (edge to edge). With `companion: true`, Buzz's dock shows the
-  companion beside the page, as buzz-app pages opt in. With `routes: true`, `ui/navigate` can open the page at `params` (any
+  `workspace` (edge to edge). Buzz's dock shows the companion beside every
+  page; `companion: true` is reported in `contributions/list`. With `routes: true`, `ui/navigate` can open the page at `params` (any
   JSON value but `null`, up to 8 KiB): its view's `view/open` carries `route`, and Buzz
   sends `page/route` with the `view`, `route` and visit `entry` when it changes. Back and
   Forward step through routes. `routeVersion` (default 1) says what the
@@ -486,7 +486,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `community/refresh` | `what`: `unread`, `inbox`, `reminders`, `emoji`, `hiddenDms` (the DMs you hid, `channelLifecycle.refreshVisibility`), `sidebar`, `channels` (the channel list, `channels.refreshList`), `roster` (read fresh from the relay's primary, `refreshRoster`), `agents` (your agent list, read again even once read, and the identity archive unless it was never read: `agentChoices.refresh`) or `kit` | `null`. Reads that view again, as its Retry does after an error. |
 | `community/list` | none | Your communities: `[{"name","relay","icon","selected"}]`. Buzz sends `communities/changed` with `communities`, the same list, when you join or leave one or select another. |
 | `community/client` | none | `communityReader.snapshot()`: `{"status","viewer","error","profile","communities","relayAvailable"}` (`relayAvailable` is always `true` here). `status` is `loading`, `ready` or `unavailable` (no identity yet, or one that could not be read, with `error`); `profile` is the personal profile new communities start from, `{"name","picture","about"}`; `communities` is `community/list`. Works in Personal space. Buzz sends `client/changed` with the same fields when they change. |
-| `community/retry` | none | `null`. Connects to the selected community again after a failure. |
+| `community/retry` | none | `null`. Connects to the selected community again after a failure; on a connected one, retries live updates and read sync (see How this differs from buzz-app). |
 | `community/clearCache` | none | `null`, after forgetting the conversations Buzz saved of the community, here and on disk, as Clear cache in Settings does. Open channels load again. |
 | `community/channels` | none | The selected community's channels: `[{"id","name","description","private","visibility","archived","kind","typeKnown","members","participants","labels","lastActivityAt","updatedAt","preview","readOnly","cached","hidden","creator","createdAt","parent"}]`, where `kind` is `stream`, `forum`, `dm` or `session`, and `visibility` is `public`, `private` or `null` while the relay has not said (`private` is then `false`) |
 | `channels/list` | none | `{"status","error","cached","channels","hiddenDms","hiddenStatus","hiddenError"}`: the channels as `community/channels` gives them, with how far the list got (`loading`, `ready` or `error`), whether it is this device's saved copy, and the DMs you hid with how far that read got. |
@@ -826,12 +826,14 @@ passes a function, or reaches into the app, it works differently:
   agent tab shown on the Agents page or in an agent's profile; the
   Agents page's provider and New agent dialogs; the panel tabs and
   drawer of the conversation Messages or Me shows; and the accessories
-  above those pages' composers stay open when you go elsewhere, and are
+  above those pages' composers, and a plugin's capture in them
+  (`composer/capture`), stay open when you go elsewhere, and are
   shown again as they were. A panel beside the page (an `appLauncher`'s,
   or one opened outside a conversation) stays open as you move between
   Messages or Me and other pages. buzz-app unmounts all of these with
-  their page and opens them afresh when you come back. A page hears
-  `page/route` when it is visited again.
+  their page and opens them afresh when you come back. A page with
+  `routes` or `handlesNavigation` hears `page/route` when it is visited
+  again; any page can follow visits with `navigation/watch`.
 
 - **Readers still open panels and the media review.** In the Inbox and
   Drafts readers and in media review comments, links open nowhere in
@@ -839,6 +841,15 @@ passes a function, or reaches into the app, it works differently:
   `panel/canOpen` and `ui/openPanel`, where buzz-app's `canOpen` and
   `open` answer `false`, and an image there opens the full media review,
   comments included, where buzz-app shows a bare viewer.
+
+- **A retry keeps a connected community's session.** `community/retry` on
+  a connected community leaves `status` at `ready` and keeps its channels,
+  watches, threads, unread counts and outbox; Buzz retries live updates,
+  the roster and read sync. buzz-app replaces the session, reporting
+  `connecting` with an empty session until it is ready again.
+  `generation` changes with every retry and cache clear, where buzz-app's
+  changes only when the session is replaced: not for a retry while
+  connecting, a retry of a saved snapshot, or a cache clear.
 
 - **Statuses are read for anyone.** `statuses/get` answers for every key
   asked about; buzz-app's `statuses.current` answers only for people

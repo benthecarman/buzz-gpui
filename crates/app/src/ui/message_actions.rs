@@ -103,6 +103,8 @@ pub struct MessageActions {
     /// The rows' thread opener, made once: it lives as long as this place,
     /// which is how a plugin accessory's `openThread` knows it retired.
     open_thread: Option<crate::ui::message::RowHandler>,
+    /// A reader's rows offer no Reply.
+    no_reply: bool,
     status: Option<SessionStatus>,
     _outbox: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -201,6 +203,7 @@ impl MessageActions {
             report_hidden: false,
             error: None,
             reaction_error: None,
+            no_reply: false,
             open_thread: hooks.open_thread.clone().map(|open| {
                 Rc::new(
                     move |row: &Arc<MessageRow>, window: &mut Window, cx: &mut App| {
@@ -234,6 +237,7 @@ impl MessageActions {
     /// Rows here open no thread (a reader's).
     pub fn without_threads(&mut self, cx: &mut Context<Self>) {
         self.open_thread = None;
+        self.no_reply = true;
         cx.notify();
     }
 
@@ -558,6 +562,7 @@ impl MessageActions {
         Actions {
             on_open_thread: self.open_thread.clone(),
             find_row: Some(self.hooks.find.clone()),
+            no_reply: self.no_reply,
             on_retry: Some(Rc::new(move |row, _, cx| {
                 let _ = retry.update(cx, |this, cx| {
                     let (session, id) = (this.session(cx), row.id);

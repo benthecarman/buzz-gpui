@@ -126,11 +126,13 @@ pub fn bubble(
         .zip(&names)
         .map(|(work, name)| avatar(name, &work.agent, &directory.profiles, &directory.media))
         .collect();
+    // Where links open nowhere, neither does the activity (`canOpen`).
+    let closed = crate::ui::links::mode() == crate::ui::links::LinkMode::Closed;
     let popover = {
         let (community, channel) = (bubbles.community.clone(), bubbles.channel.clone());
         move |_: &mut Window, cx: &mut App| -> AnyView {
             let (community, channel) = (community.clone(), channel.clone());
-            cx.new(|cx| BubblePopover::new(community, channel, id, cx))
+            cx.new(|cx| BubblePopover::new(community, channel, id, closed, cx))
                 .into()
         }
     };
@@ -180,6 +182,8 @@ pub struct BubblePopover {
     community: WeakEntity<Community>,
     channel: String,
     message: EventId,
+    /// Its agents' activity does not open (a reader's).
+    closed: bool,
     _observe: Vec<Subscription>,
 }
 
@@ -188,6 +192,7 @@ impl BubblePopover {
         community: WeakEntity<Community>,
         channel: String,
         message: EventId,
+        closed: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut observe = Vec::new();
@@ -201,6 +206,7 @@ impl BubblePopover {
             community,
             channel,
             message,
+            closed,
             _observe: observe,
         }
     }
@@ -298,7 +304,7 @@ impl Render for BubblePopover {
                         .size(AvatarSize::Small),
                 )
                 .child(text)
-                .when_some(target, |d, target| {
+                .when_some(target.filter(|_| !self.closed), |d, target| {
                     d.on_click(move |_, window, cx| {
                         crate::ui::navigation::open_url(&target, window, cx)
                     })

@@ -55,6 +55,14 @@ impl Listed {
         self.reading.remove(origin);
     }
 
+    /// The read no longer stands since the session's cache was cleared
+    /// in `session`: marked once, so the read that follows is left to
+    /// finish.
+    pub(super) fn set_cleared(&mut self, origin: &str, session: u64) {
+        self.set_stale(origin);
+        self.read_in.insert(origin.to_owned(), session);
+    }
+
     /// Whether the last read was made before the session's cache was
     /// cleared.
     pub(super) fn read_before(&self, origin: &str, session: u64) -> bool {
