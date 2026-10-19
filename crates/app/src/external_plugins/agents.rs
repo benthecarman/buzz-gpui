@@ -1277,7 +1277,24 @@ pub fn save(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>
         attention,
         restart,
     };
-    let task = agents2(cx)?.update(cx, |agents, cx| agents.save(&pubkey, change, cx));
+    let service = agents2(cx)?;
+    // A hosted agent's name and picture save through its provider.
+    let hosted = service.update(cx, |agents, cx| {
+        agents
+            .elsewhere(cx)
+            .iter()
+            .any(|agent| agent.pubkey == pubkey && crate::agents2::is_hosted(&agent.agent_type, cx))
+    });
+    let task = service.update(cx, |agents, cx| match hosted {
+        true => {
+            let settings = change.config.is_some()
+                || !change.attention.is_empty()
+                || change.attention_enabled.is_some()
+                || !change.restart.is_empty();
+            agents.save_hosted(&pubkey, change.name, change.picture, settings, cx)
+        }
+        false => agents.save(&pubkey, change, cx),
+    });
     Ok(cx.background_spawn(
         async move { task.await.map(|()| Value::Null).map_err(|error| (3, error)) },
     ))

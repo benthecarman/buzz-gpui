@@ -388,6 +388,8 @@ fn prepared(row: &MessageRow, directory: &Directory) -> Arc<Prepared> {
     directory.fingerprint.hash(&mut hasher);
     // Plugins' text renderers change what prose draws.
     super::renderers::text_generation().hash(&mut hasher);
+    // With Emoji off, custom emoji are plain text plugins may draw.
+    crate::plugins::enabled("buzz.emoji").hash(&mut hasher);
     let key = hasher.finish();
     if let Some(document) = PREPARED.with_borrow(|cache| cache.get(&key).cloned()) {
         return document;
@@ -999,7 +1001,36 @@ impl Prep<'_> {
                 .any(|seam| base + from < *seam && *seam < base + to),
             None => !self.seams.is_empty(),
         };
-        let drawn = super::renderers::text_matches(value, self.message);
+        let emoji_on = crate::plugins::enabled("buzz.emoji");
+        // Plugins' text renderers see the plain runs between mentions,
+        // links and channel names, as `InlineText` does; custom emoji stay
+        // in the run.
+        let mut drawn = Vec::new();
+        {
+            let mut runs = Vec::new();
+            let (mut from, mut j) = (0, 0);
+            while j < value.len() {
+                let end = mention_at(value, j, &self.names, spans_seam)
+                    .map(|(end, _)| end)
+                    .or_else(|| link_part(value, j).map(|found| found.end))
+                    .or_else(|| self.channel_at(value, j).map(|(label, _)| j + label.len()));
+                match end {
+                    Some(end) => {
+                        runs.push(from..j);
+                        (from, j) = (end, end);
+                    }
+                    None => j += value[j..].chars().next().map_or(1, char::len_utf8),
+                }
+            }
+            runs.push(from..value.len());
+            for run in runs.into_iter().filter(|run| !run.is_empty()) {
+                for (range, key) in
+                    super::renderers::text_matches(&value[run.clone()], self.message)
+                {
+                    drawn.push((run.start + range.start..run.start + range.end, key));
+                }
+            }
+        }
         let mut drawn = drawn.into_iter().peekable();
         let mut i = 0;
         while i < value.len() {
@@ -1025,7 +1056,8 @@ impl Prep<'_> {
                 i = end;
                 continue;
             }
-            if rest.starts_with(':')
+            if emoji_on
+                && rest.starts_with(':')
                 && let Some((index, length)) = self.custom_emoji(rest)
             {
                 image_md(&rest[..length], &format!("buzz-emoji:{index}"), out);
@@ -1040,27 +1072,18 @@ impl Prep<'_> {
                 i = found.end;
                 continue;
             }
-            // Plugins' text renderers, after mentions, emoji and links.
+            if let Some((label, id)) = self.channel_at(value, i) {
+                let url = format!("buzz://channel/{}", url_encode(id));
+                link_md(label, &url, out);
+                i += label.len();
+                continue;
+            }
+            // Plugins' text renderers, after mentions, emoji, links and
+            // channel names.
             while drawn.next_if(|(range, _)| range.start < i).is_some() {}
             if let Some((range, key)) = drawn.next_if(|(range, _)| range.start == i) {
                 image_md(&value[range.clone()], &format!("buzz-inline:{key}"), out);
                 i = range.end;
-                continue;
-            }
-            if rest.starts_with('#')
-                && (i == 0
-                    || value[..i].ends_with(|c: char| c.is_whitespace() || "([{".contains(c)))
-                && let Some((label, id)) = self.channels.iter().find(|(label, _)| {
-                    rest.starts_with(label.as_str())
-                        && rest[label.len()..]
-                            .chars()
-                            .next()
-                            .is_none_or(|c| c.is_whitespace() || ".,!?;:)]}".contains(c))
-                })
-            {
-                let url = format!("buzz://channel/{}", url_encode(id));
-                link_md(label, &url, out);
-                i += label.len();
                 continue;
             }
             let c = rest.chars().next().expect("not at the end");
@@ -1079,6 +1102,27 @@ impl Prep<'_> {
 
     /// `:shortcode:` naming one of the row's own emoji: its index and the
     /// match length.
+    /// A channel name at `i` (`#name` after a space or an opening
+    /// bracket, ending at a space or punctuation): its label and id.
+    fn channel_at<'a>(&'a self, value: &str, i: usize) -> Option<(&'a String, &'a String)> {
+        let rest = &value[i..];
+        if !rest.starts_with('#')
+            || !(i == 0 || value[..i].ends_with(|c: char| c.is_whitespace() || "([{".contains(c)))
+        {
+            return None;
+        }
+        self.channels
+            .iter()
+            .find(|(label, _)| {
+                rest.starts_with(label.as_str())
+                    && rest[label.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| c.is_whitespace() || ".,!?;:)]}".contains(c))
+            })
+            .map(|(label, id)| (label, id))
+    }
+
     fn custom_emoji(&self, rest: &str) -> Option<(usize, usize)> {
         let (code, length) = shortcode_at(rest)?;
         let index = self.emoji.iter().position(|e| e.shortcode == code)?;

@@ -62,6 +62,32 @@ pub(super) async fn clean(
     super::listings::delete(&http, owner, agent).await
 }
 
+/// What follows a hosted agent's removal by its provider
+/// (`removeRelayAgent`): it is archived where there is consent, its
+/// record deleted, then its channels left, as far as they will go.
+pub(super) async fn clean_hosted(
+    session: &Session,
+    owner: &Arc<Identity>,
+    agent: &str,
+) -> Result<(), String> {
+    let authority = session
+        .snapshot()
+        .borrow()
+        .relay
+        .as_ref()
+        .map(|relay| relay.authority.clone())
+        .filter(|authority| !authority.is_empty());
+    let http = RelayHttp::new(session.origin().clone(), owner.clone());
+    if let Some(authority) = &authority {
+        archive(&http, owner, authority, agent).await?;
+    }
+    super::listings::delete(&http, owner, agent).await?;
+    if let Err(error) = leave_channels(session, &http, authority.as_deref(), agent).await {
+        tracing::warn!(%error, "removed hosted agent did not leave every channel");
+    }
+    Ok(())
+}
+
 /// The relay's rosters naming the agent, plus the viewer's loaded channels
 /// that list it; each is left through a confirmed owner removal.
 async fn leave_channels(

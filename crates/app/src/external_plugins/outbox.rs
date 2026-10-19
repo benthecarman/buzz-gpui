@@ -183,13 +183,26 @@ pub fn watch(
     let session = community(cx)?.read(cx).session.clone();
     let (sender, mut changes) = futures::channel::mpsc::unbounded::<Value>();
     crate::runtime::Runtime::handle(cx).spawn(async move {
-        let Some(outbox) = session.outbox().await else {
-            // A community that takes no writes has nothing on its way.
-            let _ = sender.unbounded_send(json!([]));
-            return;
+        // Before the community first connects there is no queue yet:
+        // nothing is on its way, and the watch goes on once there is one.
+        let mut snapshots = session.snapshot();
+        let mut empty = false;
+        let outbox = loop {
+            if let Some(outbox) = session.outbox().await {
+                break outbox;
+            }
+            if !empty {
+                if sender.unbounded_send(json!([])).is_err() {
+                    return;
+                }
+                empty = true;
+            }
+            if snapshots.changed().await.is_err() {
+                return;
+            }
         };
         let mut receiver = outbox.changes();
-        let mut last = Value::Null;
+        let mut last = if empty { json!([]) } else { Value::Null };
         loop {
             let now = pending(&outbox);
             if now != last {

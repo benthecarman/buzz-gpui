@@ -166,19 +166,115 @@ impl Agents2 {
         let pubkey = agent.pubkey;
         cx.spawn(async move |this, cx| {
             remove.await?;
-            let http = RelayHttp::new(session.origin().clone(), identity.clone());
-            let delete = {
+            // Archived, its record deleted, its channels left, as a local
+            // agent's deletion cleans up (`removeRelayAgent`).
+            let cleanup = {
                 let pubkey = pubkey.clone();
                 cx.update(|cx| {
-                    Runtime::handle(cx)
-                        .spawn(async move { listings::delete(&http, &identity, &pubkey).await })
+                    Runtime::handle(cx).spawn(async move {
+                        super::super::cleanup::clean_hosted(&session, &identity, &pubkey).await
+                    })
                 })
             };
-            delete
+            cleanup
                 .await
                 .unwrap_or_else(|_| Err("Record deletion is not confirmed. Retry.".into()))?;
             this.update(cx, |this, cx| {
                 this.listed.set_row(&origin, &pubkey, None);
+                cx.notify();
+            })
+            .map_err(|_| "Agents closed".to_owned())
+        })
+    }
+
+    /// Renames a hosted agent or changes its picture (`saveHosted`): its
+    /// provider updates the profile, then the owner's list says so. Its
+    /// settings are the provider's. `picture` `Some("")` removes it.
+    pub fn save_hosted(
+        &mut self,
+        pubkey: &str,
+        name: Option<String>,
+        picture: Option<String>,
+        settings: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        if settings {
+            return Task::ready(Err(
+                "A hosted agent's settings save through its provider".into()
+            ));
+        }
+        let Some(agent) = self
+            .elsewhere(cx)
+            .into_iter()
+            .find(|agent| agent.pubkey == pubkey)
+        else {
+            return Task::ready(Err("No such hosted agent".into()));
+        };
+        let remote = match provider(&agent.agent_type, cx) {
+            Ok(remote) => remote,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let name = name.map_or_else(|| agent.name.clone(), |name| name.trim().to_owned());
+        if name.is_empty() {
+            return Task::ready(Err("Name the agent".into()));
+        }
+        let picture = match picture {
+            None => agent.picture.clone(),
+            Some(picture) if picture.is_empty() => None,
+            Some(picture) => Some(picture),
+        };
+        if name == agent.name && picture == agent.picture {
+            return Task::ready(Ok(()));
+        }
+        let Some(origin) = selected_origin(cx) else {
+            return Task::ready(Err("Connect to its community first".into()));
+        };
+        let Some(binding) = self
+            .bound
+            .get(&origin)
+            .and_then(|bound| bound.binding.as_ref())
+        else {
+            return Task::ready(Err("Connect to its community first".into()));
+        };
+        let (identity, session) = (binding.identity.clone(), binding.session.clone());
+        let prior = self
+            .listed
+            .rows_of(&origin)
+            .into_iter()
+            .find(|row| row.pubkey == agent.pubkey)
+            .and_then(|row| row.prior);
+        let profile = remote.profile(&agent.pubkey, &agent.relay, &name, picture.as_deref(), cx);
+        let (pubkey, runtime) = (agent.pubkey, agent.agent_type);
+        cx.spawn(async move |this, cx| {
+            profile.await?;
+            let entry = Listing {
+                pubkey: pubkey.clone(),
+                name,
+                picture,
+                runtime: Some(runtime.clone()),
+                prior,
+            };
+            let http = RelayHttp::new(session.origin().clone(), identity.clone());
+            let write = {
+                let entry = entry.clone();
+                cx.update(|cx| {
+                    Runtime::handle(cx).spawn(async move {
+                        listings::publish(&http, &identity, &entry, &runtime).await
+                    })
+                })
+            };
+            let prior = write
+                .await
+                .unwrap_or_else(|_| Err("The agent list was not updated. Retry.".into()))?;
+            this.update(cx, |this, cx| {
+                this.listed.set_row(
+                    &origin,
+                    &pubkey,
+                    Some(Listing {
+                        prior: Some(prior),
+                        ..entry
+                    }),
+                );
                 cx.notify();
             })
             .map_err(|_| "Agents closed".to_owned())

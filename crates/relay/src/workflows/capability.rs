@@ -792,7 +792,16 @@ impl Workflows {
         workflow: &WorkflowDefinition,
         cursor: Option<RunCursor>,
     ) -> Result<Runs, String> {
-        let reference = workflow.reference();
+        self.runs_of(workflow.reference(), cursor)
+    }
+
+    /// [`Self::runs`] by reference: the workflow need not be read first,
+    /// as a deleted one's history still pages (`runs(workflow)`).
+    pub fn runs_of(
+        &self,
+        reference: WorkflowReference,
+        cursor: Option<RunCursor>,
+    ) -> Result<Runs, String> {
         self.inner.assert_access(&reference)?;
         let inner = self.inner.clone();
         let id = reference.id.clone();

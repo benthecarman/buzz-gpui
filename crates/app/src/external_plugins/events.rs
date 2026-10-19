@@ -213,7 +213,21 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
                     continue;
                 }
                 let id = op.id().to_hex();
-                if !known.contains(&id) && filters.iter().any(|filter| matches_json(filter, &value))
+                if !filters.iter().any(|filter| matches_json(filter, &value)) {
+                    continue;
+                }
+                // The relay's copy carries how it is going too
+                // (`projectEvents`).
+                if known.contains(&id) {
+                    if let Some(event) = events
+                        .iter_mut()
+                        .find(|event| event.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                    {
+                        event["delivery"] = json!(super::outbox::delivery_name(op.delivery));
+                        event["error"] = json!(op.error);
+                    }
+                    continue;
+                }
                 {
                     value["id"] = json!(id);
                     // How it is going, as the projected rows carry.

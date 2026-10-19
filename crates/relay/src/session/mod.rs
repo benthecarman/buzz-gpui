@@ -2742,7 +2742,7 @@ impl Actor {
 
     /// Any retained event: windows, open threads, recent traffic or the
     /// outbox.
-    fn find_event(&self, id: &EventId) -> Option<Verified> {
+    pub(super) fn find_event(&self, id: &EventId) -> Option<Verified> {
         self.timelines
             .values()
             .find_map(|timeline| timeline.find(id))

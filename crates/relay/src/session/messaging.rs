@@ -12,7 +12,8 @@ use crate::outbox::Outbox;
 use nostr::prelude::EventId;
 
 impl Actor {
-    /// A message shown in `channel`'s timeline or in an open thread.
+    /// A message in `channel` Buzz holds: in its timeline, an open thread,
+    /// recent traffic or the outbox (`find`: local, recent, retained).
     pub(super) fn find_message(&self, channel: &str, id: &EventId) -> Option<Verified> {
         self.timelines
             .get(channel)
@@ -22,6 +23,10 @@ impl Actor {
                     .values()
                     .filter(|thread| thread.channel == channel)
                     .find_map(|thread| thread.state.event(id).cloned())
+            })
+            .or_else(|| {
+                self.find_event(id)
+                    .filter(|event| event.channel() == Some(channel))
             })
     }
 }

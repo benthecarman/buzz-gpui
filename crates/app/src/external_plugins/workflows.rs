@@ -175,10 +175,21 @@ pub fn runs(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Fa
     };
     let workflows = community.read(cx).session.workflows().clone();
     Ok(on_tokio(cx, async move {
-        let (definitions, _) = read(&workflows, channel).await?;
-        let workflow = named(definitions, &id, owner.as_deref())?;
+        // With its owner named, the reference is whole; otherwise the
+        // channel's workflows say whose it is.
+        let reference = match owner {
+            Some(owner) => buzz_relay_client::workflows::WorkflowReference {
+                id,
+                owner,
+                channel_id: channel,
+            },
+            None => {
+                let (definitions, _) = read(&workflows, channel).await?;
+                named(definitions, &id, None)?.reference()
+            }
+        };
         let view = workflows
-            .runs(&workflow, cursor)
+            .runs_of(reference, cursor)
             .map_err(|error| (2, error))?;
         view.refresh(false).await;
         let snapshot = view.snapshot();

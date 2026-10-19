@@ -51,6 +51,12 @@ pub fn memories(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>
     if !buzz_relay_client::session::memory_agent(&agent, session.viewer()) {
         return Err(invalid("agent is not an agent key"));
     }
+    // Memories are read only while the live connection is up, before and
+    // after the read (`memoryConnected`).
+    let unavailable = || (2, "Memory read unavailable".to_owned());
+    if !session.snapshot().borrow().live {
+        return Err(unavailable());
+    }
     Ok(on_tokio(cx, async move {
         use buzz_relay_client::session::MemoryError;
         let listing = session
@@ -61,6 +67,9 @@ pub fn memories(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>
                 MemoryError::Denied => (1, "denied".to_owned()),
                 MemoryError::Failed(error) => (2, error),
             })?;
+        if !session.snapshot().borrow().live {
+            return Err(unavailable());
+        }
         Ok(json!({
             "entries": listing.entries.iter().map(|entry| json!({
                 "slug": entry.slug,

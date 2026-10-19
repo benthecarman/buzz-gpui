@@ -172,18 +172,13 @@ impl Session {
             let target = ops
                 .with(move |actor| {
                     let author = actor.relay.as_ref().map(|relay| relay.authority.clone());
-                    actor
-                        .timelines
-                        .get(&channel)
-                        .and_then(|timeline| timeline.find(&id))
-                        .map(|event| {
-                            let signing =
-                                author.and_then(|a| nostr::prelude::PublicKey::from_hex(&a).ok());
-                            let shown =
-                                crate::fold::message_author(event.event(), signing.as_ref());
-                            let retained = actor.profiles.event(&shown.to_hex()).cloned();
-                            (event.kind_u16(), shown.to_hex(), retained)
-                        })
+                    actor.find_message(&channel, &id).map(|event| {
+                        let signing =
+                            author.and_then(|a| nostr::prelude::PublicKey::from_hex(&a).ok());
+                        let shown = crate::fold::message_author(event.event(), signing.as_ref());
+                        let retained = actor.profiles.event(&shown.to_hex()).cloned();
+                        (event.kind_u16(), shown.to_hex(), retained)
+                    })
                 })
                 .await?;
             let Some((kind, author, retained)) = target else {
@@ -228,9 +223,7 @@ impl Session {
             let original = ops
                 .with(move |actor| {
                     actor
-                        .timelines
-                        .get(&channel)
-                        .and_then(|timeline| timeline.find(&id))
+                        .find_message(&channel, &id)
                         .or_else(|| actor.thread_event(&id))
                 })
                 .await?

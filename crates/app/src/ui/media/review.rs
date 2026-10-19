@@ -530,6 +530,14 @@ impl Review {
                     this.react(&pick.text(), cx);
                 },
             ));
+            // A plugin picker's custom emoji, as it wrote it.
+            subscriptions.push(cx.subscribe(
+                &picker,
+                |this, _, super::super::emoji_picker::PickedAs(text, _), cx| {
+                    this.picker_open = false;
+                    this.react(text, cx);
+                },
+            ));
             subscriptions.push(cx.subscribe(
                 &picker,
                 |this, _, _: &super::super::emoji_picker::Dismissed, cx| {

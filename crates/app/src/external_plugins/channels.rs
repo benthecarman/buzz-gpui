@@ -215,8 +215,26 @@ fn create_now(
 pub fn creation(cx: &App) -> Result<Value, Failure> {
     let session = community(cx)?.read(cx).session.clone();
     let snapshot = session.creation().borrow().clone();
-    Ok(json!({
-        "pending": snapshot.pending.as_ref().map(|pending| json!({
+    Ok(creation_json(snapshot.pending.as_ref(), &snapshot.notices))
+}
+
+/// `channels/creation` as a request: this session's creation, or else one
+/// the outbox still holds from before a restart (`pendingCreation()`).
+pub fn creation_now(cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        let pending = session.pending_creation().await;
+        let snapshot = session.creation().borrow().clone();
+        Ok(creation_json(pending.as_ref(), &snapshot.notices))
+    }))
+}
+
+fn creation_json(
+    pending: Option<&buzz_relay_client::kit::setup::ChannelCreationInput>,
+    notices: &[buzz_relay_client::kit::setup::SetupNotice],
+) -> Value {
+    json!({
+        "pending": pending.map(|pending| json!({
             "name": pending.name,
             "description": pending.description,
             "visibility": format!("{:?}", pending.visibility).to_ascii_lowercase(),
@@ -229,12 +247,12 @@ pub fn creation(cx: &App) -> Result<Value, Failure> {
                 "template": setup.template_id,
             })),
         })),
-        "notices": snapshot.notices.iter().map(|notice| json!({
+        "notices": notices.iter().map(|notice| json!({
             "id": notice.id,
             "name": notice.name,
             "error": notice.error,
         })).collect::<Vec<_>>(),
-    }))
+    })
 }
 
 /// `channels/dismissNotice`: hides a setup notice.
