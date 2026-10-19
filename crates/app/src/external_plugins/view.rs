@@ -616,7 +616,12 @@ impl ExternalView {
                 view.conversation.as_ref().map(|conversation| {
                     json!({ "channel": conversation.channel_id, "root": conversation.root_id })
                 }),
-                view.pending(),
+                // Only Settings, with the Provider field, opens staged.
+                view.pending()
+                    && view
+                        .settings_host
+                        .as_ref()
+                        .is_some_and(|host| host.type_control.is_some()),
             ),
             None => (None, None, None, false),
         };

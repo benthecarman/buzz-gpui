@@ -240,8 +240,7 @@ keeps the answer until anything in it changes:
   carries `type`, the starting `config` and `disabled` (the agent is being
   made); send `agent/createConfig` with the `view` and the whole new `config`
   as it changes. Buzz sends `view/agentCreate` (`view`, `config`, `disabled`)
-  when either changes, such as a model picked from `createModels`; a config
-  sent while `disabled` is ignored.
+  when either changes, such as a model picked from `createModels`.
 - `createModels` (`{"models": [{"id", "label", "description"}], "defaultLabel",
   "allowCustom"}`): model choices in the New agent dialog, saved as the
   config's `model`.
@@ -287,8 +286,9 @@ keeps the answer until anything in it changes:
   `settings` are Buzz's ids): settings tabs before Attention. Each is a view of `kind` `agentTab`; `view/open` also carries
   `type`, `agent`, `contribution` (the tab id) and `conversation`
   (`{"channel","root"}` when the agent was opened from a message). Buzz sends
-  `view/agent` (`view`, `agent`) when the agent shown changes, such as after
-  another tab saves. To save, send `agent/save` with the `view` and the whole
+  `view/agent` (`view`, `agent`) when the agent shown changes, such as a
+  change saved elsewhere. A tab not shown is closed (`view/close`) and opens
+  again when it is. To save, send `agent/save` with the `view` and the whole
   new `config`. With `role:
   "settings"` the tab is the agent's Settings, first, with Buzz's Provider
   field at its top. When the user picks this type there for an agent of
@@ -896,8 +896,8 @@ passes a function, or reaches into the app, it works differently:
   than handing out live views. Ask again to refresh, or watch the
   channel, thread, unread counts, Inbox, names, presence, events, outbox
   or a `session/watch` value where a change needs to be seen as it
-  happens. `events/query` is a read from the relay with your outbox's
-  pending events added; it does not fold in live events that arrived
+  happens. `events/query` is a read from the relay with the events your
+  outbox holds added, on their way or delivered; it does not fold in live events that arrived
   meanwhile or your pending edits and deletions, as `session.read` does,
   so a plugin that needs those follows `events/watch` and the outbox.
 - **Element slots in place of components.** The embedded composer and

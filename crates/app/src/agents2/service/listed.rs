@@ -99,6 +99,8 @@ impl Agents2 {
             return;
         }
         self.listed.reading.insert(origin.to_owned(), generation);
+        // Watchers see the read begin (`library.refresh`'s `loading`).
+        cx.notify();
         let http = RelayHttp::new(binding.session.origin().clone(), binding.identity.clone());
         let viewer = binding.viewer.clone();
         let read = Runtime::handle(cx).spawn(async move { listings::read(&http, &viewer).await });

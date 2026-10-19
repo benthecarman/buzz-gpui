@@ -32,9 +32,10 @@ pub struct Choice {
     pub loading: bool,
 }
 
-/// The pubkeys a lookup was for, each with its agent's type and name when
-/// it is one of the viewer's agents of a registered type.
-type Key = Vec<(String, Option<(String, String)>)>;
+/// The pubkeys a lookup was for, each with its agent's type, name and
+/// config when it is one of the viewer's agents of a registered type: a
+/// change to the agent asks again (`[snapshot, types, key]`).
+type Key = Vec<(String, Option<(String, String, String)>)>;
 
 /// One lookup of the mentioned agents' choices.
 struct Lookup {
@@ -304,9 +305,13 @@ impl Composer {
             .map(|(pubkey, found)| {
                 (
                     pubkey.clone(),
-                    found
-                        .as_ref()
-                        .map(|(agent, kind)| (kind.key.to_string(), agent.name.clone())),
+                    found.as_ref().map(|(agent, kind)| {
+                        (
+                            kind.key.to_string(),
+                            agent.name.clone(),
+                            agent.config.to_string(),
+                        )
+                    }),
                 )
             })
             .collect();

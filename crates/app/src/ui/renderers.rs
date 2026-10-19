@@ -416,7 +416,18 @@ thread_local! {
 
 /// Draws without text or link renderers, as plain Markdown does.
 pub fn without_renderers<T>(draw: impl FnOnce() -> T) -> T {
-    let before = PLAIN.replace(true);
+    with_plain(true, draw)
+}
+
+/// Whether what is drawn now leaves the renderers out.
+pub fn plain() -> bool {
+    PLAIN.get()
+}
+
+/// Draws with the renderers left out or not, as `plain` says: what a
+/// body drawn later, in layout, was drawn with.
+pub fn with_plain<T>(plain: bool, draw: impl FnOnce() -> T) -> T {
+    let before = PLAIN.replace(plain);
     let drawn = draw();
     PLAIN.set(before);
     drawn

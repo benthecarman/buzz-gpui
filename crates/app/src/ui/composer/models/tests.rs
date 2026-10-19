@@ -83,7 +83,12 @@ fn offers_nothing_for_a_single_model_without_effort_levels() {
 
 #[test]
 fn discards_pending_metadata_after_the_mentioned_agent_changes() {
-    let key = |pubkey: &str| -> Key { vec![(pubkey.into(), Some(("type".into(), pubkey.into())))] };
+    let key = |pubkey: &str| -> Key {
+        vec![(
+            pubkey.into(),
+            Some(("type".into(), pubkey.into(), "{}".into())),
+        )]
+    };
     let loading = |pubkey: &str| Choice {
         pubkey: pubkey.into(),
         name: pubkey.into(),

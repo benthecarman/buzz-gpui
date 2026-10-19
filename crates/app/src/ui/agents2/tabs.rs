@@ -592,6 +592,13 @@ impl Render for AgentTabs {
                 })),
             );
         }
+        // A type's tabs close while Buzz's own section shows.
+        let own_section = selected.as_ref() == ATTENTION
+            || selected.as_ref() == MEMORY
+            || (host_tab && selected.as_ref() == SETTINGS);
+        if own_section {
+            self.views.clear();
+        }
         let panel: AnyElement = if selected.as_ref() == ATTENTION {
             self.attention.clone().into_any_element()
         } else if selected.as_ref() == MEMORY {
@@ -608,6 +615,9 @@ impl Render for AgentTabs {
                 Some(tab) => {
                     let key: SharedString =
                         format!("{}#{}:{}", shown.agent_type, self.stage, tab.id).into();
+                    // Only the tab shown stays open, as an unmounted panel
+                    // closes (`Tabs.Panel`).
+                    self.views.retain(|kept, _| *kept == key);
                     let view = match self.views.get(&key) {
                         // A kept tab shows the agent as it is now.
                         Some(view) => {
@@ -615,7 +625,16 @@ impl Render for AgentTabs {
                             view.clone()
                         }
                         None => {
-                            let settings_host = (tab.id == SETTINGS_TAB).then_some(host);
+                            // Every tab saves through a staged change; only
+                            // Settings has the Provider field.
+                            let settings_host = if tab.id == SETTINGS_TAB {
+                                Some(host)
+                            } else {
+                                Some(crate::agents2::registry::SettingsHost {
+                                    type_control: None,
+                                    pending: host.pending.clone(),
+                                })
+                            };
                             let view = (tab.build)(
                                 AgentView {
                                     agent: shown.clone(),

@@ -212,10 +212,6 @@ impl CreateAgent {
         let dialog = cx.weak_entity();
         let change: crate::agents2::registry::CreateChange = std::rc::Rc::new(move |config, cx| {
             let _ = dialog.update(cx, |this, cx| {
-                // Nothing changes while the agent is being made (`disabled`).
-                if this.pending {
-                    return;
-                }
                 this.config = config;
                 this.dirty = true;
                 cx.notify();

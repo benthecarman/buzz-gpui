@@ -163,6 +163,8 @@ pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElemen
         }),
         spoilers: document.spoilers.clone(),
         max_width: (width.get() < f32::MAX).then(|| px(width.get())),
+        link_mode: links::mode(),
+        plain: super::renderers::plain(),
     };
     let content = match &document.body {
         Document::Plain(text) => div()
@@ -299,6 +301,7 @@ pub fn link_chip(url: &str, label: &str, directory: &Directory, id: &str, _cx: &
         url,
         label,
         directory,
+        mode: links::mode(),
     }
     .into_any_element()
 }
@@ -309,28 +312,32 @@ struct LinkChipElement {
     url: String,
     label: String,
     directory: Directory,
+    mode: links::LinkMode,
 }
 
 impl RenderOnce for LinkChipElement {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let size = window.text_style().font_size.to_pixels(window.rem_size());
-        links::chip(
-            Chip {
-                id: self.id,
-                url: &self.url,
-                label: Some(StyledLabel {
-                    text: self.label,
-                    runs: Vec::new(),
-                }),
-                directory: &self.directory,
-                font_size: size,
-                line_height: px(16.),
-                max_width: None,
-                origin: None,
-            },
-            window,
-            cx,
-        )
+        let mode = self.mode;
+        links::with_mode(mode, || {
+            links::chip(
+                Chip {
+                    id: self.id,
+                    url: &self.url,
+                    label: Some(StyledLabel {
+                        text: self.label,
+                        runs: Vec::new(),
+                    }),
+                    directory: &self.directory,
+                    font_size: size,
+                    line_height: px(16.),
+                    max_width: None,
+                    origin: None,
+                },
+                window,
+                cx,
+            )
+        })
     }
 }
 
@@ -410,8 +417,10 @@ fn prepared(row: &MessageRow, directory: &Directory) -> Arc<Prepared> {
             .hash(&mut hasher);
     }
     directory.fingerprint.hash(&mut hasher);
-    // Plugins' text renderers change what prose draws.
+    // Plugins' text renderers change what prose draws, unless they are
+    // left out.
     super::renderers::text_generation().hash(&mut hasher);
+    super::renderers::plain().hash(&mut hasher);
     // With Emoji off, custom emoji are plain text plugins may draw.
     crate::plugins::enabled("buzz.emoji").hash(&mut hasher);
     let key = hasher.finish();
@@ -2040,6 +2049,10 @@ struct Objects {
     spoilers: Arc<[SharedString]>,
     /// The body's width, for chips and spoilers that must wrap inside it.
     max_width: Option<Pixels>,
+    /// How its links open, and whether renderers are left out: chips are
+    /// made in layout, after the body was built.
+    link_mode: links::LinkMode,
+    plain: bool,
 }
 
 enum Object {
@@ -2263,7 +2276,11 @@ impl MarkdownPlugin for Objects {
                     self.row,
                     node.source_range().map_or(0, |r| r.start)
                 ));
-                let element = self.link(url, label, id, size, line, window, cx)?;
+                let element = links::with_mode(self.link_mode, || {
+                    super::renderers::with_plain(self.plain, || {
+                        self.link(url, label, id, size, line, window, cx)
+                    })
+                })?;
                 Some(InlineElement::new(element).with_baseline(baseline))
             }
         }

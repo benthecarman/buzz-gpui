@@ -29,9 +29,12 @@ pub fn rules(community: &Entity<Community>, cx: &App) -> AgentRules {
         .filter(|(key, _, _)| !archived.contains(key) && seen.insert(key.clone()))
         .map(|(key, _, _)| key)
         .collect();
-    // Your agents listed in this community from other devices too
-    // (`agentLibrary`).
-    if let Some(agents) = crate::agents2::Agents2::global(cx) {
+    // Your agents listed in this community from other devices too, while
+    // that list is read (`agentChoices` `selectable`).
+    if let Some(agents) = crate::agents2::Agents2::global(cx)
+        && agents.read(cx).listing_state(&origin.http())
+            == crate::agents2::listings::ListingRead::Ready
+    {
         for (pubkey, _) in agents.read(cx).listed_elsewhere(&origin.http()) {
             if !archived.contains(&pubkey) && seen.insert(pubkey.clone()) {
                 selectable.push(pubkey);

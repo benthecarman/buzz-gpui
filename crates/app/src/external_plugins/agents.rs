@@ -781,7 +781,13 @@ impl AgentType for PluginType {
                     id: intern(setting.id.clone()),
                     label: intern(setting.label.clone()),
                     is_override,
-                    unchanged_key: value.filter(|_| is_override).map(Value::to_string),
+                    // The value in effect, override or not, as the built-in
+                    // types key theirs (`unchangedKey`).
+                    unchanged_key: value.or(setting.default.as_ref()).map(|value| {
+                        value
+                            .as_str()
+                            .map_or_else(|| value.to_string(), str::to_owned)
+                    }),
                 }
             })
             .collect()

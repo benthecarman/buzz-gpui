@@ -354,6 +354,11 @@ thread_local! {
     static MODE: std::cell::Cell<LinkMode> = const { std::cell::Cell::new(LinkMode::Normal) };
 }
 
+/// How links drawn now open.
+pub fn mode() -> LinkMode {
+    MODE.get()
+}
+
 /// Draws with links opening as `mode` says.
 pub fn with_mode<T>(mode: LinkMode, draw: impl FnOnce() -> T) -> T {
     let before = MODE.replace(mode);
