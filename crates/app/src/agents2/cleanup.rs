@@ -261,6 +261,22 @@ async fn request(
         .await
         .map_err(Refusal::Failed)?
         .ok_or(Refusal::NoConsent)?;
+    // Role authority stands alone, so no credential whose time bounds
+    // could fail it is attached; one that is attached must hold for the
+    // request itself, whatever the archive shows now.
+    let auth = path.auth.filter(|_| !path.admin);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Some(auth) = &auth
+        && !buzz_relay_client::profiles::within_time_bounds(
+            auth.get(2).map_or("", String::as_str),
+            now,
+        )
+    {
+        return Err(Refusal::NoConsent);
+    }
     let wanted = if archive { Archived::Yes } else { Archived::No };
     if archived(http, authority, target)
         .await
@@ -273,24 +289,7 @@ async fn request(
         vec!["-".to_owned()],
         vec!["p".to_owned(), target.to_owned()],
     ];
-    // Role authority stands alone, so no credential whose time bounds
-    // could fail it is attached.
-    if let Some(auth) = path.auth.filter(|_| !path.admin) {
-        tags.push(auth);
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // The credential's time bounds must hold for the request itself.
-    if let Some(auth) = tags.get(2)
-        && !buzz_relay_client::profiles::within_time_bounds(
-            auth.get(2).map_or("", String::as_str),
-            now,
-        )
-    {
-        return Err(Refusal::NoConsent);
-    }
+    tags.extend(auth);
     let kind = if archive { 9035 } else { 9036 };
     let failed = |error: String| Refusal::Failed(error);
     let unsigned = owner

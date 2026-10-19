@@ -137,6 +137,14 @@ pub struct Workspace {
     /// A settings card whose check is still running, waited for before
     /// Settings opens on it.
     checking: Option<Task<()>>,
+    /// When the current attempt began: waiting and presenting share one
+    /// open timeout (`controller.ts` `start()`).
+    attempt_started: std::time::Instant,
+    /// Whether the current attempt leaves the focus where it is
+    /// (`focus: "preserve"`), for a presentation deferred or retried.
+    attempt_keeps_focus: bool,
+    /// The attempt that already checked a failed settings card again.
+    rechecked: Option<u64>,
     dialog: Option<dialogs::OpenDialog>,
     _page_events: Option<Subscription>,
     /// Messages shows a route rather than a conversation.
@@ -233,6 +241,9 @@ impl Workspace {
             resolving: None,
             failure: None,
             checking: None,
+            attempt_started: std::time::Instant::now(),
+            attempt_keeps_focus: false,
+            rechecked: None,
             dialog: None,
             _page_events: None,
             route: None,
@@ -763,7 +774,7 @@ impl Workspace {
                 Some(params) => Place::Route {
                     page,
                     params: params.clone(),
-                    version: None,
+                    version: crate::ui::pages::routes(page, cx).map(|routes| routes.version),
                 },
                 None => Place::Page(page),
             },
@@ -808,6 +819,26 @@ impl Workspace {
             .unwrap_or_else(|| div().into_any_element())
     }
 
+    /// A new attempt replaces whatever the last one still had going
+    /// (`start()` settles it `superseded`).
+    fn begin_attempt(&mut self) {
+        self.attempts += 1;
+        self.attempt_started = std::time::Instant::now();
+        self.attempt_keeps_focus = self.keep_focus;
+        self.settling = None;
+        self.checking = None;
+        self.pending = None;
+        self.pending_listing = false;
+        self.resolving = None;
+        self._revealing = None;
+        self.failure = None;
+    }
+
+    /// What is left of the current attempt's open timeout.
+    fn attempt_left(&self) -> std::time::Duration {
+        channel_states::OPEN_TIMEOUT.saturating_sub(self.attempt_started.elapsed())
+    }
+
     /// Records the place the user just went to.
     fn record(&mut self, cx: &mut Context<Self>) {
         // Any navigation closes the narrow drawer.
@@ -821,6 +852,14 @@ impl Workspace {
                 cx,
             );
             if self.history.push(here) {
+                // A visit of the user's own supersedes one still opening.
+                if self.settling.is_some() || self.checking.is_some() {
+                    self.attempts += 1;
+                    self.attempt_started = std::time::Instant::now();
+                    self.settling = None;
+                    self.checking = None;
+                    self.failure = None;
+                }
                 self.enter_visit(cx);
             }
         }
@@ -942,7 +981,7 @@ impl Workspace {
             place: Place::Route {
                 page,
                 params: params.clone(),
-                version: None,
+                version: crate::ui::pages::routes(page, cx).map(|routes| routes.version),
             },
         });
         self.page_route = Some(params);
@@ -979,8 +1018,7 @@ impl Workspace {
             return;
         }
         self.history.push(target);
-        self.attempts += 1;
-        self.failure = None;
+        self.begin_attempt();
         self.page_route = Some(params);
         self.publish_visit();
         cx.notify();
@@ -988,11 +1026,9 @@ impl Workspace {
 
     /// Fails a visit its page never settled within the open timeout.
     fn arm_settle_timeout(&mut self, cx: &mut Context<Self>) {
-        let attempt = self.attempts;
+        let (attempt, left) = (self.attempts, self.attempt_left());
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(channel_states::OPEN_TIMEOUT)
-                .await;
+            cx.background_executor().timer(left).await;
             let _ = this.update(cx, |this, cx| {
                 if this.attempts == attempt && this.settling.take().is_some() {
                     this.failure = Some(Failed {
@@ -1125,7 +1161,12 @@ impl Workspace {
         };
         self.retry_session(cx);
         match failed.target {
-            Some(target) => self.apply(target, window, cx),
+            // With the failed attempt's focus choice (`retry()`).
+            Some(target) => {
+                let keep = std::mem::replace(&mut self.keep_focus, self.attempt_keeps_focus);
+                self.apply(target, window, cx);
+                self.keep_focus = keep;
+            }
             // Nothing to open again: the visit fails as before, as a new
             // attempt (`retry`).
             None => self.fail_open(None, failed.reason, cx),
@@ -1151,11 +1192,9 @@ impl Workspace {
     ///
     /// [`OPEN_TIMEOUT`]: channel_states::OPEN_TIMEOUT
     fn arm_open_timeout(&mut self, ingress: bool, cx: &mut Context<Self>) {
-        let attempt = self.attempts;
+        let (attempt, left) = (self.attempts, self.attempt_left());
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(channel_states::OPEN_TIMEOUT)
-                .await;
+            cx.background_executor().timer(left).await;
             let _ = this.update(cx, |this, cx| {
                 let waiting = match this.resolving.take() {
                     Some((target, _)) => Some(target),
@@ -1210,18 +1249,20 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let attempt = self.attempts;
+        let (attempt, deadline) = (
+            self.attempts,
+            std::time::Instant::now() + self.attempt_left(),
+        );
         // Settings' checks run meanwhile, as they do while it shows.
         let held = super::settings::cards::retain_visibility(cx);
         self.checking = Some(cx.spawn_in(window, async move |this, cx| {
             let _held = held;
-            let started = std::time::Instant::now();
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(100))
                     .await;
                 let still = cx.update(|_, cx| waiting(&target, cx)).unwrap_or(false);
-                let timed_out = started.elapsed() >= channel_states::OPEN_TIMEOUT;
+                let timed_out = std::time::Instant::now() >= deadline;
                 if still && !timed_out {
                     continue;
                 }
@@ -1233,7 +1274,11 @@ impl Workspace {
                     if still {
                         this.fail_presenting(target, Reason::Timeout, cx);
                     } else {
+                        // With the attempt's own focus choice.
+                        let keep =
+                            std::mem::replace(&mut this.keep_focus, this.attempt_keeps_focus);
                         this.present(target, window, cx);
+                        this.keep_focus = keep;
                     }
                 });
                 return;
@@ -1255,13 +1300,7 @@ impl Workspace {
 
     fn apply(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         self.drawer_open = false;
-        self.pending = None;
-        self.pending_listing = false;
-        self._revealing = None;
-        self.resolving = None;
-        self.failure = None;
-        self.checking = None;
-        self.attempts += 1;
+        self.begin_attempt();
         self.publish_visit();
         self.settling = None;
         if let Some(origin) = &target.community {
@@ -1285,6 +1324,10 @@ impl Workspace {
                 AppState::select(index, cx);
                 self.sync(window, cx);
             }
+        } else if AppState::current(cx).is_some() {
+            // A Personal-space visit leaves the community it was not in.
+            AppState::select_personal(cx);
+            self.sync(window, cx);
         }
         self.present(target, window, cx);
     }
@@ -1358,7 +1401,10 @@ impl Workspace {
             Place::Settings(super::settings::Section::Card(key)) => {
                 match cards::get(key, cx).map(|card| card.visibility(cx)) {
                     Some(CardVisibility::Visible) => false,
-                    Some(CardVisibility::Error) => {
+                    // Checked again once per attempt; failing again, it is
+                    // unavailable.
+                    Some(CardVisibility::Error) if self.rechecked != Some(self.attempts) => {
+                        self.rechecked = Some(self.attempts);
                         crate::external_plugins::ExternalPlugins::recheck_card(key, cx);
                         self.wait_then_present(target, Self::presenting_waits, window, cx);
                         return;
@@ -1701,7 +1747,8 @@ impl Workspace {
                     place: Place::Route {
                         page: super::projects::PAGE,
                         params: route.params(),
-                        version: None,
+                        version: crate::ui::pages::routes(super::projects::PAGE, cx)
+                            .map(|routes| routes.version),
                     },
                 };
                 self.navigate(target, window, cx);

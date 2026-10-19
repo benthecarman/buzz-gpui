@@ -562,7 +562,13 @@ pub fn invalidate(
     let message = params.get("message").and_then(Value::as_str);
     let matches = |entry_key: &str, entry_target: &str| {
         (entry_key == key || entry_key.starts_with(&format!("{key}#")))
-            && target.is_none_or(|target| entry_target == target)
+            && target.is_none_or(|target| {
+                // An attachment's answers are kept per removability.
+                entry_target == target
+                    || entry_target
+                        .strip_prefix(target)
+                        .is_some_and(|rest| rest.starts_with("#removable="))
+            })
             && message.is_none_or(|message| entry_target.starts_with(message))
     };
     let mut count = 0;
@@ -714,8 +720,10 @@ impl crate::ui::renderers::TextRenderer for Inline {
     }
 
     fn render(&self, matched: &str, message: &str, cx: &App) -> Option<AnyElement> {
-        let tree = answered(self.key, &format!("{message}/{matched}"))??;
-        Some(drawn(&self.plugin, &self.id, self.key, matched, &tree, cx))
+        // Its events name it as `render/invalidate` takes it.
+        let target = format!("{message}/{matched}");
+        let tree = answered(self.key, &target)??;
+        Some(drawn(&self.plugin, &self.id, self.key, &target, &tree, cx))
     }
 }
 
@@ -735,9 +743,10 @@ pub(super) fn drawn(
     cx: &App,
 ) -> AnyElement {
     let (plugin, renderer, place) = (plugin.to_owned(), id.to_owned(), target.to_owned());
-    // A message's target is `<id>:<revision>`; the message is the id.
+    // A message's target is `<id>:<revision>`, an inline piece's
+    // `<id>/<text>`; the message is the id.
     let message = target
-        .split(':')
+        .split([':', '/'])
         .next()
         .filter(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .map(str::to_owned);
@@ -979,7 +988,15 @@ impl AttachmentRenderer for AttachmentView {
             },
             cx,
         )?;
-        Some(drawn(&self.plugin, &self.id, self.key, &target, &tree, cx))
+        // Its events name the attachment by its URL.
+        Some(drawn(
+            &self.plugin,
+            &self.id,
+            self.key,
+            &attachment.url,
+            &tree,
+            cx,
+        ))
     }
 }
 

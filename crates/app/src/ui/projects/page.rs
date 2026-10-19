@@ -199,7 +199,7 @@ impl ProjectsPage {
             place: Place::Route {
                 page: PAGE,
                 params: route.params(),
-                version: None,
+                version: crate::ui::pages::routes(PAGE, cx).map(|routes| routes.version),
             },
         };
         navigation::with_workspace(cx, move |workspace, window, cx| {

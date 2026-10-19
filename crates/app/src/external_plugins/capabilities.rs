@@ -930,23 +930,6 @@ fn section_shaped(section: &str) -> bool {
     }
 }
 
-/// JSON as targets keep it: at most 8 levels deep, 1024 values and
-/// 8 KiB.
-fn json_bounded(value: &Value, depth: usize, nodes: &mut usize) -> bool {
-    fn walk(value: &Value, depth: usize, nodes: &mut usize) -> bool {
-        if depth > 8 || *nodes == 0 {
-            return false;
-        }
-        *nodes -= 1;
-        match value {
-            Value::Array(items) => items.iter().all(|item| walk(item, depth + 1, nodes)),
-            Value::Object(fields) => fields.values().all(|item| walk(item, depth + 1, nodes)),
-            _ => true,
-        }
-    }
-    value.to_string().len() <= 8_192 && walk(value, depth, nodes)
-}
-
 fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
     use crate::ui::pages::Page;
     use crate::ui::settings::Section;
@@ -996,8 +979,14 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
                 ),
             };
             let route = params.get("params").filter(|params| !params.is_null());
-            if route.is_some_and(|route| !json_bounded(route, 0, &mut 1024)) {
-                return Err(invalid("params must be JSON of at most 8 KiB"));
+            if route.is_some_and(|route| !super::view::route_valid(route)) {
+                return Err(invalid(
+                    "params must be JSON of at most 8 KiB, 8 levels and 1024 values",
+                ));
+            }
+            // A route version goes with route params (`route.version`).
+            if version.is_some() && route.is_none() {
+                return Err(invalid("version is given without params"));
             }
             // Messages' version-1 placeholders open their own pages now.
             if key == crate::ui::pages::Page::MESSAGES.key() && version.is_none_or(|v| v == 1) {
@@ -1051,11 +1040,12 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
             // `not-found` when there is none (`open()`).
             let channel = text(params, "channel")
                 .filter(|id| {
-                    !id.is_empty()
-                        && id.len() <= 128
-                        && id
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    // `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$`
+                    (1..=256).contains(&id.len())
+                        && id.bytes().enumerate().all(|(at, byte)| {
+                            byte.is_ascii_alphanumeric()
+                                || (at > 0 && matches!(byte, b'.' | b'_' | b'-'))
+                        })
                 })
                 .ok_or_else(|| invalid("channel is required"))?
                 .to_owned();
@@ -2226,8 +2216,9 @@ pub(super) fn resolve_request(request: &Value, cx: &App) -> Option<Place> {
 fn settle(before: u64, cx: &mut App) -> Task<Result<Value, Failure>> {
     cx.spawn(async move |cx| {
         let mut ours = None;
-        // As long as a visit may take to open (`OPEN_TIMEOUT`), and a bit.
-        for step in 0..170 {
+        // The window fails a visit at its open timeout; this only stops
+        // waiting well after that.
+        for step in 0..250 {
             cx.background_executor()
                 .timer(Duration::from_millis(100))
                 .await;
@@ -2289,8 +2280,8 @@ fn start_navigation(params: &Value, cx: &mut App) -> Result<bool, Failure> {
         }
         let replace = params.get("replace").and_then(Value::as_bool) == Some(true);
         let keep = text(params, "focus") == Some("preserve");
+        // The visit leaves the community as it presents: one entry.
         navigation::with_workspace(cx, move |workspace, window, cx| {
-            workspace.select_personal(window, cx);
             let target = Target {
                 community: None,
                 place,

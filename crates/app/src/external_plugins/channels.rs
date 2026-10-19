@@ -62,7 +62,7 @@ pub fn open_dm(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>,
 }
 
 /// `channels/create`: a new stream channel. Answers with its id.
-pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+pub fn create(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
     let name = text(params, "name")
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -125,8 +125,90 @@ pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
             })
         }
     };
-    let session = community(cx)?.read(cx).session.clone();
-    Ok(on_tokio(cx, async move {
+    let community = community(cx)?;
+    let session = community.read(cx).session.clone();
+    // A lineup's agents must be ones a template may add, by a fresh
+    // archive read (`templateAgentChoices`).
+    let lineup = setup
+        .as_ref()
+        .map(|setup| setup.agents.clone())
+        .filter(|agents| !agents.is_empty());
+    let checked = match lineup {
+        None => Task::ready(Ok(())),
+        Some(agents) => lineup_checked(community, agents, cx),
+    };
+    Ok(cx.spawn(async move |cx| {
+        checked.await?;
+        cx.update(|cx| create_now(session, channel, setup, cx))
+            .await
+    }))
+}
+
+/// Refuses a lineup with an agent a template may not add: not one of
+/// your agents or an agent in a channel you are in, or archived, or
+/// while the archive is unknown.
+fn lineup_checked(
+    community: Entity<crate::community::Community>,
+    agents: Vec<String>,
+    cx: &mut App,
+) -> Task<Result<(), Failure>> {
+    use crate::ui::archives::{self, Status};
+    archives::ensure(&community, true, cx);
+    cx.spawn(async move |cx| {
+        for _ in 0..150 {
+            if cx.update(|cx| archives::status(&community, cx)) != Some(Status::Loading) {
+                break;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+        }
+        cx.update(|cx| {
+            if archives::status(&community, cx) != Some(Status::Ready) {
+                return Err((
+                    3,
+                    "Agent archive state is unavailable; refresh before creating this lineup"
+                        .to_owned(),
+                ));
+            }
+            let rules = crate::ui::me::recipients::rules(&community, cx);
+            let snapshot = &community.read(cx).snapshot;
+            let available = |key: &String| {
+                rules.selectable.contains(key)
+                    || (!rules.archived.contains(key)
+                        && snapshot.profiles.get(key).is_some_and(|profile| profile.is_agent)
+                        && snapshot
+                            .channels
+                            .iter()
+                            .any(|channel| channel.members.contains(key)))
+            };
+            let unavailable: Vec<String> = agents
+                .iter()
+                .filter(|key| !available(key))
+                .map(|key| crate::ui::keys::npub(key))
+                .collect();
+            if unavailable.is_empty() {
+                Ok(())
+            } else {
+                Err((
+                    3,
+                    format!(
+                        "Selected agents are unavailable in this community: {}. Refresh agents or remove them before creating the channel.",
+                        unavailable.join(", ")
+                    ),
+                ))
+            }
+        })
+    })
+}
+
+fn create_now(
+    session: std::sync::Arc<buzz_relay_client::Session>,
+    channel: NewChannel,
+    setup: Option<buzz_relay_client::kit::setup::ChannelSetup>,
+    cx: &mut App,
+) -> Task<Result<Value, Failure>> {
+    on_tokio(cx, async move {
         // As the New channel form does, so `channels/creation` shows it.
         let input = buzz_relay_client::kit::setup::ChannelCreationInput::from_new(&channel, setup);
         let id = session
@@ -134,7 +216,7 @@ pub fn create(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, 
             .await
             .map_err(|error| (3, error))?;
         Ok(json!({ "channel": id }))
-    }))
+    })
 }
 
 /// `channels/creation`: the channel being made now, if any, and notices
@@ -473,9 +555,19 @@ pub fn request_archive(params: &Value, cx: &App) -> Result<Task<Result<Value, Fa
     // Then read the archive Buzz shows again (`request` ends with
     // `refresh()`), so its filters and `archives/get` see the change.
     Ok(cx.spawn(async move |cx| {
+        use crate::ui::archives::{self, Status};
         let done = request.await;
         if done.is_ok() {
-            cx.update(|cx| crate::ui::archives::ensure(&community, true, cx));
+            cx.update(|cx| archives::ensure(&community, true, cx));
+            // Answered once that read finishes (`await refresh()`).
+            for _ in 0..150 {
+                if cx.update(|cx| archives::status(&community, cx)) != Some(Status::Loading) {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
         }
         done
     }))
@@ -602,7 +694,9 @@ pub fn create_session(params: &Value, cx: &App) -> Result<Task<Result<Value, Fai
 
 /// `sessions/memberOf`: the channels that list `pubkey` as a member.
 pub fn member_of(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let pubkey = super::capabilities::pubkey(params, "pubkey")
+    // As given, as `memberChannels` reads `#p`: a key no channel lists
+    // finds none.
+    let pubkey = text(params, "pubkey")
         .ok_or_else(|| invalid("pubkey is required"))?
         .to_owned();
     let session = community(cx)?.read(cx).session.clone();

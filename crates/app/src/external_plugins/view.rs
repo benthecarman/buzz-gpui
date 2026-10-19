@@ -1183,9 +1183,29 @@ impl Render for ExternalView {
 }
 
 /// Whether `params` can be a plugin page's route: any JSON value but
-/// null (the page's start), of at most 8 KiB, as buzz-app's `JsonValue`.
+/// null (the page's start) as buzz-app's targets keep one (`json()`): at
+/// most 8 levels deep and 1024 values, arrays of up to 256 items, objects
+/// of up to 128 keys of up to 128 characters, and 8 KiB in all.
 pub fn route_valid(params: &Value) -> bool {
-    !params.is_null() && params.to_string().len() <= 8_192
+    fn walk(value: &Value, depth: usize, nodes: &mut usize) -> bool {
+        if depth > 8 || *nodes == 0 {
+            return false;
+        }
+        *nodes -= 1;
+        match value {
+            Value::Array(items) => {
+                items.len() <= 256 && items.iter().all(|item| walk(item, depth + 1, nodes))
+            }
+            Value::Object(fields) => {
+                fields.len() <= 128
+                    && fields.iter().all(|(key, item)| {
+                        key.chars().count() <= 128 && walk(item, depth + 1, nodes)
+                    })
+            }
+            _ => true,
+        }
+    }
+    !params.is_null() && params.to_string().len() <= 8_192 && walk(params, 0, &mut 1024)
 }
 
 /// Shows a plugin page at `params`, or its start: the page hears

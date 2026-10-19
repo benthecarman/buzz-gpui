@@ -160,9 +160,12 @@ pub fn snapshot_json(community: &Entity<Community>, cx: &App) -> serde_json::Val
         .as_ref()
         .is_some_and(|relay| !relay.authority.is_empty());
     let key = key(community, cx);
+    // A read from before a retry or cache clear is gone (`clear()`).
+    let generation = community.read(cx).session.generation();
     let entry = cx
         .try_global::<Archives>()
-        .and_then(|archives| archives.0.get(&key));
+        .and_then(|archives| archives.0.get(&key))
+        .filter(|entry| entry.generation == generation);
     let status = match entry.map(|entry| entry.status) {
         _ if !available => "unavailable",
         None => "idle",
@@ -173,7 +176,9 @@ pub fn snapshot_json(community: &Entity<Community>, cx: &App) -> serde_json::Val
     let head = entry.and_then(|entry| entry.snapshot.head.as_ref());
     serde_json::json!({
         "status": status,
+        // Only a finished read lists anyone (`archived: []` while loading).
         "archived": entry
+            .filter(|entry| entry.status == Status::Ready)
             .map(|entry| entry.snapshot.archived.iter().collect::<Vec<_>>())
             .unwrap_or_default(),
         "eventId": head.map(|(_, id)| id),
@@ -192,32 +197,35 @@ pub fn status(community: &Entity<Community>, cx: &App) -> Option<Status> {
         .map(|entry| entry.status)
 }
 
-/// `archiveHides`: a known-archived identity that is not the viewer.
-/// Every identity the community's archive hides from the viewer: all
-/// archived ones but the viewer's own.
-pub fn hidden(community: &Entity<Community>, cx: &App) -> Vec<String> {
-    let viewer = community.read(cx).session.viewer().to_string();
+/// The current read of the community's archive, when it finished:
+/// anything else is unknown, which hides no one (fail open).
+fn known<'a>(community: &Entity<Community>, cx: &'a App) -> Option<&'a ArchiveSnapshot> {
     let key = key(community, cx);
-    cx.try_global::<Archives>()
-        .and_then(|archives| archives.0.get(&key))
-        .map(|entry| {
-            entry
-                .snapshot
-                .archived
-                .iter()
-                .filter(|pubkey| **pubkey != viewer)
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
+    let generation = community.read(cx).session.generation();
+    cx.try_global::<Archives>()?
+        .0
+        .get(&key)
+        .filter(|entry| entry.status == Status::Ready && entry.generation == generation)
+        .map(|entry| &entry.snapshot)
 }
 
+/// Every identity the community's archive hides from the viewer: all
+/// known-archived ones but the viewer's own.
+pub fn hidden(community: &Entity<Community>, cx: &App) -> Vec<String> {
+    let viewer = community.read(cx).session.viewer().to_string();
+    known(community, cx).map_or_else(Vec::new, |snapshot| {
+        snapshot
+            .archived
+            .iter()
+            .filter(|pubkey| **pubkey != viewer)
+            .cloned()
+            .collect()
+    })
+}
+
+/// `archiveHides`: a known-archived identity that is not the viewer.
 pub fn hides(community: &Entity<Community>, pubkey: &str, cx: &App) -> bool {
     let viewer = community.read(cx).session.viewer().to_string();
-    let key = key(community, cx);
     pubkey != viewer
-        && cx
-            .try_global::<Archives>()
-            .and_then(|archives| archives.0.get(&key))
-            .is_some_and(|entry| entry.snapshot.archived.contains(pubkey))
+        && known(community, cx).is_some_and(|snapshot| snapshot.archived.contains(pubkey))
 }
