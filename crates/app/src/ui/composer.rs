@@ -2362,7 +2362,7 @@ impl Composer {
         }) = self.completion.as_ref().and_then(|c| c.items.get(index))
         {
             // A disabled team takes Enter and Tab without sending.
-            if *disabled || self.editing.is_some() {
+            if *disabled {
                 return;
             }
             let recipients = recipients.clone();
@@ -2397,7 +2397,17 @@ impl Composer {
             Suggestion::Team { name, .. } => format!("@{name} "),
             Suggestion::Person { name, .. } => format!("@{name} "),
             Suggestion::Channel { id, name, .. } => format!("{} ", channel_reference(id, name)),
-            Suggestion::Text { text, .. } => text.clone(),
+            // A space after it unless it is only emoji (`replaceCompletion`).
+            Suggestion::Text { text, .. } => {
+                let catalog = self.community.read(cx).snapshot.emoji.entries.clone();
+                if super::markdown::is_emoji_only_by(text, |code| {
+                    catalog.iter().any(|entry| entry.shortcode == code)
+                }) {
+                    text.clone()
+                } else {
+                    format!("{text} ")
+                }
+            }
         };
         self.input.update(cx, |state, cx| {
             let chip = token.and_then(|token| {
@@ -2456,12 +2466,14 @@ impl Composer {
             cx.notify();
             return false;
         }
+        // An edit names people with identity links, never recipients.
+        let editing = self.editing.is_some();
         let chosen = self.recipients(cx);
         let added = recipients
             .iter()
             .filter(|(key, _, _)| !chosen.iter().any(|(have, _)| have == key))
             .count();
-        if chosen.len() + added > 32 {
+        if !editing && chosen.len() + added > 32 {
             self.error = Some("Choose at most 32 recipients".into());
             return false;
         }
@@ -2479,7 +2491,15 @@ impl Composer {
             state.focus(window, cx);
             let range = range.unwrap_or_else(|| state.selected_range());
             for (index, (key, name, _)) in recipients.iter().enumerate() {
-                let token = InlineToken::new(key.clone(), format!("@{name}"));
+                let token = match editing {
+                    true => match message_edit::mention_text(key, name) {
+                        Some(link) => {
+                            InlineToken::new(key.clone(), link).with_label(format!("@{name}"))
+                        }
+                        None => continue,
+                    },
+                    false => InlineToken::new(key.clone(), format!("@{name}")),
+                };
                 let placed = if index == 0 {
                     state.replace_range_with_token(range.clone(), token, window, cx)
                 } else {

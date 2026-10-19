@@ -93,6 +93,35 @@ fn strings(value: &Value) -> Option<Vec<&str>> {
 }
 
 /// Whether `event` matches `filter`, as a relay decides (NIP-01).
+/// [`matches`] for an event as JSON, signed or not yet.
+fn matches_json(filter: &Map<String, Value>, event: &Value) -> bool {
+    let has =
+        |value: &Value, wanted: &str| strings(value).is_some_and(|list| list.contains(&wanted));
+    let text = |key: &str| event.get(key).and_then(Value::as_str).unwrap_or_default();
+    let created_at = event.get("created_at").and_then(Value::as_u64).unwrap_or(0);
+    filter.iter().all(|(key, value)| match key.as_str() {
+        "ids" => has(value, text("id")),
+        "authors" => has(value, text("pubkey")),
+        "kinds" => value.as_array().is_some_and(|kinds| {
+            kinds
+                .iter()
+                .any(|kind| kind.as_u64() == event.get("kind").and_then(Value::as_u64))
+        }),
+        "since" => value.as_u64().is_none_or(|since| created_at >= since),
+        "until" => value.as_u64().is_none_or(|until| created_at <= until),
+        tag if tag.starts_with('#') => event["tags"].as_array().is_some_and(|tags| {
+            tags.iter().any(|t| {
+                t.get(0).and_then(Value::as_str) == Some(&tag[1..])
+                    && t.get(1)
+                        .and_then(Value::as_str)
+                        .is_some_and(|v| has(value, v))
+            })
+        }),
+        "limit" | "consistency" => true,
+        _ => false,
+    })
+}
+
 pub fn matches(filter: &Map<String, Value>, event: &Event) -> bool {
     let has =
         |value: &Value, wanted: &str| strings(value).is_some_and(|list| list.contains(&wanted));
@@ -159,26 +188,34 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
                 .filter_map(|event| event.get("id").and_then(Value::as_str).map(str::to_owned))
                 .collect();
             for op in outbox.pending().iter() {
-                let Some(signed) = &op.signed else {
+                // A send still waiting for its slot is not signed yet; it
+                // counts all the same (`operation.event`).
+                let value = match &op.signed {
+                    Some(signed) => serde_json::to_value(signed),
+                    None => serde_json::to_value(&op.event),
+                };
+                let Ok(mut value) = value else {
                     continue;
                 };
                 // Product feedback never shows, and nothing from a
                 // channel you cannot read (`session.read`).
-                let channel = signed
-                    .tags
-                    .iter()
-                    .map(|tag| tag.as_slice())
-                    .find(|tag| tag.first().map(String::as_str) == Some("h"))
-                    .and_then(|tag| tag.get(1));
-                if signed.kind.as_u16() == 42000
+                let channel = value["tags"]
+                    .as_array()
+                    .and_then(|tags| {
+                        tags.iter()
+                            .find(|tag| tag.get(0).and_then(Value::as_str) == Some("h"))
+                    })
+                    .and_then(|tag| tag.get(1))
+                    .and_then(Value::as_str);
+                if value["kind"].as_u64() == Some(42000)
                     || channel.is_some_and(|channel| !readable.contains(channel))
                 {
                     continue;
                 }
-                if !known.contains(&signed.id.to_hex())
-                    && filters.iter().any(|filter| matches(filter, signed))
-                    && let Ok(mut value) = serde_json::to_value(signed)
+                let id = op.id().to_hex();
+                if !known.contains(&id) && filters.iter().any(|filter| matches_json(filter, &value))
                 {
+                    value["id"] = json!(id);
                     // How it is going, as the projected rows carry.
                     value["delivery"] = json!(super::outbox::delivery_name(op.delivery));
                     value["error"] = json!(op.error);
@@ -186,10 +223,25 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
                 }
             }
         }
-        // Newest first, as the relay answers.
-        events.sort_by_key(|event| {
-            std::cmp::Reverse(event.get("created_at").and_then(Value::as_u64).unwrap_or(0))
-        });
+        // Newest first, ties by id, unless the relay ranked them (a
+        // `search` or `feed_types` filter keeps its order: `projectEvents`).
+        let ranked = filters
+            .iter()
+            .any(|filter| filter.contains_key("search") || filter.contains_key("feed_types"));
+        if !ranked {
+            events.sort_by(|a, b| {
+                let at =
+                    |event: &Value| event.get("created_at").and_then(Value::as_u64).unwrap_or(0);
+                let id = |event: &Value| {
+                    event
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                at(b).cmp(&at(a)).then_with(|| id(a).cmp(&id(b)))
+            });
+        }
         events.truncate(MAX_EVENTS);
         Ok(Value::Array(events))
     }))

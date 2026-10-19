@@ -6,7 +6,7 @@
 //! one, so their rows behave the same.
 
 use super::composer::{Composer, Submission};
-use super::emoji_picker::{self, Dismissed, EmojiPicker, Pick, Picked};
+use super::emoji_picker::{self, Dismissed, EmojiPicker, Pick, Picked, PickedAs};
 use super::markdown::Directory;
 use super::message::{Actions, Command, Hover, Interaction, MenuFacts, Popup, Rows};
 use super::message_edit::{self, EditStatus, Save};
@@ -130,6 +130,22 @@ impl MessageActions {
                 }
                 cx.notify();
             }),
+            cx.subscribe_in(
+                &picker,
+                window,
+                |this, _, PickedAs(text, custom), window, cx| {
+                    if let Some((id, Popup::Picker { .. })) = this.interaction.open.take()
+                        && let Some(row) = (this.hooks.find)(id, cx)
+                    {
+                        let emoji = CustomEmoji {
+                            shortcode: custom.shortcode.clone(),
+                            url: custom.url.clone(),
+                        };
+                        this.react(row, text.clone(), Some(emoji), window, cx);
+                    }
+                    cx.notify();
+                },
+            ),
             cx.subscribe_in(&picker, window, |this, _, _: &Dismissed, window, cx| {
                 // Escape gives focus back to the bar's "Add reaction".
                 match this.interaction.open.take() {

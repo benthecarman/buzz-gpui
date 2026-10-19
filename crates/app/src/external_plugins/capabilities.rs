@@ -941,7 +941,7 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
             None => Section::default_for(AppState::current(cx).is_some()),
             Some("profile") => Section::Profile,
             // The Emoji plugin's card, gone while Emoji is off.
-            Some("custom-emoji" | "buzz.emoji/custom-emoji") => {
+            Some("buzz.emoji/custom-emoji") => {
                 if !crate::plugins::enabled("buzz.emoji") {
                     return Err((
                         MISSING,
@@ -999,13 +999,25 @@ fn place_of(params: &Value, cx: &App) -> Result<Place, Failure> {
             }
             // The whole target, as buzz-app keeps it, fits in 8 KiB.
             if let (Some(route), Some((plugin, page))) = (route, key.split_once('/')) {
-                let target = json!({
+                let mut target = json!({
                     "version": 1,
                     "kind": "page",
                     "pluginId": plugin,
                     "pageId": page,
                     "route": { "version": version.unwrap_or(1), "params": route },
                 });
+                match params.get("community") {
+                    Some(Value::Null) => target["scope"] = Value::Null,
+                    Some(Value::String(relay)) => {
+                        target["scope"] = json!({
+                            "viewer": "0".repeat(64),
+                            "communityOrigin": buzz_relay_client::RelayOrigin::parse(relay)
+                                .map(|origin| origin.http())
+                                .unwrap_or_else(|_| relay.clone()),
+                        })
+                    }
+                    _ => {}
+                }
                 if target.to_string().len() > 8_192 {
                     return Err(invalid(
                         "params must be JSON of at most 8 KiB, 8 levels and 1024 values",
@@ -2158,15 +2170,17 @@ pub fn typing_all(cx: &App) -> Result<Value, Failure> {
 /// `people/search`: people in the community whose profile matches
 /// `query`, a page at a time.
 pub fn search_people(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
-    let query = text(params, "query")
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_owned();
-    let page = params
-        .get("page")
-        .and_then(Value::as_u64)
-        .unwrap_or(1)
-        .max(1) as usize;
+    // At most 100 characters as given, and a page from 1 (`people`).
+    let raw = text(params, "query").unwrap_or_default();
+    let page = match params.get("page") {
+        None | Some(Value::Null) => Some(1),
+        Some(page) => page.as_u64().filter(|page| *page >= 1),
+    };
+    let (Some(page), true) = (page, raw.encode_utf16().count() <= 100) else {
+        return Err(invalid("Invalid people search."));
+    };
+    let page = page as usize;
+    let query = raw.trim().to_owned();
     // As the Add member search does: the viewer included, and an exact
     // key found even without a profile.
     let members = params.get("members").and_then(Value::as_bool) == Some(true);
@@ -2671,7 +2685,7 @@ pub fn notify(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failu
     use crate::notifications::categories::{self, Submission};
     let category = text(params, "category").ok_or_else(|| invalid("category is required"))?;
     let source = text(params, "sourceKey")
-        .filter(|key| !key.is_empty() && key.chars().count() <= 1024)
+        .filter(|key| !key.is_empty() && key.encode_utf16().count() <= 1024)
         .ok_or_else(|| invalid("sourceKey is required (up to 1024 characters)"))?;
     // The community the request reaches: one it names, or the selected;
     // none for a place in Personal space (`community: null`).

@@ -63,6 +63,11 @@ impl Pick {
 
 pub struct Picked(pub Pick);
 
+/// A plugin reaction picker chose one of the community's custom emoji by
+/// `:shortcode:`, written as it chose to: the reaction says that text,
+/// tagged with the catalog's emoji (`react(content, catalogEmoji(..))`).
+pub struct PickedAs(pub String, pub CustomEmoji);
+
 /// Escape in the picker: close it without a pick.
 pub struct Dismissed;
 
@@ -669,6 +674,7 @@ struct GifTab {
 }
 
 impl EventEmitter<Picked> for EmojiPicker {}
+impl EventEmitter<PickedAs> for EmojiPicker {}
 impl EventEmitter<PickedGif> for EmojiPicker {}
 impl EventEmitter<Dismissed> for EmojiPicker {}
 
@@ -1521,10 +1527,10 @@ impl EmojiPicker {
                             .find(|entry| entry.shortcode == code)
                             .cloned()
                     });
-                cx.emit(Picked(match custom {
-                    Some(custom) => Pick::Custom(custom),
-                    None => Pick::Unicode(emoji),
-                }))
+                match custom {
+                    Some(custom) => cx.emit(PickedAs(emoji, custom)),
+                    None => cx.emit(Picked(Pick::Unicode(emoji))),
+                }
             });
         });
         let community = self.community.clone();

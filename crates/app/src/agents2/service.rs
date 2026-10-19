@@ -348,6 +348,8 @@ struct Seen {
     kind: Option<RegisteredType>,
 }
 
+/// Why a local agent cannot become a hosted type's (`retype`).
+const HOSTED_RETYPE: &str = "A hosted provider cannot take over a local agent key";
 impl PartialEq for Seen {
     fn eq(&self, other: &Self) -> bool {
         self.agent == other.agent
@@ -2373,6 +2375,10 @@ impl Agents2 {
         type_key: &str,
         cx: &mut Context<Self>,
     ) -> Task<Result<Agent, String>> {
+        // A hosted agent's key stays with its provider (`port`).
+        if super::is_hosted(type_key, cx) {
+            return Task::ready(Err("A hosted agent's key stays with its provider".into()));
+        }
         let (source, pubkey) = (portable.agent.source, portable.agent.pubkey.clone());
         self.add(
             type_key,
@@ -2605,6 +2611,9 @@ impl Agents2 {
     ) -> Result<RetypePreview, String> {
         let identity = self.live(pubkey).ok_or("No such agent on this device")?;
         let kind = registry::type_of(type_key, cx).ok_or("That agent type is not available")?;
+        if super::is_hosted(type_key, cx) {
+            return Err(HOSTED_RETYPE.into());
+        }
         let record = self.record_of(&identity.summary, cx);
         if type_key == identity.summary.agent_type {
             return Ok(RetypePreview {
@@ -2640,6 +2649,9 @@ impl Agents2 {
         };
         if registry::type_of(type_key, cx).is_none() {
             return Task::ready(Err("That agent type is not available".into()));
+        }
+        if super::is_hosted(type_key, cx) {
+            return Task::ready(Err(HOSTED_RETYPE.into()));
         }
         let old_type = identity.summary.agent_type.clone();
         if type_key == old_type {

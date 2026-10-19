@@ -136,7 +136,12 @@ pub fn ensure(community: &Entity<Community>, again: bool, cx: &mut App) {
                 }
                 // A failed read shows nothing as archived (fail open).
                 Err(error) => {
-                    entry.snapshot = ArchiveSnapshot::default();
+                    // Its newest snapshot still fences off older ones
+                    // (`head` survives a failure).
+                    entry.snapshot = ArchiveSnapshot {
+                        head: entry.snapshot.head.take(),
+                        ..ArchiveSnapshot::default()
+                    };
                     entry.status = Status::Error;
                     entry.error = Some(error);
                     entry.read_at = None;

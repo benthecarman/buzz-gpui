@@ -151,10 +151,11 @@ fn valid_plugin_id(id: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
-/// buzz-app's `[a-z0-9][a-z0-9._-]*`, up to 64 characters.
+/// buzz-app's `[a-z0-9][a-z0-9._-]*`, up to 128 characters, as a
+/// navigation target's ids may be.
 pub fn valid_contribution_id(id: &str) -> bool {
     let mut chars = id.chars();
-    id.len() <= 64
+    id.len() <= 128
         && chars
             .next()
             .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
@@ -316,8 +317,8 @@ pub struct AgentTypeDecl {
     pub attention: serde_json::Map<String, Value>,
     /// How long one run may take, at most 30 minutes; a minute by default,
     /// as buzz-app's `timeoutMs`.
-    #[serde(default = "one_minute")]
-    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
     /// Whether Buzz asks `agent/summary` for the line under an agent's
     /// name; without it the line is the title.
     #[serde(default)]
@@ -429,10 +430,6 @@ pub struct MigrationSettingDecl {
 
 fn one() -> u32 {
     1
-}
-
-fn one_minute() -> u64 {
-    60
 }
 
 /// Suggestions after a trigger character typed in the composer
@@ -879,7 +876,7 @@ impl Contributions {
         for category in &self.notifications {
             id(&category.id)?;
             // Labels may run to 128 characters, as buzz-app's.
-            if category.label.trim().is_empty() || category.label.chars().count() > 128 {
+            if category.label.trim().is_empty() || category.label.encode_utf16().count() > 128 {
                 return Err(format!(
                     "“{}” needs a label of 1 to 128 characters.",
                     category.id
@@ -1004,7 +1001,18 @@ impl Contributions {
             {
                 return Err(format!("“{}”'s config must be an object.", kind.id));
             }
-            if !(1..=1_800).contains(&kind.timeout_seconds) {
+            // A hosted type's provider runs it: no models to pick, no
+            // run time of Buzz's to bound (`remote`).
+            if kind.hosted && (kind.models || kind.timeout_seconds.is_some()) {
+                return Err(format!(
+                    "“{}” is hosted, so it takes no models or timeout.",
+                    kind.id
+                ));
+            }
+            if kind
+                .timeout_seconds
+                .is_some_and(|timeout| !(1..=1_800).contains(&timeout))
+            {
                 return Err(format!(
                     "“{}”'s timeout must be 1 to 1800 seconds.",
                     kind.id

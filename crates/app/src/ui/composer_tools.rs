@@ -199,7 +199,7 @@ pub fn resource_source(uri: &str, label: &str) -> Option<(String, String)> {
             && url.as_str() == uri
             && url.username().is_empty()
             && url.password().is_none());
-    if text.is_empty() || !linkable || uri.contains(char::is_whitespace) || uri.contains(')') {
+    if text.is_empty() || !linkable || uri.contains(char::is_whitespace) {
         return None;
     }
     let mut escaped = String::new();
@@ -209,7 +209,26 @@ pub fn resource_source(uri: &str, label: &str) -> Option<(String, String)> {
         }
         escaped.push(c);
     }
-    Some((format!("[{escaped}]({uri})"), text))
+    let source = format!("[{escaped}]({uri})");
+    // One whole link to exactly `uri`, as buzz-app parses it back
+    // (`composerResource`): balanced parentheses are fine, others are not.
+    single_link(&source, uri).then_some((source, text))
+}
+
+/// Whether `source` is one Markdown link to `url` and nothing else.
+fn single_link(source: &str, url: &str) -> bool {
+    use markdown::mdast::Node;
+    let Ok(Node::Root(root)) = markdown::to_mdast(source, &markdown::ParseOptions::gfm()) else {
+        return false;
+    };
+    let [Node::Paragraph(paragraph)] = root.children.as_slice() else {
+        return false;
+    };
+    matches!(
+        paragraph.children.as_slice(),
+        [Node::Link(link)] if link.url == url
+            && link.position.as_ref().is_some_and(|at| at.start.offset == 0 && at.end.offset == source.len())
+    )
 }
 
 /// Where the selection sits in the draft's Markdown.
@@ -345,6 +364,11 @@ mod tests {
         assert_eq!(resource_source(&uri, " \n "), None);
         assert_eq!(resource_source("javascript:alert(1)", "x"), None);
         assert_eq!(resource_source("buzz://repo?owner=x", "x"), None);
+        let wiki = "https://en.wikipedia.org/wiki/Rust_(programming_language)";
+        assert!(resource_source(wiki, "Rust").is_some());
+        assert_eq!(resource_source("https://x.test/a(b", "x"), None);
+        assert_eq!(resource_source("https://example.com", "x"), None);
+        assert_eq!(resource_source("https://user:pw@example.com/", "x"), None);
     }
 
     #[test]

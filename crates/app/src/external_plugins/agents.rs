@@ -888,7 +888,7 @@ pub fn register(
             description: decl.description.clone().map(Into::into),
             config: decl.config.clone().unwrap_or_else(|| json!({})),
             instructions: decl.instructions.clone(),
-            timeout: Duration::from_secs(decl.timeout_seconds),
+            timeout: Duration::from_secs(decl.timeout_seconds.unwrap_or(60)),
             requester: requester.clone(),
             summary: decl.summary,
             peek: decl.peek,
@@ -1190,11 +1190,29 @@ pub fn create(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure
             }),
     };
     let (kind, name) = (kind.to_owned(), name.to_owned());
-    let hosted = crate::agents2::is_hosted(&kind, cx);
-    let task = agents2(cx)?.update(cx, |agents, cx| agents.create(&kind, &name, made, None, cx));
+    let service = agents2(cx)?;
+    // A hosted type's provider makes and runs it (`agent/provision`,
+    // `agent/activate`), as the Agents page's create does.
+    if crate::agents2::is_hosted(&kind, cx) {
+        let picture = made.picture;
+        let task = service.update(cx, |agents, cx| {
+            agents.create_hosted(&kind, &name, picture, cx)
+        });
+        return Ok(cx.spawn(async move |cx| {
+            let pubkey = task.await.map_err(|error| (3, error))?;
+            Ok(cx.update(|cx| {
+                service
+                    .read(cx)
+                    .find(&pubkey)
+                    .map(|agent| entry_at(agent, true))
+                    .unwrap_or_else(|| json!({ "pubkey": pubkey, "place": "hosted" }))
+            }))
+        }));
+    }
+    let task = service.update(cx, |agents, cx| agents.create(&kind, &name, made, None, cx));
     Ok(cx.background_spawn(async move {
         task.await
-            .map(|agent| entry_at(&agent, hosted))
+            .map(|agent| entry_at(&agent, false))
             .map_err(|error| (3, error))
     }))
 }

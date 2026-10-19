@@ -2087,18 +2087,22 @@ impl Actor {
                 } else {
                     Vec::new()
                 };
-                if !events.is_empty() {
+                let visible = if events.is_empty() {
+                    Vec::new()
+                } else {
                     let visible = self.accept(&events);
                     let connected = self.live.as_ref().is_some_and(Live::is_connected);
                     if connected && self.activity_accept(&visible) {
                         self.publish();
                     }
-                }
+                    visible
+                };
                 if !pulses.is_empty() && self.live.as_ref().is_some_and(Live::is_connected) {
                     self.typing_accept(&pulses);
                 }
+                // Only what the access filter kept (`subscribeLive`).
                 if phase == crate::live::Phase::Live {
-                    self.feed_live(&events, channel.as_deref());
+                    self.feed_live(&visible, channel.as_deref());
                 }
                 let arrived: Vec<String> = candidates
                     .iter()
@@ -2569,6 +2573,13 @@ impl Actor {
                 attachments,
                 thread,
             } => {
+                // Mentions are checked against live membership, so none go
+                // while the live connection is down (`mentionTags`).
+                if !mentions.recipients.is_empty()
+                    && !self.live.as_ref().is_some_and(Live::is_connected)
+                {
+                    return Err("Refresh channel membership before mentioning anyone".into());
+                }
                 if let Some(discovery) = &self.discovery {
                     crate::members::validate_mentions(
                         discovery.get(&channel).as_ref(),
@@ -2597,7 +2608,11 @@ impl Actor {
                 id,
                 content,
             } => {
-                let original = find(&channel, &id)?;
+                // A thread reply open in its thread is found too.
+                let original = find(&channel, &id)
+                    .ok()
+                    .or_else(|| self.find_message(&channel, &id))
+                    .ok_or("Load the message first")?;
                 // The folded row says where its media came from: the
                 // original or the latest own edit carrying `imeta`.
                 let source = self

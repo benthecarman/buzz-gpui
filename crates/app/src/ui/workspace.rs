@@ -972,14 +972,21 @@ impl Workspace {
         let Some(current) = self.history.current().cloned() else {
             return false;
         };
-        self.history.replace(Target {
+        let routes = crate::ui::pages::routes(page, cx);
+        let target = Target {
             community: current.community,
             place: Place::Route {
                 page,
                 params: params.clone(),
-                version: crate::ui::pages::routes(page, cx).map(|routes| routes.version),
+                version: routes.map(|routes| routes.version),
             },
-        });
+        };
+        self.history.replace(target.clone());
+        // A route the page does not take fails the visit as `unavailable`.
+        if routes.is_none_or(|routes| !(routes.validate)(&params)) {
+            self.fail_presenting(target, Reason::Page, cx);
+            return true;
+        }
         self.page_route = Some(params);
         cx.notify();
         true
@@ -1339,11 +1346,22 @@ impl Workspace {
             Place::Page(page) | Place::Route { page, .. } => {
                 pages::spec(*page, cx).is_none() && starting(page.key())
             }
+            // A community's section waits for one to be selected, as
+            // buzz-app's Settings never shows it in Personal space.
+            Place::Settings(super::settings::Section::CustomEmoji) => {
+                AppState::current(cx).is_none()
+            }
             Place::Settings(super::settings::Section::Card(key)) => {
-                match cards::get(key, cx).map(|card| card.visibility(cx)) {
-                    Some(CardVisibility::Pending) => true,
+                let personal = AppState::current(cx).is_none();
+                match cards::get(key, cx) {
+                    Some(card)
+                        if personal
+                            && !matches!(card.placement, cards::CardPlacement::Group(_)) =>
+                    {
+                        true
+                    }
+                    Some(card) => card.visibility(cx) == CardVisibility::Pending,
                     None => starting(key),
-                    _ => false,
                 }
             }
             Place::Unresolved(request) => {

@@ -114,7 +114,7 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
 ```
 
 - A contribution `id` starts with a lowercase letter or digit, then uses
-  those, `.`, `-` and `_`. Titles are
+  those, `.`, `-` and `_`, up to 128 characters. Titles are
   1 to 64 characters.
 - `icon` names a Buzz icon, such as `House`, `Globe`, `Bell`, `Gear`, `Code`
   or `Plug`. An unknown name shows the plug icon. A page's `icon` can also be
@@ -260,7 +260,10 @@ keeps the answer until anything in it changes:
   and, with a picture, asks `agent/profile` (`type`, `pubkey`, `community`,
   `name`, `picture`). Deleting it asks `agent/remove` (`type`, `pubkey`,
   `community`). Each step may come again after a failure, so make each safe to
-  repeat. The Agents page shows these agents as Hosted.
+  repeat. The Agents page shows these agents as Hosted, and `agents/create`
+  with this type makes one the same way. A hosted type takes no `models`
+  or `timeoutSeconds`, and no local agent can be changed to it or brought
+  over as one (`agents/retype`, `agents/previewRetype`, `agents/port`).
 - `carry` (`{"instructions", "workspace"}`, each a config key): what another
   type takes over when an agent changes type, and where this type keeps what
   it takes over. `migrationWarning` says what leaving this type costs.
@@ -319,7 +322,7 @@ same way, per query.
 | `inline/render` | `renderer`, `text` (what the pattern matched, up to 200 bytes; at most 32 pieces per segment are asked about), `segment` (the plain-text segment it was found in, `content.text`) and `start` (where, in characters), `message` (the message it is in), `reaction` (a quick reaction drawn, as `{"content","emoji":{"shortcode","url"},"events":[]}`, or `null` for message text) | `{"tree"}`, drawn in the line of text, or `null` to leave it as text. Buzz asks once per piece and message. |
 | `names/resolve` | `policy`, `identities` (`[{"pubkey","name","isAgent","owner"}]`, at most 5,000), `viewer`, `candidates` (the keys in view, or `null` for everyone) | `{"labels": {"<pubkey>": {"name", "qualifier"}}}`. Keys left out show their public name. |
 | `service/request` | `from` (the asking plugin's id), `service`, `method`, `params` | Any JSON, handed back to the plugin that asked. An error is passed on as its error. |
-| `completion/query` | `completion`, `request` (this query's id, for `completion/publish`), `query` (the text after the trigger, up to the caret), `community` (the composer's `wss://` relay), `observation` (`{"text","start","end"}`: the draft and the query's character range in it, as it was when the query was first typed; there is no `revision`, as Buzz checks a pick against the draft itself), `channel`, `thread` (the root the composer replies in, or `null`), `inviteAgents` (`true` in a new session's composer, which may offer your library agents not yet in the conversation) | `{"items", "status", "retry"}`: at most 50 items `{"label", "detail", "text", "mentions", "preview", "disabled", "exact", "image", "avatar"}`. `image` (an https or `data:image/` URL) or `avatar` (a pubkey, drawn with the person's picture) shows before the label. Picking one replaces the trigger and query with `text`, or with `mentions` (pubkeys, or `{"pubkey","name"}` to name the chip) as chips that make them recipients. `preview` is a line under the label; `disabled` is why it cannot be picked; a space typed after the query picks the item marked `exact`. `status` shows a line such as "No matches", and `retry: true` adds a row that asks again. |
+| `completion/query` | `completion`, `request` (this query's id, for `completion/publish`), `query` (the text after the trigger, up to the caret), `community` (the composer's `wss://` relay), `observation` (`{"text","start","end"}`: the draft and the query's character range in it, as it was when the query was first typed; there is no `revision`, as Buzz checks a pick against the draft itself), `channel`, `thread` (the root the composer replies in, or `null`), `inviteAgents` (`true` in a new session's composer, which may offer your library agents not yet in the conversation) | `{"items", "status", "retry"}`: at most 50 items `{"label", "detail", "text", "mentions", "preview", "disabled", "exact", "image", "avatar"}`. `image` (an https or `data:image/` URL) or `avatar` (a pubkey, drawn with the person's picture) shows before the label. Picking one replaces the trigger and query with `text` and a space (none after text that is only emoji), or with `mentions` (pubkeys, or `{"pubkey","name"}` to name the chip) as chips that make them recipients; while editing a message they become identity links instead. `preview` is a line under the label; `disabled` is why it cannot be picked; a space typed after the query picks the item marked `exact`. `status` shows a line such as "No matches", and `retry: true` adds a row that asks again. |
 
 Answers are kept, but not forever:
 
@@ -638,7 +641,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `reaction/select` | `view` (an open `reactionPicker`), `emoji` (a unicode emoji, or `:shortcode:` for one of the community's custom emoji) | `null`. Buzz reacts with it, or takes the reaction back if it is already yours, and closes the picker. |
 | `composer/settle` | `view`, `element` (a composer that handed the plugin its draft), `sent` | `null`. With `sent: true` the composer clears; otherwise it keeps the draft to try again. |
 | `composer/insert` | `composer` (from `composer/tool`, or an embedded composer's `ready`), `text` | `null`, after putting the text at the composer's caret |
-| `composer/insertMentions` | `composer`, `pubkeys` (at most 32), or `mentions` (`[{"pubkey","name"}]`, to label each chip yourself, as `insertMention` does) | `null`, after putting mention chips at the caret; the people become recipients. In a conversation, everyone must be mentionable there (not archived, and in a session a member or one of your agents), or nothing is inserted and it answers "A team member is no longer available." Like the other composer writes (`composer/insert`, `composer/insertResource`, `composer/capture`), it is refused while the composer is disabled or read-only. |
+| `composer/insertMentions` | `composer`, `pubkeys` (at most 32), or `mentions` (`[{"pubkey","name"}]`, to label each chip yourself, as `insertMention` does) | `null`, after putting mention chips at the caret; the people become recipients. In a conversation, everyone must be mentionable there (not archived, and in a session a member or one of your agents), or nothing is inserted and it answers "A team member is no longer available." While editing a message the people are inserted as identity links, as an edit never adds recipients. Like the other composer writes (`composer/insert`, `composer/insertResource`, `composer/capture`), it is refused while the composer is disabled or read-only. |
 | `composer/toolState` | `tool`, and optionally `composer` (one composer; all without it), `pressed`, `badge` (up to 64 characters), `disabled` (why it cannot be used, shown in its tooltip) | `null`. What the tool's button shows, as a buzz-app tool component draws its own state. |
 | `composer/openPopover` | `composer`, `tool`, `context` (optional) | `{"view"}`: a view of `kind` `toolPopover`, anchored above the tool's button, whose `view/open` carries `contribution` (the tool id), `composer` and `context`. It closes with `ui/closeView`, a click outside, or another popover. |
 | `composer/insertResource` | `composer`, `uri` (a Buzz link, or a web link in its normal form without credentials, such as `https://example.com/`), `label`; at most 32 links per message, web links included | `null`, after putting the link as one chip at the caret |
@@ -798,6 +801,15 @@ buzz-app plugins are JavaScript running inside the app; these are programs
 that draw with Buzz's elements. Everything buzz-app's plugin API offers has a
 request, a notification or a contribution here. Where a buzz-app plugin
 passes a function, or reaches into the app, it works differently:
+
+- **A notification's page belongs to a community.** A page or settings
+  notification sent without `community` opens in the community selected
+  when it was sent; buzz-app's leaves the selection alone.
+
+- **`events/query` reads what the relay gives.** Its events are
+  verified and filtered to channels you can read, but a reaction, edit or
+  deletion is not held back because its target is one Buzz has not
+  loaded; buzz-app's `read` drops those.
 
 - **A relay that never archived anyone.** A community whose relay has no
   NIP-IA archive snapshot (kind 13535) reads as `ready` with nobody
