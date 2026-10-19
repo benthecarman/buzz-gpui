@@ -392,8 +392,8 @@ opened from the channel header has the channel id as its `target`. `thread`
 is the thread showing beside the conversation when the panel opened, and
 `root` the thread of the message whose link opened the panel
 (`context.rootId`), or `null`. A panel beside a page (an `appLauncher`'s,
-or one opened outside a conversation) has no `channel`, `channelName`,
-`thread` or `root`. A panel's
+or one opened outside a conversation) has no `channel`, `thread` or
+`root`, and none of `community`, `viewer`, `scope` or `channelName`. A panel's
 `view/open` also carries the rest of `ChannelPanelContext`: `community` (its
 relay, which may not be the selected community), `viewer`, `scope` (the relay and you, `relay#pubkey`) and `channelName`.
 
@@ -859,7 +859,7 @@ passes a function, or reaches into the app, it works differently:
   `generation` changes with every retry and cache clear, where buzz-app's
   changes only when the session is replaced: not for a retry while
   connecting, a retry of a saved snapshot, or a cache clear of a
-  connected or saved session.
+  connected, saved or failed session.
 
 - **Statuses are read for anyone.** `statuses/get` answers for every key
   asked about; buzz-app's `statuses.current` answers only for people

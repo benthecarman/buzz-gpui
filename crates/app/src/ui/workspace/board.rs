@@ -191,14 +191,17 @@ impl Workspace {
         page.read(cx).work()
     }
 
-    /// Page `page` was taken away: its view closes, and the visit showing
-    /// it fails as `unavailable`, as a route to no page does.
+    /// Page `page` was taken away: its view closes. A visit still waiting
+    /// for it to settle fails as `unavailable`; one already open stays
+    /// open, as buzz-app's settled visit does.
     pub(crate) fn withdraw_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.views.remove(&page);
         self.own_sidebars.remove(&page);
-        if self.page == page {
-            let target = self.history.current().cloned();
-            self.fail_open(target, crate::ui::channel_states::Reason::Page, cx);
+        if self.page == page
+            && self.settling == Some(page)
+            && let Some(target) = self.history.current().cloned()
+        {
+            self.fail_presenting(target, crate::ui::channel_states::Reason::Page, cx);
         }
         cx.notify();
     }
@@ -212,10 +215,12 @@ impl Workspace {
     /// A panel tab now shows `new` in place of `old` (`panel/open` or
     /// `panel/push` within itself): the saved tab follows, so the view
     /// made anew opens there, and a tab already showing `new` takes over.
+    /// Only `view`'s own tab follows: a drawer or a panel beside the page
+    /// retargets itself alone.
     pub(crate) fn retarget_panel(
         &mut self,
         panel: &str,
-        channel: &str,
+        view: EntityId,
         old: &str,
         new: &str,
         cx: &mut Context<Self>,
@@ -223,13 +228,19 @@ impl Workspace {
         // Me's conversation keeps its own tabs.
         if self.page == Page::ME {
             if let Some(work) = self.me_work(cx) {
-                work.update(cx, |work, cx| work.retarget_panel(panel, old, new, cx));
+                work.update(cx, |work, cx| {
+                    work.retarget_panel(panel, view, old, new, cx)
+                });
             }
+            return;
+        }
+        let own = format!("{panel}:{old}");
+        if !matches!(self.tab_views.get(&own), Some(TabView::Panel(shown)) if shown.entity_id() == view)
+        {
             return;
         }
         // Tabs are kept under the channel the board shows, whichever
         // channel a tab names.
-        let _ = channel;
         let Some(key) = self.tab_key(cx) else {
             return;
         };

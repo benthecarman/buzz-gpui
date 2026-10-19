@@ -493,13 +493,13 @@ impl ExternalView {
         };
         let old = std::mem::replace(&mut opening.target, target.clone());
         // Its tab, if it is one, follows.
-        let (panel, channel) = (
+        let (panel, view) = (
             format!("{}/{}", self.plugin, self.contribution),
-            opening.channel.clone(),
+            cx.entity_id(),
         );
         let (from, to) = (old.clone(), target.clone());
         crate::ui::navigation::with_workspace(cx, move |workspace, _, cx| {
-            workspace.retarget_panel(&panel, &channel, &from, &to, cx)
+            workspace.retarget_panel(&panel, view, &from, &to, cx)
         });
         if push {
             self.back.push(old);
@@ -647,7 +647,9 @@ impl ExternalView {
         });
         // The rest of `ChannelPanelContext`: the panel's community, which
         // may not be the selected one, who you are there, and the channel.
-        if let Some(opening) = opening {
+        // A panel beside a page has none of it (`channelContext` comes only
+        // with a channel presentation).
+        if let Some(opening) = opening.filter(|opening| !opening.channel.is_empty()) {
             let community = opening.community.read(cx);
             params["community"] = json!(community.origin.websocket());
             params["viewer"] = json!(community.session.viewer().to_string());

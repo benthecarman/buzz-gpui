@@ -301,11 +301,17 @@ impl SessionWork {
     pub(crate) fn retarget_panel(
         &mut self,
         panel: &str,
+        view: gpui_kit::EntityId,
         old: &str,
         new: &str,
         cx: &mut Context<Self>,
     ) {
         let (old_id, new_id) = (format!("{panel}:{old}"), format!("{panel}:{new}"));
+        // Only `view`'s own tab follows.
+        if !matches!(self.tab_views.get(&old_id), Some(TabView::Panel(shown)) if shown.entity_id() == view)
+        {
+            return;
+        }
         if !self.tabs(cx).panels.iter().any(|tab| tab.id() == new_id)
             && let Some(view) = self.tab_views.remove(&old_id)
         {

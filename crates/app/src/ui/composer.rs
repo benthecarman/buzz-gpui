@@ -595,6 +595,11 @@ impl Composer {
         self.session_conversation = true;
     }
 
+    /// Not one after all, as the Inbox's fallback thread reader is not.
+    pub fn not_conversation_view(&mut self) {
+        self.session_conversation = false;
+    }
+
     /// The community this composer writes in.
     pub fn community(&self) -> &Entity<Community> {
         &self.community

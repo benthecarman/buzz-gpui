@@ -658,6 +658,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        self.ensure_page_view(window, cx);
         let dialog = self.dialog(window, cx);
         let main: AnyElement = if let Some((_, onboarding)) = &self.onboarding
             && self.page != Page::SETTINGS
@@ -876,6 +877,18 @@ impl Workspace {
     /// A registered page's view. Every bundled page uses buzz-app's
     /// workspace layout and owns its padding; document layout is only for
     /// external plugins, which are skipped.
+    /// A page registered again after it was taken away is built anew
+    /// when shown, as it remounts.
+    fn ensure_page_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.views.contains_key(&self.page) {
+            return;
+        }
+        if let Some(build) = pages::spec(self.page, cx).and_then(|spec| spec.build) {
+            let view = build(window, cx);
+            self.views.insert(self.page, view);
+        }
+    }
+
     fn page_view(&self, page: Page) -> AnyElement {
         self.views
             .get(&page)
@@ -1394,7 +1407,12 @@ impl Workspace {
     }
 
     /// The visit fails as it presents, kept for Retry navigation.
-    fn fail_presenting(&mut self, target: Target, reason: Reason, cx: &mut Context<Self>) {
+    pub(super) fn fail_presenting(
+        &mut self,
+        target: Target,
+        reason: Reason,
+        cx: &mut Context<Self>,
+    ) {
         self.failure = Some(Failed {
             target: Some(target),
             reason,

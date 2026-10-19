@@ -60,6 +60,10 @@ pub struct InboxDetail {
     reader: Option<Reader>,
     /// The message to reveal once the channel's rows load.
     reveal: Option<EventId>,
+    /// The message and thread root the row had when selected, which the
+    /// reader anchors on and opens (`selectedTarget`): reading moves the
+    /// row's own message on.
+    anchor: (String, Option<String>),
     /// The message the channel's newest rows did not hold, shown in a
     /// thread reader instead, once (`ChannelPreview`'s fallback).
     fallback: Option<EventId>,
@@ -83,6 +87,7 @@ impl InboxDetail {
         let mut detail = Self {
             _subscriptions: vec![cx.observe(&community, |_, _, cx| cx.notify())],
             community,
+            anchor: (item.message_id.clone(), item.root_id.clone()),
             item,
             incomplete,
             archive: ArchiveAction::default(),
@@ -153,7 +158,7 @@ impl InboxDetail {
             return;
         };
         let community = self.community.clone();
-        let message = EventId::from_hex(&self.item.message_id).ok();
+        let message = EventId::from_hex(&self.anchor.0).ok();
         match (&self.item.target, message) {
             (ReadTarget::Channel { .. }, message) => {
                 let origin = community.read(cx).origin.to_string();
@@ -227,6 +232,12 @@ impl InboxDetail {
         }
         let channel = self.item.channel_id.clone();
         let panel = self.thread_reader(&channel, message, window, cx);
+        // It is no session conversation's own view (`ChannelPreview`
+        // passes no `sessionConversation`).
+        panel
+            .read(cx)
+            .composer_entity()
+            .update(cx, |composer, _| composer.not_conversation_view());
         self.reader = Some(Reader::Thread(panel));
     }
 
@@ -248,15 +259,15 @@ impl InboxDetail {
 
     fn open(&self, cx: &mut Context<Self>) {
         let root = self
-            .item
-            .root_id
+            .anchor
+            .1
             .as_deref()
             .and_then(|root| EventId::from_hex(root).ok());
         let target = Target {
             community: Some(self.community.read(cx).origin.to_string()),
             place: Place::Conversation {
                 channel: self.item.channel_id.clone(),
-                message: EventId::from_hex(&self.item.message_id).ok(),
+                message: EventId::from_hex(&self.anchor.0).ok(),
                 thread: root,
                 members: false,
             },

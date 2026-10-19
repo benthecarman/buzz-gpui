@@ -70,7 +70,7 @@ pub struct UnreadCounts {
     /// search's "Recent activity" detail.
     pub previews: HashMap<String, String>,
     /// Unread threads per channel (`unread.activity`), newest first, for
-    /// channels that have any.
+    /// every channel whose read state is known.
     pub activity: HashMap<String, Arc<ThreadActivitySnapshot>>,
 }
 
@@ -1346,6 +1346,11 @@ impl Actor {
             }
             let activity = reads.unread.activity(id, &reads.sync);
             let threads = activity.items.as_ref().map_or(0, Vec::len) as u32;
+            // Every channel whose read state is known, none unread
+            // included, as `threads/activity` answers (`computeActivity`).
+            if activity.items.is_some() {
+                counts.activity.insert(id.clone(), activity.clone());
+            }
             if !snapshot.unread() && threads == 0 {
                 continue;
             }
@@ -1362,9 +1367,6 @@ impl Actor {
                 threads,
                 threads_stale: activity.freshness == Freshness::Stale,
             };
-            if threads > 0 {
-                counts.activity.insert(id.clone(), activity);
-            }
             if row.unread {
                 counts.mentions += row.mentions;
                 if *dm {
