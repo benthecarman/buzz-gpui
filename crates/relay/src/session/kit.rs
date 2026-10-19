@@ -613,7 +613,7 @@ async fn complete(session: &Arc<Session>, ctx: &Kit, mut p: Progress) -> Result<
             if *agent == ctx.viewer || p.added.contains(agent) {
                 continue;
             }
-            session.add_member(&p.id, agent).await?;
+            session.add_member_plain(&p.id, agent).await?;
             if !p.accepted.contains(agent) {
                 p.accepted.push(agent.clone());
             }

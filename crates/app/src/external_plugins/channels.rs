@@ -170,9 +170,31 @@ fn lineup_checked(
                         .to_owned(),
                 ));
             }
-            // Your agents here, none archived (`templateAgentChoices`).
+            // Your agents this device runs here, or ones listed from
+            // elsewhere that are a member of a channel you are in, none
+            // archived (`templateAgentChoices`: managed, or a member).
             let rules = crate::ui::me::recipients::rules(&community, cx);
-            let available = |key: &String| rules.selectable.contains(key);
+            let origin = community.read(cx).origin.clone();
+            let managed: std::collections::HashSet<String> =
+                crate::ui::identity::AgentLibrary::from_hosts(cx)
+                    .agents
+                    .into_iter()
+                    .filter(|(_, _, relay)| {
+                        buzz_relay_client::RelayOrigin::parse(relay)
+                            .is_ok_and(|other| other == origin)
+                    })
+                    .map(|(key, _, _)| key)
+                    .collect();
+            let members: std::collections::HashSet<String> = community
+                .read(cx)
+                .snapshot
+                .channels
+                .iter()
+                .flat_map(|channel| channel.members.iter().cloned())
+                .collect();
+            let available = |key: &String| {
+                rules.selectable.contains(key) && (managed.contains(key) || members.contains(key))
+            };
             let unavailable: Vec<String> = agents
                 .iter()
                 .filter(|key| !available(key))

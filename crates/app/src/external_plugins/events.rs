@@ -180,9 +180,59 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
             serde_json::from_value::<Event>(value.clone())
                 .is_ok_and(|event| verifier.verify(event).is_ok())
         });
+        // A message search across channels resolves the channels its
+        // results are in first, open ones you have not joined included,
+        // and keeps only results in exactly one that resolved
+        // (`readVerified`).
+        let message_kinds = |filter: &Map<String, Value>| {
+            filter
+                .get("kinds")
+                .and_then(Value::as_array)
+                .is_some_and(|kinds| {
+                    !kinds.is_empty()
+                        && kinds
+                            .iter()
+                            .all(|kind| matches!(kind.as_u64(), Some(9 | 40002 | 40008)))
+                })
+        };
+        let across = filters.iter().all(|filter| {
+            ["search", "authors", "since", "until"]
+                .iter()
+                .any(|key| filter.contains_key(*key))
+                && !filter.contains_key("#h")
+                && message_kinds(filter)
+        });
+        if across {
+            let single = |event: &Value| -> Option<String> {
+                let mut channels =
+                    event["tags"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|tag| {
+                            (tag.get(0).and_then(Value::as_str) == Some("h"))
+                                .then(|| tag.get(1).and_then(Value::as_str).map(str::to_owned))
+                                .flatten()
+                        });
+                let first = channels.next()?;
+                channels.next().is_none().then_some(first)
+            };
+            let mut ids: Vec<String> = events.iter().filter_map(single).collect();
+            ids.sort();
+            ids.dedup();
+            let mut resolved = HashSet::new();
+            for chunk in ids.chunks(128) {
+                let found = session
+                    .resolve_channels(chunk.to_vec())
+                    .await
+                    .map_err(|error| (2, error))?;
+                resolved.extend(found.into_iter().map(|channel| channel.id));
+            }
+            events.retain(|event| single(event).is_some_and(|id| resolved.contains(&id)));
+        }
         // Only from channels you can read (`eventVisibility`): each `h`,
-        // and a roster or admin list's `d`; channel metadata may introduce
-        // an open one.
+        // and a roster or admin list's `d`; channel metadata (39000) may
+        // introduce an open one, as buzz-app accepts it from the read.
         let named = |event: &Value| -> Vec<String> {
             let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0);
             event["tags"]

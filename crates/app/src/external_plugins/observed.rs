@@ -123,7 +123,11 @@ pub fn history(params: &Value, cx: &mut App) -> Result<Value, Failure> {
     let agent = agent(params).map(str::to_owned);
     activity.update(cx, |activity, cx| match (older, agent) {
         (true, _) => activity.load_older(cx),
-        (false, Some(agent)) => activity.select_history(&agent, cx),
+        // That agent's newest, already chosen or not (`latestHistory`).
+        (false, Some(agent)) => {
+            activity.select_history(&agent, cx);
+            activity.latest_history(cx);
+        }
         // Everyone's newest: drop an agent chosen before, then read.
         (false, None) => {
             activity.select_history("", cx);

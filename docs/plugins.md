@@ -629,7 +629,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `projects/gitAuthorization` | `repository` (a `https://…/git/<owner>/<d>.git` URL of the community) | `{"repository","token"}`: a NIP-98 value for `Authorization: Nostr `, good on that repository's Git routes for 60 seconds, for running Git yourself (`repository` in its canonical form), or `null` for a repository this community does not serve. Needs `publish-events`. |
 | `agents/logProof` | `id` (the agent's log session), `pubkey` (the agent), `relayUrl` (the community's relay), `nonce` (the host's challenge) | `{"signature"}`: your proof, as the agent's owner, for one read of its harness log. Needs `manage-agents`. |
 | `agents/attest` | `pubkey` (an agent key) | `{"auth"}`: your NIP-OA tag `["auth", owner, "", signature]` saying you own that agent, for an agent to attach to what it signs. Needs `manage-agents`. |
-| `agents/presence` | `status` (`online` or `offline`), `pubkeys` (any number, in one event; the relay keeps only agents you own) | `true` once sent on the live connection, `false` if this community cannot take it: owner presence (kind 20003) for agents Buzz does not run itself, such as hosted ones. Needs `manage-agents`. |
+| `agents/presence` | `status` (`online` or `offline`), `pubkeys` (1 to 256, in one event; the relay keeps only agents you own; any other count is refused) | `true` once sent on the live connection, `false` if this community cannot take it: owner presence (kind 20003) for agents Buzz does not run itself, such as hosted ones. Needs `manage-agents`. |
 | `services/list` | none | The services running plugins offer, each `{"plugin","service"}`. Buzz sends `services/changed` with `services`, the same list, when a plugin that offers any starts, stops or restarts, as a buzz-app plugin's `inject` learns a service came or went. |
 | `services/request` | `plugin`, `service`, `method`, `params` | The answer of the plugin that offers it, within 30 seconds |
 | `services/subscribe`, `services/unsubscribe` | `plugin`, `service` | `null`. Buzz then sends `service/event` (`plugin`, `service`, `event`, `data`) each time that plugin publishes an event of it. |
@@ -827,6 +827,14 @@ passes a function, or reaches into the app, it works differently:
   custom emoji stay first among renderers when switched off and on
   again; in buzz-app they register last again, after plugins added
   meanwhile.
+
+- **A profile sent through the outbox shows once the relay has it.** A
+  kind 0 queued with `outbox/send` changes `profiles/get` and `names/get`
+  when the relay echoes it back; buzz-app shows it while it is queued.
+
+- **Sidebar write flags need loaded preferences.** `sortWritable` and
+  `muteWritable` are `false` until the sidebar preferences have loaded;
+  buzz-app reports them `true` meanwhile (a write is refused either way).
 
 - **`events/query` reads what the relay gives.** Its events are
   verified and filtered to channels you can read, but a reaction, edit or

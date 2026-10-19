@@ -85,7 +85,13 @@ impl Session {
     /// first; a failed or uncertain earlier addition is continued, never
     /// duplicated.
     pub async fn add_member(&self, channel: &str, pubkey: &str) -> Result<(), String> {
-        self.addition(channel, pubkey, false, false).await
+        self.addition(channel, pubkey, false, false, true).await
+    }
+
+    /// [`Self::add_member`] with no role tag, as a channel template's
+    /// setup adds its agents (`["h"], ["p"]` only).
+    pub async fn add_member_plain(&self, channel: &str, pubkey: &str) -> Result<(), String> {
+        self.addition(channel, pubkey, false, false, false).await
     }
 
     /// Adds someone to a private work session the viewer belongs to
@@ -97,7 +103,8 @@ impl Session {
         pubkey: &str,
         allow_agents: bool,
     ) -> Result<(), String> {
-        self.addition(channel, pubkey, true, allow_agents).await
+        self.addition(channel, pubkey, true, allow_agents, true)
+            .await
     }
 
     /// Additions in `channel` the session still tracks: in flight, or
@@ -124,6 +131,7 @@ impl Session {
         pubkey: &str,
         participant: bool,
         allow_agents: bool,
+        role: bool,
     ) -> Result<(), String> {
         let key = (channel.to_owned(), pubkey.to_owned());
         let ops = self.ops();
@@ -147,7 +155,14 @@ impl Session {
                     Ok(intent) => intent,
                 };
                 let (channel, pubkey) = &key;
-                let work = ops.add_member(channel, pubkey, participant, allow_agents, &mut intent);
+                let work = ops.add_member(
+                    channel,
+                    pubkey,
+                    participant,
+                    allow_agents,
+                    role,
+                    &mut intent,
+                );
                 let result = tokio::time::timeout(ADDITION_TIMEOUT, work)
                     .await
                     .unwrap_or_else(|_| {
@@ -336,6 +351,7 @@ impl Ops {
         pubkey: &str,
         participant: bool,
         allow_agents: bool,
+        role: bool,
         intent: &mut Intent,
     ) -> Result<(), String> {
         if !members::is_key(pubkey) {
@@ -433,7 +449,8 @@ impl Ops {
                             .is_some_and(|profile| profile.is_agent)
                     })
                     .await?;
-                let draft = members::add(channel, pubkey, agent).map_err(|e| e.to_string())?;
+                let draft =
+                    members::add(channel, pubkey, role && agent).map_err(|e| e.to_string())?;
                 outbox
                     .send(
                         draft,

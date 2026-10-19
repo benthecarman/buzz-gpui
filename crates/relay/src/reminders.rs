@@ -433,9 +433,10 @@ impl ReminderStore {
     /// The connection dropped: the list is stale until recovery's read.
     pub fn stale(&mut self) {
         self.offline = true;
+        // Loading says nothing of an earlier failure (`publishState`).
         if self.state.status != RemindersStatus::Loading {
-            let (error, hydrated) = (self.state.error.clone(), self.state.hydrated);
-            self.publish(RemindersStatus::Loading, error, hydrated);
+            let hydrated = self.state.hydrated;
+            self.publish(RemindersStatus::Loading, None, hydrated);
         }
     }
 

@@ -1939,8 +1939,12 @@ pub fn agent_presence(params: &Value, cx: &App) -> Result<Task<Result<Value, Fai
     };
     // Any keys, as buzz-app sends them: the relay keeps only the agents
     // you own, hosted and elsewhere ones included.
-    // Every key given, in one event, as `publishAgentPresence` signs it.
+    // Every key given, in one event, as `publishAgentPresence` signs it:
+    // 1 to 256 of them.
     let agents = pubkeys(params, usize::MAX)?;
+    if !(1..=256).contains(&agents.len()) {
+        return Err((3, "Invalid agent presence".to_owned()));
+    }
     let session = community(cx)?.read(cx).session.clone();
     Ok(on_tokio(cx, async move {
         session

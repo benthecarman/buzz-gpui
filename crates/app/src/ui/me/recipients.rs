@@ -22,13 +22,21 @@ pub fn rules(community: &Entity<Community>, cx: &App) -> AgentRules {
     // An archived agent is not offered, and refused (`sessionAgentRules`).
     let archived = crate::ui::archives::hidden(community, cx);
     let mut seen = HashSet::new();
-    let selectable = library
+    let mut selectable: Vec<String> = library
         .agents
         .into_iter()
         .filter(|(_, _, relay)| RelayOrigin::parse(relay).is_ok_and(|other| other == origin))
         .filter(|(key, _, _)| !archived.contains(key) && seen.insert(key.clone()))
         .map(|(key, _, _)| key)
         .collect();
+    // Your agents listed here from other devices too (`agentLibrary`).
+    if let Some(agents) = crate::agents2::Agents2::global(cx) {
+        for agent in agents.read(cx).elsewhere(cx) {
+            if !archived.contains(&agent.pubkey) && seen.insert(agent.pubkey.clone()) {
+                selectable.push(agent.pubkey);
+            }
+        }
+    }
     AgentRules {
         selectable,
         archived,

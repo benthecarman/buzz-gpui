@@ -1040,18 +1040,26 @@ pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
         Status::Error(error) => ("error", Some(error.clone())),
     };
     let mut seen = std::collections::HashSet::new();
-    let identities: Vec<(String, String)> = crate::ui::identity::AgentLibrary::from_hosts(cx)
-        .agents
-        .into_iter()
-        .filter(|(_, _, relay)| {
-            buzz_relay_client::RelayOrigin::parse(relay).is_ok_and(|other| other == origin)
-        })
-        .filter(|(key, _, _)| seen.insert(key.clone()))
-        .map(|(key, name, _)| (key, name))
-        .collect();
+    let mut identities: Vec<(String, String, bool)> =
+        crate::ui::identity::AgentLibrary::from_hosts(cx)
+            .agents
+            .into_iter()
+            .filter(|(_, _, relay)| {
+                buzz_relay_client::RelayOrigin::parse(relay).is_ok_and(|other| other == origin)
+            })
+            .filter(|(key, _, _)| seen.insert(key.clone()))
+            .map(|(key, name, _)| (key, name, true))
+            .collect();
     // Each with its picture, as the library rows carry it (`avatar`).
     let service = agents2(cx)?;
     let service = service.read(cx);
+    // And the agents your list names here from other devices, which this
+    // one does not run (`agentLibrary`'s relay inventory, unmanaged).
+    for agent in service.elsewhere(cx) {
+        if seen.insert(agent.pubkey.clone()) {
+            identities.push((agent.pubkey, agent.name, false));
+        }
+    }
     let avatar = |pubkey: &str| {
         service
             .agents()
@@ -1061,13 +1069,13 @@ pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
             .and_then(|agent| agent.picture.clone())
             .filter(|picture| !picture.is_empty())
     };
-    let choice = |(pubkey, name): &(String, String)| {
+    let choice = |(pubkey, name, managed): &(String, String, bool)| {
         json!({
             "pubkey": pubkey,
             "name": name,
             "avatar": avatar(pubkey),
-            "managed": true,
-            "managedName": name,
+            "managed": managed,
+            "managedName": managed.then_some(name),
         })
     };
     Ok(json!({
@@ -1078,7 +1086,7 @@ pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
         "identities": identities.iter().map(choice).collect::<Vec<_>>(),
         "selectable": identities
             .iter()
-            .filter(|(pubkey, _)| !archives::hides(&community, pubkey, cx))
+            .filter(|(pubkey, _, _)| !archives::hides(&community, pubkey, cx))
             .map(choice)
             .collect::<Vec<_>>(),
         "archives": archives::snapshot_json(&community, cx),
