@@ -439,11 +439,14 @@ The view is gone. Forget its state.
 
 When the plugin restarts, Buzz sends `initialize` again, then `view/open` for
 every view that is still open. Until a new tree arrives, the old one stays on
-screen, and each composer element in it sends `ready` again with a new id.
+screen, and each composer element in it sends `ready` again with a new id; a
+draft the old run took with `submit` is handed back unsent.
 Composer tools and accessories are made anew: their views, tool popovers and
 captures begun through a tool close without `view/close`, and each accessory
-opens again as a new view (a new id and `view/open`) when its composer next
-shows, so one above a hidden page's composer opens when you return. A
+opens again as a new view (a new id and `view/open`) when its composer is
+next mounted: at once for a composer that is shown or kept out of sight (an
+unselected tab, closed comments), and when you return for one on a hidden
+page. A
 reaction picker opens again while its tool still picks reactions, and tool
 states start over.
 

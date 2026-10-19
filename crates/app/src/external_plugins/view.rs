@@ -714,6 +714,19 @@ impl ExternalView {
         }
     }
 
+    /// After a restart, a draft the old run took with `submit` is handed
+    /// back unsent, so its composer unlocks as a remount does.
+    pub(super) fn release_unsettled(&mut self, cx: &mut Context<Self>) {
+        for (element, submission) in std::mem::take(&mut self.unsettled) {
+            let handed_back = submission.settle(&Err("Not sent".to_owned()), cx);
+            if let Some((composer, _, _)) = self.composers.get(&element)
+                && !handed_back
+            {
+                composer.update(cx, |composer, cx| composer.failed(cx));
+            }
+        }
+    }
+
     /// After a restart, each embedded composer tells the new run its id
     /// again (`ready`), as a remount does.
     pub(super) fn announce_composers(&self, cx: &App) {

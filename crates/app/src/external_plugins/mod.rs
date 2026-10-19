@@ -1333,7 +1333,9 @@ impl ExternalPlugins {
                 {
                     connection.notify("view/open", params);
                 }
-                // Its composer elements announce themselves to this run.
+                // Its composer elements unlock and announce themselves to
+                // this run.
+                view.update(cx, |view, cx| view.release_unsettled(cx));
                 view.read(cx).announce_composers(cx);
             }
         }
