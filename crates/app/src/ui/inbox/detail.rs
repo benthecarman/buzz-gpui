@@ -60,6 +60,9 @@ pub struct InboxDetail {
     reader: Option<Reader>,
     /// The message to reveal once the channel's rows load.
     reveal: Option<EventId>,
+    /// The message the channel's newest rows did not hold, shown in a
+    /// thread reader instead, once (`ChannelPreview`'s fallback).
+    fallback: Option<EventId>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -85,6 +88,7 @@ impl InboxDetail {
             archive: ArchiveAction::default(),
             reader: None,
             reveal: None,
+            fallback: None,
             focus,
         };
         detail.admit(window, cx);
@@ -184,26 +188,46 @@ impl InboxDetail {
                 self.try_reveal(cx);
             }
             (_, Some(message)) => {
-                let page = cx.entity().downgrade();
-                let on_close: OnClose = Arc::new(move |_, cx| {
-                    let _ = page.update(cx, |_, cx| cx.emit(Closed));
-                });
-                let panel = cx.new(|cx| {
-                    let mut panel = ThreadPanel::exact(
-                        community.clone(),
-                        channel.id.clone(),
-                        message,
-                        on_close,
-                        window,
-                        cx,
-                    );
-                    panel.as_reader(cx);
-                    panel
-                });
+                let panel = self.thread_reader(&channel.id, message, window, cx);
                 self.reader = Some(Reader::Thread(panel));
             }
             (_, None) => {}
         }
+    }
+
+    /// A thread reader revealing `message`.
+    fn thread_reader(
+        &self,
+        channel: &str,
+        message: EventId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ThreadPanel> {
+        let page = cx.entity().downgrade();
+        let on_close: OnClose = Arc::new(move |_, cx| {
+            let _ = page.update(cx, |_, cx| cx.emit(Closed));
+        });
+        let community = self.community.clone();
+        let channel = channel.to_owned();
+        cx.new(|cx| {
+            let mut panel = ThreadPanel::exact(community, channel, message, on_close, window, cx);
+            panel.as_reader(cx);
+            panel
+        })
+    }
+
+    /// A message the channel reader could not show opens in a thread
+    /// reader instead, decided once.
+    fn take_fallback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(message) = self.fallback.take() else {
+            return;
+        };
+        if !matches!(self.reader, Some(Reader::Channel(_))) {
+            return;
+        }
+        let channel = self.item.channel_id.clone();
+        let panel = self.thread_reader(&channel, message, window, cx);
+        self.reader = Some(Reader::Thread(panel));
     }
 
     fn try_reveal(&mut self, cx: &mut Context<Self>) {
@@ -214,6 +238,11 @@ impl InboxDetail {
         let outcome = page.update(cx, |page, cx| page.reveal(id, cx));
         if outcome != Reveal::Loading {
             self.reveal = None;
+        }
+        // Not among the newest rows (older, a reply, or a saved window).
+        if outcome == Reveal::Absent {
+            self.fallback = Some(id);
+            cx.notify();
         }
     }
 
@@ -242,6 +271,7 @@ impl Render for InboxDetail {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
         self.admit(window, cx);
+        self.take_fallback(window, cx);
         let channel = self.channel(cx);
         let dm = channel
             .as_ref()

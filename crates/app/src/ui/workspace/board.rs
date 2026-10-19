@@ -191,6 +191,18 @@ impl Workspace {
         page.read(cx).work()
     }
 
+    /// Page `page` was taken away: its view closes, and the visit showing
+    /// it fails as `unavailable`, as a route to no page does.
+    pub(crate) fn withdraw_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.views.remove(&page);
+        self.own_sidebars.remove(&page);
+        if self.page == page {
+            let target = self.history.current().cloned();
+            self.fail_open(target, crate::ui::channel_states::Reason::Page, cx);
+        }
+        cx.notify();
+    }
+
     /// Account action `key` was taken away: its dialog closes.
     pub(crate) fn withdraw_action(&mut self, key: &str, cx: &mut Context<Self>) {
         self.account

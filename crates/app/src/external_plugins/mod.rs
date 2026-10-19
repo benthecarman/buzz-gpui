@@ -2765,7 +2765,13 @@ fn take_away(added: Vec<Added>, cx: &mut App) {
                     workspace.withdraw_panel(key, window, cx)
                 });
             }
-            Added::Page(page) => pages::unregister(page, cx),
+            Added::Page(page) => {
+                pages::unregister(page, cx);
+                // Its view closes too ("what is gone is taken away").
+                crate::ui::navigation::with_workspace(cx, move |workspace, _, cx| {
+                    workspace.withdraw_page(page, cx)
+                });
+            }
             Added::Other(added) => contribute::take_away(added, cx),
             Added::Agent(added) => agents::take_away(added, cx),
         }

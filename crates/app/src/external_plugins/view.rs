@@ -466,15 +466,16 @@ impl ExternalView {
         }
         // A push opens for the conversation alone, without the thread
         // (`push`: `{channelId, panel, target}`).
-        let channel = opening.channel.clone();
+        // A panel beside the page has no conversation to pass on.
+        let channel = Some(opening.channel.clone()).filter(|channel| !channel.is_empty());
         let root = (!push).then(|| opening.root.clone()).flatten();
         let close = (!push).then(|| opening.close.clone());
         let (key, target) = (panel.key, target.to_owned());
         crate::ui::navigation::with_workspace(cx, move |workspace, window, cx| {
             let opened = if close.is_some() {
-                workspace.open_panel_replacing(key, &target, Some(channel), root, &tab, window, cx)
+                workspace.open_panel_replacing(key, &target, channel, root, &tab, window, cx)
             } else {
-                workspace.open_panel_at(Some(key), &target, Some(channel), root, window, cx)
+                workspace.open_panel_at(Some(key), &target, channel, root, window, cx)
             };
             if opened && let Some(close) = close {
                 // A drawer's close updates the workspace, which is busy.
@@ -635,7 +636,10 @@ impl ExternalView {
             "contribution": self.contribution,
             "kind": self.kind,
             "target": opening.map(|opening| opening.target.clone()),
-            "channel": opening.map(|opening| opening.channel.clone()),
+            // None beside a page (`PanelCard` has no `context`).
+            "channel": opening
+                .map(|opening| opening.channel.clone())
+                .filter(|channel| !channel.is_empty()),
             "thread": opening.and_then(|opening| opening.thread.clone()),
             // The thread of the message the opening link was in
             // (`PanelProps.context.rootId`).

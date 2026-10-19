@@ -2571,6 +2571,7 @@ pub fn contributions(cx: &App) -> Value {
             "title": shortcut.title,
             "chords": shortcut.chords,
             "enabled": shortcut.enabled,
+            "order": shortcut.order,
         })).collect::<Vec<_>>(),
         // Buzz's own toolbar buttons first, as buzz-app's bundled tools.
         "composerTools": BUNDLED_TOOLS.iter()

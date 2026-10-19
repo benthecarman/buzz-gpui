@@ -446,6 +446,8 @@ pub struct Listed {
     pub chords: Vec<String>,
     /// Off for now (`shortcut/enable`).
     pub enabled: bool,
+    /// Its order within the plugin's group (`normalizeShortcut`).
+    pub order: i32,
 }
 
 /// Every plugin shortcut, in Settings order.
@@ -475,6 +477,7 @@ pub fn external_list(cx: &App) -> Vec<Listed> {
                     title: bundled.title,
                     chords,
                     enabled,
+                    order: bundled.order as i32,
                 });
             }
             let shortcut = external(row.key)?;
@@ -484,6 +487,7 @@ pub fn external_list(cx: &App) -> Vec<Listed> {
                 title: shortcut.title,
                 chords,
                 enabled: !EXTERNAL_OFF.with_borrow(|off| off.contains(shortcut.key)),
+                order: shortcut.order,
             })
         })
         .collect()

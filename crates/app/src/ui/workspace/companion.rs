@@ -80,11 +80,9 @@ impl Workspace {
         let Some(panel) = panel else {
             return false;
         };
-        let channel = self
-            .channel
-            .as_ref()
-            .map(|page| page.read(cx).channel_id().to_string())
-            .unwrap_or_default();
+        // Beside the page it belongs to no conversation (the shell's
+        // `PanelCard` has no `context`).
+        let channel = String::new();
         let weak = cx.entity().downgrade();
         // Closes this opening only, not a panel that replaced it.
         let opening = self.companion_opening + 1;
