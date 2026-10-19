@@ -1430,7 +1430,11 @@ impl Workspace {
             {
                 work.update(cx, |work, cx| work.retire_link_panels(cx));
             }
+            // Me opens a timeline link with no root (`openLink(url)`).
             let (channel, root) = match origin {
+                Some(origin) if self.page == Page::ME && !origin.thread => {
+                    (Some(origin.channel), None)
+                }
                 Some(origin) => (Some(origin.channel), Some(origin.root)),
                 None => (None, None),
             };

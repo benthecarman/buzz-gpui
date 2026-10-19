@@ -32,6 +32,21 @@ impl Actor {
 }
 
 impl Session {
+    /// Of `ids`, the channels the viewer may read now (`canAccess`):
+    /// denied, suspended and unknown ones are not.
+    pub async fn accessible_channels(&self, ids: Vec<String>) -> Vec<String> {
+        self.ops()
+            .with(move |actor| {
+                actor.discovery.as_ref().map_or_else(Vec::new, |discovery| {
+                    ids.into_iter()
+                        .filter(|id| discovery.can_access(id))
+                        .collect()
+                })
+            })
+            .await
+            .unwrap_or_default()
+    }
+
     /// Runs `work` on the actor and hands back its answer.
     async fn with_actor<R: Send + 'static>(
         &self,

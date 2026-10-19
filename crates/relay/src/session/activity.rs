@@ -30,15 +30,14 @@ struct Run {
 }
 
 impl Session {
-    /// Keeps `ChannelSummary::last_activity_at` filled while some sidebar
-    /// section sorts by recent activity; off clears it.
+    /// Reads `ChannelSummary::last_activity_at` while some sidebar section
+    /// sorts by recent activity; live traffic keeps it current either way.
     pub fn track_channel_activity(&self, wanted: bool) {
         let _ = self.commands.send(Message::With(Box::new(move |actor| {
             actor.activity.wanted = wanted;
+            // Off stops the reads; what live traffic told stays (`cancel`).
             if !wanted {
                 actor.activity_cancel();
-                actor.activity.values.clear();
-                actor.publish();
             } else {
                 actor.refresh_activity();
             }
@@ -164,8 +163,9 @@ impl Actor {
         self.activity.roster = None;
     }
 
-    /// Live traffic only advances values.
+    /// Live traffic only advances values, whatever the sort
+    /// (`channelActivity.accept`).
     pub(super) fn activity_accept(&mut self, events: &[Verified]) -> bool {
-        self.activity.wanted && self.activity.values.accept(events)
+        self.activity.values.accept(events)
     }
 }

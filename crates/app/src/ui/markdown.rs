@@ -130,6 +130,22 @@ fn body_text(c: &buzz_ui::Colors) -> Hsla {
     }
 }
 
+thread_local! {
+    /// The body being drawn sits in a thread pane.
+    static IN_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The body being drawn is no message's (`text`).
+    static NO_ORIGIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Draws with `thread` saying whether the place is a thread pane, which
+/// decides whether a link adds a panel or replaces earlier ones.
+pub fn in_place<T>(thread: bool, draw: impl FnOnce() -> T) -> T {
+    let before = IN_THREAD.replace(thread);
+    let drawn = draw();
+    IN_THREAD.set(before);
+    drawn
+}
+
 /// Renders a row's body.
 pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElement {
     let document = prepared(row, directory);
@@ -141,7 +157,10 @@ pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElemen
         directory: directory.clone(),
         emoji: row.emoji.clone().into(),
         row: id.clone().into(),
-        origin: navigation::LinkOrigin::of(row),
+        origin: (!NO_ORIGIN.get()).then(|| navigation::LinkOrigin {
+            thread: IN_THREAD.get(),
+            ..navigation::LinkOrigin::of(row)
+        }),
         spoilers: document.spoilers.clone(),
         max_width: (width.get() < f32::MAX).then(|| px(width.get())),
     };
@@ -259,7 +278,11 @@ pub fn text(text: &str, channel: &str, community: &Community, cx: &App) -> AnyEl
         membership: None,
         delivery: None,
     });
-    body(&row, &Directory::of(community, None, cx), cx)
+    // No message: its links open with no origin.
+    NO_ORIGIN.set(true);
+    let drawn = body(&row, &Directory::of(community, None, cx), cx);
+    NO_ORIGIN.set(false);
+    drawn
 }
 
 /// One link chip for `url` outside a body, such as the "Sent from" line.
@@ -2011,7 +2034,9 @@ struct Objects {
     emoji: Arc<[CustomEmoji]>,
     row: SharedString,
     /// The message a mention in it opens a profile from.
-    origin: navigation::LinkOrigin,
+    /// The message its links come from; `None` for text that is no
+    /// message, such as a plugin's `markdown`.
+    origin: Option<navigation::LinkOrigin>,
     spoilers: Arc<[SharedString]>,
     /// The body's width, for chips and spoilers that must wrap inside it.
     max_width: Option<Pixels>,
@@ -2293,7 +2318,7 @@ impl Objects {
                     .child(name)
                     .on_click(move |event, window, cx| {
                         cx.stop_propagation();
-                        let origin = Some(origin.clone());
+                        let origin = origin.clone();
                         navigation::show_profile_from(
                             key.clone(),
                             event.position(),
@@ -2315,7 +2340,7 @@ impl Objects {
                 font_size: size,
                 line_height: line,
                 max_width: self.max_width,
-                origin: Some(self.origin.clone()),
+                origin: self.origin.clone(),
             },
             window,
             cx,

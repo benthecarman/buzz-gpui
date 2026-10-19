@@ -1725,17 +1725,17 @@ impl Actor {
             live.retry();
         }
         // Suspended previews are looked up again (`revalidatePreviews`).
-        self.revalidate_previews();
-    }
-
-    /// Looks suspended public previews up again, 128 at a time; one that
-    /// resolves resumes and its recheck notice goes.
-    fn revalidate_previews(&self) {
         let suspended = self
             .discovery
             .as_ref()
             .map(DiscoveryState::suspended_channels)
             .unwrap_or_default();
+        self.revalidate_previews(&suspended);
+    }
+
+    /// Looks `suspended` public previews up again, 128 at a time; one
+    /// that resolves resumes and its recheck notice goes.
+    fn revalidate_previews(&self, suspended: &[String]) {
         for chunk in suspended.chunks(128) {
             let ops = actions::Ops {
                 commands: self.commands.clone(),
@@ -2194,7 +2194,9 @@ impl Actor {
                     self.reads_channels(false);
                     self.publish_live();
                     self.publish();
-                    self.revalidate_previews();
+                    // Only the ones just revoked; an earlier failed one
+                    // waits for Retry.
+                    self.revalidate_previews(&suspended);
                 }
                 self.start_scan(ScanOptions {
                     strong: true,
@@ -2229,12 +2231,12 @@ impl Actor {
     /// Rebuilds the live view and publishes it if it changed.
     fn publish_live(&mut self) {
         let mut live = self.live.as_ref().map(Live::snapshot).unwrap_or_default();
-        // A suspended preview says so until it is looked up again.
-        if live.error.is_none()
-            && self
-                .discovery
-                .as_ref()
-                .is_some_and(|discovery| !discovery.suspended_channels().is_empty())
+        // A suspended preview says so until it is looked up again, over
+        // any other live error (`publishLive`).
+        if self
+            .discovery
+            .as_ref()
+            .is_some_and(|discovery| !discovery.suspended_channels().is_empty())
         {
             live.error = Some("Public preview access needs rechecking; retry live updates.".into());
         }

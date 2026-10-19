@@ -423,8 +423,8 @@ pub fn show_profile(pubkey: String, at: Point<Pixels>, window: &mut Window, cx: 
 pub struct LinkOrigin {
     pub channel: String,
     pub root: String,
-    /// The message is a reply, shown in its thread: a link from it adds
-    /// to the panels links opened rather than replacing them.
+    /// The message is shown in a thread pane: a link from it adds to the
+    /// panels links opened rather than replacing them.
     pub thread: bool,
 }
 
@@ -433,7 +433,7 @@ impl LinkOrigin {
         Self {
             channel: row.channel.to_string(),
             root: row.thread_root_id.unwrap_or(row.id).to_hex(),
-            thread: row.thread_root_id.is_some(),
+            thread: false,
         }
     }
 }

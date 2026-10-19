@@ -431,6 +431,34 @@ async fn run(
     let running_id = None;
     let restored = with(&session.commands, move |actor| restored(actor, running_id)).await?;
     if let Some(pending) = restored {
+        // Only the same channel retries it; anything else waits until it
+        // is retried (`channelCreation.create`).
+        if input.setup.is_some() {
+            return Err("Template setup is unavailable on this host".into());
+        }
+        let mut labels: Vec<String> = Vec::new();
+        for label in &input.labels {
+            if !labels.contains(label) {
+                labels.push(label.clone());
+            }
+        }
+        let normalized = ChannelCreationInput {
+            description: input
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|description| !description.is_empty())
+                .map(str::to_owned),
+            labels,
+            setup: None,
+            ..input
+        };
+        if normalized != pending.input {
+            return Err(
+                "Another channel is still awaiting confirmation. Retry it before changing the details."
+                    .into(),
+            );
+        }
         return retry_restored(session, &ctx, pending, admitted).await;
     }
     if shared.admitting.swap(true, Ordering::SeqCst) {

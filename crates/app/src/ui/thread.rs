@@ -245,6 +245,7 @@ impl ThreadPanel {
                 cx,
             )
         });
+        composer.update(cx, |composer, _| composer.conversation_view());
         let input = composer.read(cx).input();
         let focus = cx.focus_handle();
         let message_actions =

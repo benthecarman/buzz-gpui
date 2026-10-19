@@ -787,6 +787,20 @@ pub(super) fn drawn(
     tree: &Node,
     cx: &App,
 ) -> AnyElement {
+    drawn_with(plugin, id, key, target, tree, None, cx)
+}
+
+/// [`drawn`], running `used` before each event it sends, as when an
+/// accessory's place becomes the one the plugin acts for.
+fn drawn_with(
+    plugin: &str,
+    id: &str,
+    key: &str,
+    target: &str,
+    tree: &Node,
+    used: Option<Rc<dyn Fn()>>,
+    cx: &App,
+) -> AnyElement {
     let (plugin, renderer, place) = (plugin.to_owned(), id.to_owned(), target.to_owned());
     // A message's target is `<id>:<revision>`, an inline piece's
     // `<id>/<text>`; the message is the id.
@@ -799,6 +813,9 @@ pub(super) fn drawn(
     let embeds = HashMap::new();
     let draw = Draw {
         send: Rc::new(move |element, event, value, cx| {
+            if let Some(used) = &used {
+                used();
+            }
             ExternalPlugins::notify_running(
                 &plugin,
                 "render/event",
@@ -964,19 +981,23 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
             row.reply_count,
             open_thread.is_some()
         );
-        // What `message/openThread` runs for this accessory's message.
-        if let Some(open) = open_thread {
-            THREAD_OPENERS.with_borrow_mut(|openers| {
-                // Kept for the messages drawn lately.
-                if openers.len() >= 4096 {
-                    openers.clear();
-                }
-                openers.insert(
-                    (self.key.to_owned(), row.id.to_hex()),
-                    (open.clone(), row.clone()),
-                )
-            });
-        }
+        // What `message/openThread` runs: the place the user last acted
+        // in for this accessory, or nothing where that place cannot.
+        let used: Rc<dyn Fn()> = {
+            let entry = (self.key.to_owned(), row.id.to_hex());
+            let opener = open_thread.map(|open| (open.clone(), row.clone()));
+            Rc::new(move || {
+                THREAD_OPENERS.with_borrow_mut(|openers| {
+                    if openers.len() >= 4096 {
+                        openers.clear();
+                    }
+                    match &opener {
+                        Some(opener) => openers.insert(entry.clone(), opener.clone()),
+                        None => openers.remove(&entry),
+                    };
+                })
+            })
+        };
         let community = community_of(row, cx)
             .map(|community| community.read(cx).origin.websocket().to_string());
         let tree = ask(
@@ -994,7 +1015,15 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
             },
             cx,
         )?;
-        Some(drawn(&self.plugin, &self.id, self.key, &target, &tree, cx))
+        Some(drawn_with(
+            &self.plugin,
+            &self.id,
+            self.key,
+            &target,
+            &tree,
+            Some(used),
+            cx,
+        ))
     }
 }
 
@@ -1203,12 +1232,20 @@ pub fn recheck_card(key: &str, cx: &mut App) -> bool {
     use crate::ui::settings::cards::{self, CardVisibility};
     let plugin = crate::plugins::plugin_of(key);
     let checked = CARD_STATES.with_borrow_mut(|states| match states.get_mut(key) {
-        Some(state) if matches!(*state, CardVisibility::Error | CardVisibility::Hidden) => {
+        Some(state) if *state == CardVisibility::Error => {
             *state = CardVisibility::Pending;
             true
         }
         _ => false,
     });
+    // A hidden card is asked about again but stays hidden: the visit
+    // fails now unless the plugin answers otherwise (`ensure()`).
+    if !checked
+        && CARD_STATES.with_borrow(|states| states.get(key) == Some(&CardVisibility::Hidden))
+    {
+        let card = key.rsplit('/').next().unwrap_or(key);
+        ExternalPlugins::notify_running(plugin, "settings/check", json!({ "cards": [card] }), cx);
+    }
     if checked {
         let card = key.rsplit('/').next().unwrap_or(key);
         ExternalPlugins::notify_running(plugin, "settings/check", json!({ "cards": [card] }), cx);
@@ -1911,7 +1948,11 @@ pub fn take_away(added: Added, cx: &mut App) {
     match added {
         Added::Card(key) => crate::ui::settings::cards::unregister(key, cx),
         Added::Category(key) => crate::notifications::categories::unregister(key, cx),
-        Added::Renderer(key) => crate::ui::renderers::unregister(key),
+        Added::Renderer(key) => {
+            crate::ui::renderers::unregister(key);
+            // Its thread openers go with it.
+            THREAD_OPENERS.with_borrow_mut(|openers| openers.retain(|(at, _), _| at != key));
+        }
         Added::Tool(key) => crate::ui::composer_tools::unregister(key, cx),
         Added::Shortcut(key) => crate::shortcuts::unregister_external(key),
         Added::Completion(key) => composer_completions::unregister(key),

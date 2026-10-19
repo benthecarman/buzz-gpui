@@ -169,6 +169,9 @@ pub struct Composer {
     /// A new session's composer, which may offer library agents not yet
     /// in the conversation (`inviteAgents`).
     invite_agents: bool,
+    /// A conversation view's composer (`sessionConversation`): in a
+    /// session it may offer your agents.
+    session_conversation: bool,
     /// Eager uploads were paused because the composer is disabled.
     uploads_paused: bool,
     editing: Option<Arc<MessageRow>>,
@@ -500,6 +503,7 @@ impl Composer {
             sending: false,
             can_send: true,
             invite_agents: false,
+            session_conversation: false,
             uploads_paused: false,
             editing: None,
             edit_generation: 0,
@@ -578,19 +582,27 @@ impl Composer {
         self.invite_agents = true;
     }
 
+    /// A conversation view's own composer, which in a session may offer
+    /// your agents (`sessionConversation`); embedded and media composers
+    /// are not.
+    pub fn conversation_view(&mut self) {
+        self.session_conversation = true;
+    }
+
     /// The community this composer writes in.
     pub fn community(&self) -> &Entity<Community> {
         &self.community
     }
 
     /// Your library agents may be offered here (`inviteAgents`): in a new
-    /// session or any session conversation, never while editing.
+    /// session or a session conversation's own view, never while editing.
     pub fn invites_agents(&self, cx: &App) -> bool {
         self.editing.is_none()
             && (self.invite_agents
-                || self
-                    .summary(cx)
-                    .is_some_and(|channel| channel.channel_type == Some(ChannelType::Session)))
+                || (self.session_conversation
+                    && self
+                        .summary(cx)
+                        .is_some_and(|channel| channel.channel_type == Some(ChannelType::Session))))
     }
 
     /// Nothing can be typed or sent now (`ComposerToolProps.disabled`).

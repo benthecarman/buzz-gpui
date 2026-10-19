@@ -180,6 +180,34 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
             serde_json::from_value::<Event>(value.clone())
                 .is_ok_and(|event| verifier.verify(event).is_ok())
         });
+        // Only from channels you can read (`eventVisibility`): each `h`,
+        // and a roster or admin list's `d`; channel metadata may introduce
+        // an open one.
+        let named = |event: &Value| -> Vec<String> {
+            let kind = event.get("kind").and_then(Value::as_u64).unwrap_or(0);
+            event["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tag| {
+                    let name = tag.get(0).and_then(Value::as_str)?;
+                    let value = tag.get(1).and_then(Value::as_str)?;
+                    (name == "h" || (name == "d" && matches!(kind, 39001 | 39002)))
+                        .then(|| value.to_owned())
+                })
+                .collect()
+        };
+        let mut channels: Vec<String> = events.iter().flat_map(named).collect();
+        channels.sort();
+        channels.dedup();
+        if !channels.is_empty() {
+            let open: HashSet<String> = session
+                .accessible_channels(channels)
+                .await
+                .into_iter()
+                .collect();
+            events.retain(|event| named(event).iter().all(|id| open.contains(id)));
+        }
         // Your own events still on their way count too, as `session.read`
         // merges what the outbox holds.
         if let Some(outbox) = session.outbox().await {

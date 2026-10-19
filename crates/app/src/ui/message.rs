@@ -628,10 +628,12 @@ fn full(
         );
     }
     // The body, after a time chip for timecoded video replies.
-    let text = match quiet {
+    // A link in a thread pane adds a panel; one in the timeline replaces.
+    let thread = layout != Layout::Timeline;
+    let text = markdown::in_place(thread, || match quiet {
         Some(shown) => markdown::subtle(|| media::text(shown, rows, cx)),
         None => media::text(row, rows, cx),
-    };
+    });
     if let Some(text) = text {
         let frame = div()
             .id(SharedString::from(format!("md-{id}")))
