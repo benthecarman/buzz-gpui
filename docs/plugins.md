@@ -439,7 +439,13 @@ The view is gone. Forget its state.
 
 When the plugin restarts, Buzz sends `initialize` again, then `view/open` for
 every view that is still open. Until a new tree arrives, the old one stays on
-screen.
+screen, and each composer element in it sends `ready` again with a new id.
+Composer tools and accessories are made anew: their views, tool popovers and
+captures begun through a tool close without `view/close`, and each accessory
+opens again as a new view (a new id and `view/open`) when its composer next
+shows, so one above a hidden page's composer opens when you return. A
+reaction picker opens again while its tool still picks reactions, and tool
+states start over.
 
 ## Elements
 
@@ -870,6 +876,11 @@ passes a function, or reaches into the app, it works differently:
   changes only when the session is replaced: not for a retry while
   connecting, a retry of a saved snapshot, or a cache clear of a
   connected, saved or failed session.
+
+- **Buzz's own shortcuts work behind dialogs.** Buzz's chords, such as
+  Settings or Go home, still navigate while a dialog or the media review
+  is open, which `navigation/watch` reports; buzz-app holds them while a
+  dialog is open. Plugin shortcuts wait out dialogs as in buzz-app.
 
 - **Statuses are read for anyone.** `statuses/get` answers for every key
   asked about; buzz-app's `statuses.current` answers only for people

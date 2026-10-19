@@ -922,7 +922,7 @@ pub fn external_key_down(event: &KeyDownEvent, window: &mut Window, cx: &mut App
             .context_stack()
             .iter()
             .any(|context| context.contains("Input")),
-        modal: crate::ui::overlay::modal_shown(),
+        modal: crate::ui::overlay::modal_shown() || crate::ui::media::viewer_shown(cx),
         held: event.is_held,
     };
     // The first plugin shortcut on this chord that is on and may run here;

@@ -385,6 +385,15 @@ pub(super) fn close_preview(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// The media review or a draft's preview is open: a dialog, which plugin
+/// shortcuts without `allowInModal` wait out (`aria-modal`).
+pub fn viewer_shown(cx: &App) -> bool {
+    cx.try_global::<HostGlobal>().is_some_and(|host| {
+        let host = host.0.read(cx);
+        host.review.is_some() || host.preview.is_some()
+    })
+}
+
 /// Pauses the viewer's video and closes the viewer, for a conversation
 /// that is no longer shown (`useConversationPresentation`).
 pub fn dismiss_review(window: &mut Window, cx: &mut App) {

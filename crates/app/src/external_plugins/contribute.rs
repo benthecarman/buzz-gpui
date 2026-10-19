@@ -529,6 +529,9 @@ pub fn tool_composers(plugin: &str) -> std::collections::HashSet<u64> {
 
 pub fn forget(plugin: &str) {
     crate::shortcuts::forget_external(plugin);
+    let prefix = format!("{plugin}/");
+    // Its tools' states were the old run's (a new one starts enabled).
+    TOOL_STATES.with_borrow_mut(|states| states.retain(|(key, _), _| !key.starts_with(&prefix)));
     // Its tool's popover goes with the tool, which a new run makes anew.
     TOOL_POPOVER.with_borrow_mut(|open| {
         if open
@@ -540,7 +543,6 @@ pub fn forget(plugin: &str) {
     });
     COMPOSERS.with_borrow_mut(|composers| composers.retain(|_, grant| grant.plugin != plugin));
     // A new run builds its tools anew, with grants of its own.
-    let prefix = format!("{plugin}/");
     DECLARED.with_borrow_mut(|declared| declared.retain(|key, _| !key.starts_with(&prefix)));
     REMOVERS.with_borrow_mut(|removers| removers.retain(|_, owner| owner != plugin));
     ANSWERS.with_borrow_mut(|answers| {

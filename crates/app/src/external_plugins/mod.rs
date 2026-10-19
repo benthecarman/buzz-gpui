@@ -1259,6 +1259,8 @@ impl ExternalPlugins {
         let tool_composers = contribute::tool_composers(&id);
         // Renderer answers and marks belong to the old run.
         contribute::forget(&id);
+        // Views already let go (a tool's popover) close unheard.
+        plugin.views.retain(|_, view| view.upgrade().is_some());
         // A new run registers its renderers and actions last, as a reload
         // in buzz-app disposes the old revision first.
         for added in &plugin.added {
@@ -1331,6 +1333,8 @@ impl ExternalPlugins {
                 {
                     connection.notify("view/open", params);
                 }
+                // Its composer elements announce themselves to this run.
+                view.read(cx).announce_composers(cx);
             }
         }
         cx.refresh_windows();

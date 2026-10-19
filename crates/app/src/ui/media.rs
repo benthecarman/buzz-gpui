@@ -26,7 +26,7 @@ pub use audio::{
 };
 // The composer's draft thumbnails use this.
 pub use engine::probe_file;
-pub use review::{dismiss_review, review_overlay};
+pub use review::{dismiss_review, review_overlay, viewer_shown};
 // The composer opens its draft attachments here.
 pub use draft_viewer::tile_key as draft_tile_key;
 pub use preview::{ImageStatus, Open, image_preview, image_status};

@@ -714,6 +714,15 @@ impl ExternalView {
         }
     }
 
+    /// After a restart, each embedded composer tells the new run its id
+    /// again (`ready`), as a remount does.
+    pub(super) fn announce_composers(&self, cx: &App) {
+        for (id, (composer, _, _)) in &self.composers {
+            let number = super::contribute::composer_id(&self.plugin, composer);
+            self.event(id, "ready", Some(json!({ "composer": number })), cx);
+        }
+    }
+
     fn event(&self, id: &str, event: &str, value: Option<Value>, cx: &App) {
         let mut params = json!({ "view": self.id, "id": id, "event": event });
         if let Some(value) = value {
