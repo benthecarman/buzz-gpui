@@ -2413,6 +2413,11 @@ impl Agents2 {
         let Some(binding) = self.selected(cx).and_then(|bound| bound.binding.as_ref()) else {
             return Task::ready(Err("Connect to a community first".into()));
         };
+        // A hosted agent's key stays with its provider: nothing local
+        // becomes one (`add`).
+        if super::is_hosted(type_key, cx) {
+            return Task::ready(Err("A hosted agent's key stays with its provider".into()));
+        }
         let Some(kind) = registry::type_of(type_key, cx) else {
             return Task::ready(Err("That agent type is not available".into()));
         };

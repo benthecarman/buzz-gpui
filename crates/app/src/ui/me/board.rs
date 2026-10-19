@@ -214,6 +214,11 @@ impl SessionWork {
         this
     }
 
+    /// Panel tab `id` is open here.
+    pub(crate) fn has_panel_tab(&self, id: &str, cx: &App) -> bool {
+        self.tabs(cx).panels.iter().any(|tab| tab.id() == id)
+    }
+
     /// Panel tab `id` is open here but not the one shown.
     pub(crate) fn panel_tab_inactive(&self, id: &str, cx: &App) -> bool {
         let state = self.tabs(cx);

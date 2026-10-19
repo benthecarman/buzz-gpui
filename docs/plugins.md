@@ -828,6 +828,19 @@ passes a function, or reaches into the app, it works differently:
   again; in buzz-app they register last again, after plugins added
   meanwhile.
 
+- **Buzz's own plugin chords come first.** Terminal's and Mission
+  control's chords are Buzz's keymap: they take the press even while
+  their plugin is off or the terminal launcher is hidden, before any
+  plugin shortcut with the same keys; buzz-app passes the press on then.
+
+- **Names know the agents this device runs.** The naming policy sees your
+  agents this device runs; ones only your relay agent list names, from
+  other devices, are named by their profile until it loads.
+
+- **Policy labels are tidied.** A `names/resolve` answer's name is
+  trimmed and kept to 128 characters and its qualifier to 64; buzz-app
+  uses them as returned.
+
 - **A profile sent through the outbox shows once the relay has it.** A
   kind 0 queued with `outbox/send` changes `profiles/get` and `names/get`
   when the relay echoes it back; buzz-app shows it while it is queued.

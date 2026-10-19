@@ -1241,7 +1241,7 @@ pub fn retry_navigation(cx: &mut App) -> Result<Task<Result<Value, Failure>>, Fa
     }
     let before = workspace.read(cx).visit().0;
     navigation::with_workspace(cx, |workspace, window, cx| {
-        workspace.retry_failed(window, cx)
+        workspace.retry_visit(window, cx)
     });
     Ok(settle(before, cx))
 }
@@ -2495,7 +2495,10 @@ pub fn contributions(cx: &App) -> Value {
             })),
             "menu": panel.menu.as_ref().map(|menu| json!({ "label": menu.label })),
         })).collect::<Vec<_>>(),
-        "settings": crate::ui::settings::cards::all(cx).iter().map(|card| json!({
+        // A switched-off plugin's cards are not listed at all.
+        "settings": crate::ui::settings::cards::all(cx).iter()
+            .filter(|card| crate::plugins::enabled_key(card.key))
+            .map(|card| json!({
             "key": card.key,
             "title": card.title,
             "visibility": match card.visibility(cx) {
@@ -2515,7 +2518,13 @@ pub fn contributions(cx: &App) -> Value {
         "accountActions": crate::ui::account_actions::all(cx).iter().map(|action| json!({
             "key": action.key,
             "title": action.title.to_string(),
-        })).collect::<Vec<_>>(),
+        }))
+        // Buzz's own Send feedback is the Feedback plugin's action.
+        .chain(crate::plugins::enabled("buzz.feedback").then(|| json!({
+            "key": "buzz.feedback/send",
+            "title": "Send feedback",
+        })))
+        .collect::<Vec<_>>(),
         "shortcuts": crate::shortcuts::external_list(cx).iter().map(|shortcut| json!({
             "key": shortcut.key,
             "pluginId": crate::plugins::plugin_of(shortcut.key),

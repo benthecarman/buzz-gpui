@@ -2626,9 +2626,13 @@ impl ExternalPlugins {
             }
             "shortcuts/run" => Reply::Now(match params.get("key").and_then(Value::as_str) {
                 Some(key) => {
+                    // Runs only while its plugin does (a built-in one always).
+                    let plugin = crate::plugins::plugin_of(key);
+                    let built_in = crate::shortcuts::PLUGINS.iter().any(|b| b.key == key);
                     let known = crate::shortcuts::external_list(cx)
                         .iter()
-                        .any(|shortcut| shortcut.key == key);
+                        .any(|shortcut| shortcut.key == key)
+                        && (built_in || Self::running_connection(plugin, cx).is_some());
                     if known {
                         let key = key.to_owned();
                         crate::ui::navigation::with_workspace(cx, move |_, window, cx| {

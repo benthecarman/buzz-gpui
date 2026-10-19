@@ -537,6 +537,10 @@ impl Workspace {
             );
             return;
         }
+        // The page already shown, picked again, is a new attempt.
+        if self.page == page {
+            self.begin_attempt();
+        }
         self.show_page(page, window, cx);
         // The visit is recorded first, so the page hears its entry.
         self.record(cx);
@@ -625,7 +629,7 @@ impl Render for Workspace {
         } else if let Some(failed) = &self.failure {
             channel_states::failure(
                 failed,
-                cx.listener(|this, _, window, cx| this.retry_navigation(window, cx)),
+                cx.listener(|this, _, window, cx| this.retry_navigation(true, window, cx)),
                 cx.listener(|this, _, window, cx| {
                     this.failure = None;
                     this.open_settings(None, window, cx)
@@ -848,7 +852,7 @@ impl Workspace {
     fn begin_attempt(&mut self) {
         self.attempts += 1;
         self.attempt_started = std::time::Instant::now();
-        self.attempt_keeps_focus = self.keep_focus;
+        self.attempt_keeps_focus = self.keep_focus || self.preserve_focus;
         self.settling = None;
         self.checking = None;
         self.pending = None;
@@ -879,6 +883,11 @@ impl Workspace {
                 // A visit of the user's own supersedes one still opening.
                 if self.visit().1 {
                     self.begin_attempt();
+                } else {
+                    // A visit of the user's own is an attempt of its own.
+                    self.attempts += 1;
+                    self.attempt_started = std::time::Instant::now();
+                    self.attempt_keeps_focus = self.keep_focus || self.preserve_focus;
                 }
                 self.enter_visit(cx);
             }
@@ -927,9 +936,10 @@ impl Workspace {
             .map(|failed| (failed, failed.retryable()))
     }
 
-    /// Opens the visit that failed again ("Retry navigation").
-    pub(crate) fn retry_failed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.retry_navigation(window, cx);
+    /// A plugin's `navigation/retry`: the visit again, the relay as it is
+    /// (`controller.retry()` never reconnects).
+    pub(crate) fn retry_visit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.retry_navigation(false, window, cx);
     }
 
     /// The visit being opened, by attempt, and whether it is still
@@ -1195,7 +1205,7 @@ impl Workspace {
 
     /// "Retry navigation": the kept target again, reconnecting its
     /// community if the connection failed.
-    fn retry_navigation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn retry_navigation(&mut self, repair: bool, window: &mut Window, cx: &mut Context<Self>) {
         // With nothing failed, the current visit starts over (`retry()`
         // always starts a new attempt).
         let Some(failed) = self.failure.take() else {
@@ -1206,7 +1216,9 @@ impl Workspace {
             }
             return;
         };
-        self.retry_session(cx);
+        if repair {
+            self.retry_session(cx);
+        }
         match failed.target {
             // With the failed attempt's focus choice (`retry()`).
             Some(target) => {

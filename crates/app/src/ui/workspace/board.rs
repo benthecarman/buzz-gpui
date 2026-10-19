@@ -163,13 +163,18 @@ impl Workspace {
     /// Panel tab `id` is open in the conversation shown but is not the
     /// selected tab, so it may not open or push (`panelActive`).
     pub(crate) fn panel_tab_inactive(&self, id: &str, cx: &App) -> bool {
-        if self.page == Page::ME {
-            return self
-                .me_work(cx)
-                .is_some_and(|work| work.read(cx).panel_tab_inactive(id, cx));
+        let messages = self.tabs(cx);
+        let in_messages = messages.panels.iter().any(|tab| tab.id() == id);
+        let me = self.me_work(cx);
+        let in_me = me.as_ref().is_some_and(|work| {
+            work.read(cx).panel_tab_inactive(id, cx) || work.read(cx).has_panel_tab(id, cx)
+        });
+        match self.page {
+            Page::MESSAGES if in_messages => messages.selected != id,
+            Page::ME if in_me => me.is_some_and(|work| work.read(cx).panel_tab_inactive(id, cx)),
+            // A tab on a page not shown is not shown.
+            _ => in_messages || in_me,
         }
-        let state = self.tabs(cx);
-        state.panels.iter().any(|tab| tab.id() == id) && state.selected != id
     }
 
     /// Me's open conversation board, if Me has one.
