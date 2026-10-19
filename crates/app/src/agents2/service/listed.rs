@@ -23,6 +23,8 @@ pub(super) struct Listed {
     edits: HashMap<String, HashMap<String, Option<Listing>>>,
     /// By origin, the binding generation whose read is under way.
     reading: HashMap<String, u64>,
+    /// By origin, why the last read failed.
+    failed: HashMap<String, String>,
     /// Agents whose record is being written, so a sync writes each once.
     writing: HashSet<String>,
 }
@@ -32,6 +34,7 @@ impl Listed {
         self.rows.remove(origin);
         self.edits.remove(origin);
         self.reading.remove(origin);
+        self.failed.remove(origin);
     }
 
     /// The community's listings: as read, or until the first read
@@ -107,9 +110,13 @@ impl Agents2 {
                     // Its edits stay for the next read, which a sync asks
                     // for.
                     Err(error) => {
-                        return tracing::warn!(%error, "The agent list could not be read");
+                        tracing::warn!(%error, "The agent list could not be read");
+                        this.listed.failed.insert(origin.clone(), error);
+                        cx.notify();
+                        return;
                     }
                 };
+                this.listed.failed.remove(&origin);
                 let edits = this.listed.edits.remove(&origin).unwrap_or_default();
                 let mut rows: Vec<Listing> = read
                     .into_iter()
@@ -226,6 +233,35 @@ impl Agents2 {
         let Some(origin) = selected_origin(cx) else {
             return Vec::new();
         };
+        self.elsewhere_in(&origin)
+    }
+
+    /// The agents your list names at `origin` (its `http` form) that this
+    /// device does not run, any runtime or none (`readRelayLibrary`), as
+    /// `(pubkey, name)`.
+    pub fn listed_elsewhere(&self, origin: &str) -> Vec<(String, String)> {
+        let here: HashSet<String> = self.saved().map(|saved| saved.summary.pubkey).collect();
+        self.listed
+            .rows_of(origin)
+            .into_iter()
+            .filter(|row| !row.name.is_empty() && !here.contains(&row.pubkey))
+            .map(|row| (row.pubkey, row.name))
+            .collect()
+    }
+
+    /// The agent list read at `origin`: whether it is under way, whether
+    /// one finished, and why the last one failed.
+    pub fn listing_state(&self, origin: &str) -> (bool, bool, Option<String>) {
+        (
+            self.listed.reading.contains_key(origin),
+            self.listed.rows.contains_key(origin),
+            self.listed.failed.get(origin).cloned(),
+        )
+    }
+
+    /// [`Self::elsewhere`] at `origin`.
+    fn elsewhere_in(&self, origin: &str) -> Vec<Elsewhere> {
+        let origin = origin.to_owned();
         let Some(binding) = self.bound.get(&origin).and_then(|b| b.binding.as_ref()) else {
             return Vec::new();
         };

@@ -715,13 +715,17 @@ impl ExternalView {
                     disabled,
                     draft,
                     draft_key,
+                    invite_agents,
                     ..
                 } => {
-                    // Disabling and a new draft change the composer made
-                    // already.
+                    // Disabling, `inviteAgents` and a new draft change the
+                    // composer made already.
                     if let Some((composer, _, last)) = self.composers.get_mut(*id) {
-                        let can_send = !disabled;
-                        composer.update(cx, |composer, cx| composer.set_can_send(can_send, cx));
+                        let (can_send, invite) = (!disabled, *invite_agents);
+                        composer.update(cx, |composer, cx| {
+                            composer.set_can_send(can_send, cx);
+                            composer.set_invite_agents(invite);
+                        });
                         if let Some(draft) = draft.filter(|draft| last.as_deref() != Some(*draft)) {
                             *last = Some(draft.to_owned());
                             let input = composer.read(cx).input();

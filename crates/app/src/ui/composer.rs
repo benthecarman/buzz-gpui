@@ -582,6 +582,12 @@ impl Composer {
         self.invite_agents = true;
     }
 
+    /// Whether it may offer library agents, as a plugin's composer element
+    /// says on each draw.
+    pub fn set_invite_agents(&mut self, invite: bool) {
+        self.invite_agents = invite;
+    }
+
     /// A conversation view's own composer, which in a session may offer
     /// your agents (`sessionConversation`); embedded and media composers
     /// are not.

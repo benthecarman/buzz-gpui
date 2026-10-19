@@ -270,7 +270,13 @@ pub struct Actions {
     pub on_highlight: Option<HighlightHandler>,
     pub on_preview: Option<PreviewHandler>,
     pub on_want_profiles: Option<WantProfiles>,
+    /// The page's loaded row by id, while the page lasts: a deleted
+    /// message is no longer found.
+    pub find_row: Option<FindRow>,
 }
+
+/// A page's loaded row by id.
+pub type FindRow = Rc<dyn Fn(EventId, &App) -> Option<Arc<MessageRow>>>;
 
 /// What every row of a page shares.
 pub struct Rows {
@@ -660,7 +666,7 @@ fn full(
     // Agent Activity's by order then key.
     let open_thread = rows.actions.on_open_thread.as_ref();
     let (before, after): (Vec<_>, Vec<_>) =
-        super::renderers::message_accessories(row, open_thread, cx)
+        super::renderers::message_accessories(row, open_thread, rows.actions.find_row.as_ref(), cx)
             .into_iter()
             .partition(|(before, _)| *before);
     for (_, accessory) in before {

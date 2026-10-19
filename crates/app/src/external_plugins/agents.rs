@@ -1053,13 +1053,23 @@ pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
     // Each with its picture, as the library rows carry it (`avatar`).
     let service = agents2(cx)?;
     let service = service.read(cx);
-    // And the agents your list names here from other devices, which this
-    // one does not run (`agentLibrary`'s relay inventory, unmanaged).
-    for agent in service.elsewhere(cx) {
-        if seen.insert(agent.pubkey.clone()) {
-            identities.push((agent.pubkey, agent.name, false));
+    // And the agents your list names in this community from other
+    // devices, which this one does not run (`agentLibrary`'s relay
+    // inventory, unmanaged).
+    let http = origin.http();
+    for (pubkey, name) in service.listed_elsewhere(&http) {
+        if seen.insert(pubkey.clone()) {
+            identities.push((pubkey, name, false));
         }
     }
+    // Complete once that list was read too; its failure is the error.
+    let (reading, read, failed) = service.listing_state(&http);
+    let pending = status == "loading" || reading || !read;
+    let complete = status == "ready" && read && failed.is_none();
+    let error = error.or_else(|| {
+        failed
+            .map(|failed| format!("Relay inventory unavailable; showing local library ({failed})"))
+    });
     let avatar = |pubkey: &str| {
         service
             .agents()
@@ -1081,8 +1091,8 @@ pub(super) fn choices_now(cx: &App) -> Result<Value, Failure> {
     Ok(json!({
         "status": status,
         "error": error,
-        "pending": status == "loading",
-        "complete": status == "ready",
+        "pending": pending,
+        "complete": complete,
         "identities": identities.iter().map(choice).collect::<Vec<_>>(),
         "selectable": identities
             .iter()

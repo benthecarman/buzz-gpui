@@ -102,6 +102,7 @@ pub trait MessageAccessory {
         &self,
         row: &Arc<MessageRow>,
         open_thread: Option<&super::message::RowHandler>,
+        find: Option<&super::message::FindRow>,
         cx: &App,
     ) -> Option<AnyElement>;
 }
@@ -247,6 +248,7 @@ pub fn register_message_accessory(accessory: Rc<dyn MessageAccessory>) {
 pub fn message_accessories(
     row: &Arc<MessageRow>,
     open_thread: Option<&super::message::RowHandler>,
+    find: Option<&super::message::FindRow>,
     cx: &App,
 ) -> Vec<(bool, AnyElement)> {
     let accessories = REGISTRY.with_borrow(|r| r.accessories.clone());
@@ -255,8 +257,10 @@ pub fn message_accessories(
         .filter(|accessory| on(accessory.key()))
         .filter_map(|accessory| {
             let before = (accessory.order(), accessory.key()) < (0, "buzz.agent-activity/activity");
-            guarded(accessory.key(), || accessory.render(row, open_thread, cx))
-                .map(|element| (before, element))
+            guarded(accessory.key(), || {
+                accessory.render(row, open_thread, find, cx)
+            })
+            .map(|element| (before, element))
         })
         .collect()
 }

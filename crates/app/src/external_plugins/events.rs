@@ -220,14 +220,19 @@ pub fn query(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, F
             let mut ids: Vec<String> = events.iter().filter_map(single).collect();
             ids.sort();
             ids.dedup();
-            let mut resolved = HashSet::new();
-            for chunk in ids.chunks(128) {
-                let found = session
-                    .resolve_channels(chunk.to_vec())
+            // One lookup: too many channels is the read's error, as
+            // buzz-app's `resolve` refuses past its limit.
+            let resolved: HashSet<String> = if ids.is_empty() {
+                HashSet::new()
+            } else {
+                session
+                    .resolve_channels(ids)
                     .await
-                    .map_err(|error| (2, error))?;
-                resolved.extend(found.into_iter().map(|channel| channel.id));
-            }
+                    .map_err(|error| (2, error))?
+                    .into_iter()
+                    .map(|channel| channel.id)
+                    .collect()
+            };
             events.retain(|event| single(event).is_some_and(|id| resolved.contains(&id)));
         }
         // Only from channels you can read (`eventVisibility`): each `h`,

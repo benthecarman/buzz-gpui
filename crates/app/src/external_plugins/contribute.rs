@@ -102,6 +102,7 @@ type Delivered = ((String, String), Outcome);
 /// nothing.
 type ThreadOpener = (
     std::rc::Weak<dyn Fn(&Arc<MessageRow>, &mut Window, &mut App)>,
+    Option<std::rc::Weak<dyn Fn(buzz_relay_client::EventId, &App) -> Option<Arc<MessageRow>>>>,
     Arc<MessageRow>,
 );
 
@@ -275,7 +276,16 @@ pub fn open_accessory_thread(
     let message = field("message")?.to_owned();
     let entry = (key, message);
     let opener = THREAD_OPENERS.with_borrow(|openers| openers.get(&entry).cloned());
-    let Some((open, row)) = opener.and_then(|(open, row)| Some((open.upgrade()?, row))) else {
+    // Its place still shows the message, not deleted since.
+    let current = opener.and_then(|(open, find, row)| {
+        let open = open.upgrade()?;
+        let row = match find {
+            Some(find) => find.upgrade()?(row.id, cx)?,
+            None => row,
+        };
+        Some((open, row))
+    });
+    let Some((open, row)) = current else {
         // Its place is gone (`false` after it retires).
         THREAD_OPENERS.with_borrow_mut(|openers| openers.remove(&entry));
         return Ok(json!(false));
@@ -970,6 +980,7 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
         &self,
         row: &Arc<MessageRow>,
         open_thread: Option<&crate::ui::message::RowHandler>,
+        find: Option<&crate::ui::message::FindRow>,
         cx: &App,
     ) -> Option<AnyElement> {
         let kinds_ok = if self.kinds.is_empty() {
@@ -992,7 +1003,8 @@ impl crate::ui::renderers::MessageAccessory for MessageAccessoryView {
         // in for this accessory, or nothing where that place cannot.
         let used: Rc<dyn Fn()> = {
             let entry = (self.key.to_owned(), row.id.to_hex());
-            let opener = open_thread.map(|open| (Rc::downgrade(open), row.clone()));
+            let opener =
+                open_thread.map(|open| (Rc::downgrade(open), find.map(Rc::downgrade), row.clone()));
             Rc::new(move || {
                 THREAD_OPENERS.with_borrow_mut(|openers| {
                     if openers.len() >= 4096 {

@@ -536,6 +536,7 @@ impl MessageActions {
         );
         Actions {
             on_open_thread: self.open_thread.clone(),
+            find_row: Some(self.hooks.find.clone()),
             on_retry: Some(Rc::new(move |row, _, cx| {
                 let _ = retry.update(cx, |this, cx| {
                     let (session, id) = (this.session(cx), row.id);

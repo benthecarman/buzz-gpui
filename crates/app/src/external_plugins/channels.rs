@@ -170,9 +170,9 @@ fn lineup_checked(
                         .to_owned(),
                 ));
             }
-            // Your agents this device runs here, or ones listed from
-            // elsewhere that are a member of a channel you are in, none
-            // archived (`templateAgentChoices`: managed, or a member).
+            // Your agents this device runs here, none archived: Buzz binds
+            // its local agents, so a template takes those only
+            // (`templateAgentChoices` with a local source).
             let rules = crate::ui::me::recipients::rules(&community, cx);
             let origin = community.read(cx).origin.clone();
             let managed: std::collections::HashSet<String> =
@@ -185,16 +185,7 @@ fn lineup_checked(
                     })
                     .map(|(key, _, _)| key)
                     .collect();
-            let members: std::collections::HashSet<String> = community
-                .read(cx)
-                .snapshot
-                .channels
-                .iter()
-                .flat_map(|channel| channel.members.iter().cloned())
-                .collect();
-            let available = |key: &String| {
-                rules.selectable.contains(key) && (managed.contains(key) || members.contains(key))
-            };
+            let available = |key: &String| rules.selectable.contains(key) && managed.contains(key);
             let unavailable: Vec<String> = agents
                 .iter()
                 .filter(|key| !available(key))
