@@ -492,6 +492,14 @@ impl ChannelPage {
         self.input.clone()
     }
 
+    /// A reader's conversation: links open nowhere in Buzz and no thread
+    /// opens from it (`ChannelPreview` has no `onOpenThread`).
+    pub fn as_reader(&mut self, cx: &mut Context<Self>) {
+        self.link_mode = crate::ui::links::LinkMode::Closed;
+        self.message_actions
+            .update(cx, |actions, cx| actions.without_threads(cx));
+    }
+
     /// The composer itself, for hosts that follow its sends (Inbox drafts).
     pub fn composer_entity(&self) -> Entity<super::composer::Composer> {
         self.composer.clone()

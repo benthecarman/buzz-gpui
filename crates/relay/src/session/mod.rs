@@ -1438,6 +1438,10 @@ impl Actor {
                     self.retry_live();
                     self.retry_reads();
                 }
+                // Watchers hear of the new generation even when nothing
+                // else changed, so state kept per attempt starts over
+                // (`reset()` of a ready session).
+                self.snapshot.send_modify(|_| {});
             }
             Message::RetryLive => self.retry_live(),
             Message::Online => {

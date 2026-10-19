@@ -585,12 +585,20 @@ fn full(
                     .id(SharedString::from(format!("avatar-{id}")))
                     .relative()
                     .rounded_full()
-                    .cursor_pointer()
                     .child(avatar)
-                    .on_click(move |event, window, cx| {
-                        cx.stop_propagation();
-                        let (target, origin) = (target.clone(), Some(origin.clone()));
-                        navigation::show_profile_from(target, event.position(), origin, window, cx)
+                    // A reader opens no profiles (`canOpenLink` unset).
+                    .when(!links_closed(), |d| {
+                        d.cursor_pointer().on_click(move |event, window, cx| {
+                            cx.stop_propagation();
+                            let (target, origin) = (target.clone(), Some(origin.clone()));
+                            navigation::show_profile_from(
+                                target,
+                                event.position(),
+                                origin,
+                                window,
+                                cx,
+                            )
+                        })
                     }),
             )
             .into_any_element()
@@ -1005,17 +1013,20 @@ fn byline(row: &Arc<MessageRow>, name: &SharedString, rows: &Rc<Rows>, cx: &App)
                             div()
                                 .id(SharedString::from(format!("workflow-owner-{id}")))
                                 .text_color(c.text_link)
-                                .cursor_pointer()
-                                .hover(|s| s.underline())
                                 .child(owner_name.clone())
-                                .on_click(move |event, window, cx| {
-                                    navigation::show_profile_from(
-                                        target.clone(),
-                                        event.position(),
-                                        Some(origin.clone()),
-                                        window,
-                                        cx,
-                                    )
+                                .when(!links_closed(), |d| {
+                                    d.cursor_pointer().hover(|s| s.underline())
+                                })
+                                .when(!links_closed(), |d| {
+                                    d.on_click(move |event, window, cx| {
+                                        navigation::show_profile_from(
+                                            target.clone(),
+                                            event.position(),
+                                            Some(origin.clone()),
+                                            window,
+                                            cx,
+                                        )
+                                    })
                                 }),
                         ),
                 )
@@ -2596,6 +2607,12 @@ pub fn channel_icon(channel: &buzz_relay_client::ChannelSummary) -> IconName {
         _ if channel.private => IconName::Lock,
         _ => IconName::Hash,
     }
+}
+
+/// Links in rows drawn now open nowhere in Buzz, as a reader's do: nor do
+/// their profiles (`canOpenLink` unset).
+fn links_closed() -> bool {
+    super::links::mode() == super::links::LinkMode::Closed
 }
 
 #[cfg(test)]

@@ -589,7 +589,7 @@ impl DraftDetail {
                             cx,
                         );
                         page.secondary = true;
-                        page.link_mode = crate::ui::links::LinkMode::Closed;
+                        page.as_reader(cx);
                         page
                     });
                     let composer = page.read(cx).composer_entity();

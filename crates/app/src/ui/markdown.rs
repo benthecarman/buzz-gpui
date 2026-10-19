@@ -2328,21 +2328,24 @@ impl Objects {
                     .line_height(line)
                     .whitespace_nowrap()
                     .text_color(c.text_link)
-                    .hover(|style| style.bg(c.affordance_link_hover))
-                    .cursor_pointer()
                     .tooltip(Tooltip::text(tooltip))
                     .child(Icon::new(icon).size(f32::from(size)).color(c.text_link))
                     .child(name)
-                    .on_click(move |event, window, cx| {
-                        cx.stop_propagation();
-                        let origin = origin.clone();
-                        navigation::show_profile_from(
-                            key.clone(),
-                            event.position(),
-                            origin,
-                            window,
-                            cx,
-                        )
+                    // A reader opens no profiles (`canOpenLink` unset).
+                    .when(self.link_mode != links::LinkMode::Closed, |d| {
+                        d.hover(|style| style.bg(c.affordance_link_hover))
+                            .cursor_pointer()
+                            .on_click(move |event, window, cx| {
+                                cx.stop_propagation();
+                                let origin = origin.clone();
+                                navigation::show_profile_from(
+                                    key.clone(),
+                                    event.position(),
+                                    origin,
+                                    window,
+                                    cx,
+                                )
+                            })
                     })
                     .into_any_element(),
             );

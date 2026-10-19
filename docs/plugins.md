@@ -822,11 +822,23 @@ passes a function, or reaches into the app, it works differently:
   Forward) selects that community again; buzz-app's leaves the selection
   alone.
 
-- **Views stay open while their page is hidden.** A plugin page, and the
-  agent tab shown on the Agents page or in an agent's profile, stays
-  open when you go elsewhere, and is shown again as it was; buzz-app
-  unmounts them and opens them afresh when you come back. A page hears
+- **Views stay open while their page is hidden.** A plugin page; the
+  agent tab shown on the Agents page or in an agent's profile; the
+  Agents page's provider and New agent dialogs; the panel tabs and
+  drawer of the conversation Messages or Me shows; and the accessories
+  above those pages' composers stay open when you go elsewhere, and are
+  shown again as they were. A panel beside the page (an `appLauncher`'s,
+  or one opened outside a conversation) stays open as you move between
+  Messages or Me and other pages. buzz-app unmounts all of these with
+  their page and opens them afresh when you come back. A page hears
   `page/route` when it is visited again.
+
+- **Readers still open panels and the media review.** In the Inbox and
+  Drafts readers and in media review comments, links open nowhere in
+  Buzz as in buzz-app, but an accessory there can still open panels with
+  `panel/canOpen` and `ui/openPanel`, where buzz-app's `canOpen` and
+  `open` answer `false`, and an image there opens the full media review,
+  comments included, where buzz-app shows a bare viewer.
 
 - **Statuses are read for anyone.** `statuses/get` answers for every key
   asked about; buzz-app's `statuses.current` answers only for people

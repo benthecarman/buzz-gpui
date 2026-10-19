@@ -231,6 +231,12 @@ impl MessageActions {
             .cloned()
     }
 
+    /// Rows here open no thread (a reader's).
+    pub fn without_threads(&mut self, cx: &mut Context<Self>) {
+        self.open_thread = None;
+        cx.notify();
+    }
+
     /// The reaction picker is on screen: its conversation takes
     /// reactions, and the inline "+" shows only beside reactions
     /// (`MessageReactionControls`, `ReactionTool`).

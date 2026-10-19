@@ -135,6 +135,8 @@ impl MessagePreview {
 fn card_frame(id: SharedString, url: &str, cx: &App) -> Stateful<Div> {
     let c = *cx.colors();
     let target = url.to_string();
+    // A reader's card opens nothing (`onOpenLink` answers false).
+    let closed = super::links::mode() == super::links::LinkMode::Closed;
     div()
         .id(id)
         .flex()
@@ -151,7 +153,9 @@ fn card_frame(id: SharedString, url: &str, cx: &App) -> Stateful<Div> {
         .cursor_pointer()
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            navigation::open_url(&target, window, cx)
+            if !closed {
+                navigation::open_url(&target, window, cx)
+            }
         })
 }
 

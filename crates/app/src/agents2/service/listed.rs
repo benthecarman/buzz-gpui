@@ -21,8 +21,11 @@ pub(super) struct Listed {
     /// By origin while its records are being read: the listings written
     /// or removed meanwhile, which the read must not undo.
     edits: HashMap<String, HashMap<String, Option<Listing>>>,
-    /// By origin, the binding generation whose read is under way.
+    /// By origin, the read under way, by its own number: a read let go
+    /// (the connection dropped, the cache was cleared) lands nowhere.
     reading: HashMap<String, u64>,
+    /// The number the next read takes.
+    next_read: u64,
     /// By origin, why the last read failed.
     failed: HashMap<String, String>,
     /// Agents whose record is being written, so a sync writes each once.
@@ -45,9 +48,11 @@ impl Listed {
         self.read_in.remove(origin);
     }
 
-    /// The community's read no longer stands (`agentLibrary.clear()`).
+    /// The community's read no longer stands, and one under way is let
+    /// go (`agentLibrary.clear()` aborts it).
     pub(super) fn set_stale(&mut self, origin: &str) {
         self.stale.insert(origin.to_owned());
+        self.reading.remove(origin);
     }
 
     /// Whether the last read was made before the session's cache was
@@ -72,7 +77,10 @@ impl Listed {
     /// Replaces or removes the agent's listing, and keeps the change until
     /// the community's records are read, first or again.
     pub(super) fn set_row(&mut self, origin: &str, pubkey: &str, row: Option<Listing>) {
-        if !self.rows.contains_key(origin) || self.reading.contains_key(origin) {
+        if !self.rows.contains_key(origin)
+            || self.reading.contains_key(origin)
+            || self.edits.contains_key(origin)
+        {
             self.edits
                 .entry(origin.to_owned())
                 .or_default()
@@ -115,11 +123,13 @@ impl Agents2 {
         let Some(binding) = self.bound.get(origin).and_then(|b| b.binding.as_ref()) else {
             return;
         };
-        let generation = binding.generation;
-        if self.listed.reading.get(origin) == Some(&generation) {
+        // One under way answers for it.
+        if self.listed.reading.contains_key(origin) {
             return;
         }
-        self.listed.reading.insert(origin.to_owned(), generation);
+        self.listed.next_read += 1;
+        let read_number = self.listed.next_read;
+        self.listed.reading.insert(origin.to_owned(), read_number);
         // Watchers see the read begin (`library.refresh`'s `loading`).
         cx.notify();
         let http = RelayHttp::new(binding.session.origin().clone(), binding.identity.clone());
@@ -132,7 +142,7 @@ impl Agents2 {
                 .await
                 .unwrap_or_else(|_| Err("The agent list read was cancelled".into()));
             let _ = this.update(cx, |this, cx| {
-                if this.listed.reading.get(&origin) != Some(&generation) {
+                if this.listed.reading.get(&origin) != Some(&read_number) {
                     return;
                 }
                 this.listed.reading.remove(&origin);

@@ -173,8 +173,8 @@ impl InboxDetail {
                         ChannelPage::new(community.clone(), channel, on_open_thread, window, cx);
                     page.secondary = true;
                     // A reader's links open nowhere in Buzz
-                    // (`onOpenLink={() => false}`).
-                    page.link_mode = crate::ui::links::LinkMode::Closed;
+                    // (`onOpenLink={() => false}`), nor do its threads.
+                    page.as_reader(cx);
                     page
                 });
                 self._subscriptions
