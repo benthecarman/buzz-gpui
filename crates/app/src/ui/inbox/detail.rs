@@ -281,6 +281,13 @@ impl InboxDetail {
 impl Render for InboxDetail {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = *cx.colors();
+        // A conversation no longer available takes its reader with it, and
+        // a new one is made if it comes back (`admitted` resets).
+        if self.reader.is_some() && !self.available(cx) {
+            self.reader = None;
+            self.reveal = None;
+            self.fallback = None;
+        }
         self.admit(window, cx);
         self.take_fallback(window, cx);
         let channel = self.channel(cx);

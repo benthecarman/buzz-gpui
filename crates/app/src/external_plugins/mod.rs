@@ -1284,6 +1284,16 @@ impl ExternalPlugins {
         let views: Vec<_> = plugin.views.values().cloned().collect();
         for view in views {
             if let Some(view) = view.upgrade() {
+                // A view of what this run no longer declares closes as it is
+                // taken away; this run never hears of it.
+                let (kind, key) = (view.read(cx).kind(), view.read(cx).contribution_key());
+                if declared(kind, &key, cx) == Some(false) {
+                    let view_id = view.read(cx).view_id().to_owned();
+                    if let Some(plugin) = cx.global_mut::<Self>().by_id_mut(&id) {
+                        plugin.views.remove(&view_id);
+                    }
+                    continue;
+                }
                 if view.read(cx).kind() == "page" {
                     let page = pages::Page::new(intern(view.read(cx).contribution_key()));
                     // The shown page whose route no longer suits it closes
@@ -2809,6 +2819,21 @@ fn take_away(added: Vec<Added>, cx: &mut App) {
             Added::Agent(added) => agents::take_away(added, cx),
         }
     }
+}
+
+/// Whether the contribution a view of `kind` shows (`plugin/id`) is still
+/// declared; `None` for kinds that outlive their declaration, or whose id
+/// names no contribution (`ui/openDialog`'s dialogs).
+fn declared(kind: &str, key: &str, cx: &App) -> Option<bool> {
+    Some(match kind {
+        "page" => pages::spec(pages::Page::new(intern(key.to_owned())), cx).is_some(),
+        "panel" => channel_panels::get(key, cx).is_some(),
+        "settings" => crate::ui::settings::cards::get(key, cx).is_some(),
+        "accessory" | "toolPopover" | "reactionPicker" => crate::ui::composer_tools::listed(cx)
+            .iter()
+            .any(|(tool, _, _)| *tool == key),
+        _ => return None,
+    })
 }
 
 /// `text` cut to `max` characters, as buzz-app bounds plugin

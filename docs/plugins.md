@@ -838,6 +838,14 @@ passes a function, or reaches into the app, it works differently:
   `routes` or `handlesNavigation` hears `page/route` when it is visited
   again; any page can follow visits with `navigation/watch`.
 
+- **A composer outlasts its conversation in tabs and the media review.**
+  When a conversation open as a tab is archived or left, or the message
+  a media review shows is deleted, its composer and accessories stay
+  open until the tab or review closes; buzz-app replaces them with an
+  "unavailable" notice and closes the accessories. Opening a media
+  review from Messages also leaves the side tabs, panels and the panel
+  beside the page open, which buzz-app closes until the review ends.
+
 - **Readers still open panels and the media review.** In the Inbox and
   Drafts readers and in media review comments, links open nowhere in
   Buzz as in buzz-app, but an accessory there can still open panels with

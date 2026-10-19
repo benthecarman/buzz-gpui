@@ -908,6 +908,10 @@ impl Render for SessionWork {
         }
         let state = self.tabs(cx);
         channel_tab_views::mount_composers(self, window, cx);
+        // Me's own thread too, while its tab is not the one shown.
+        if let Some(thread) = self.thread.clone() {
+            thread.update(cx, |thread, cx| thread.mount_composer(window, cx));
+        }
         let showing = state.showing();
         let has_content = state.has_panel() || self.side_drawer();
         let heading = self.heading((state.pane_open && has_content, has_content), window, cx);
