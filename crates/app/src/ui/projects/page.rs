@@ -176,6 +176,27 @@ impl ProjectsPage {
             let result = load(session, listed, destination, path).await;
             let _ = this.update(cx, |this, cx| {
                 if this.loaded == Some(key) {
+                    // The visit waiting on this page opens or fails with it
+                    // (`PageNavigation.complete`, `entityFailure`).
+                    let failed = result.as_ref().err().copied();
+                    navigation::with_workspace(cx, move |workspace, _, cx| {
+                        use crate::ui::channel_states::Reason;
+                        let _ = match failed {
+                            None => workspace.settle_visit(PAGE.key(), cx),
+                            Some(EntityFailure::NotFound) => {
+                                workspace.fail_visit(PAGE.key(), Reason::NotFound, cx)
+                            }
+                            Some(EntityFailure::Denied) => {
+                                workspace.fail_visit(PAGE.key(), Reason::Denied, cx)
+                            }
+                            Some(EntityFailure::InvalidTarget) => {
+                                workspace.fail_visit(PAGE.key(), Reason::Invalid, cx)
+                            }
+                            Some(EntityFailure::Unavailable) => {
+                                workspace.fail_visit(PAGE.key(), Reason::Page, cx)
+                            }
+                        };
+                    });
                     this.state = match result {
                         Ok(loaded) => State::Ready(loaded),
                         Err(failure) => State::Failed(failure),

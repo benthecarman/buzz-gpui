@@ -26,6 +26,11 @@ pub trait MessageRenderer {
     }
     fn matches(&self, row: &MessageRow) -> bool;
     fn render(&self, row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> Option<AnyElement>;
+    /// It drew nothing because its answer has not come yet, so no renderer
+    /// after it is asked meanwhile (buzz-app mounts only the first match).
+    fn waiting(&self, _: &MessageRow) -> bool {
+        false
+    }
 }
 
 /// Draws a link chip's contents for the URLs it matches.
@@ -118,6 +123,10 @@ pub trait AttachmentRenderer {
         media: &Media,
         cx: &App,
     ) -> Option<AnyElement>;
+    /// As [`MessageRenderer::waiting`].
+    fn waiting(&self, _: &Attachment) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -403,9 +412,17 @@ pub fn custom_body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> Op
             |m| m.key().to_owned(),
         )
     });
-    candidates
-        .into_iter()
-        .find_map(|renderer| guarded(renderer.key(), || renderer.render(row, directory, cx)))
+    // The first that matches draws; one still waiting for its answer
+    // leaves the body to Buzz until it comes.
+    for renderer in candidates {
+        if let Some(drawn) = guarded(renderer.key(), || renderer.render(row, directory, cx)) {
+            return Some(drawn);
+        }
+        if renderer.waiting(row) {
+            return None;
+        }
+    }
+    None
 }
 
 thread_local! {
@@ -580,14 +597,20 @@ pub fn attachment(
     cx: &App,
 ) -> Option<AnyElement> {
     let renderers = REGISTRY.with_borrow(|r| r.attachments.clone());
-    renderers
+    let matching = renderers
         .into_iter()
-        .filter(|renderer| on(renderer.key()) && renderer.matches(attachment))
-        .find_map(|renderer| {
-            guarded(renderer.key(), || {
-                renderer.render(attachment, id.clone(), media, cx)
-            })
-        })
+        .filter(|renderer| on(renderer.key()) && renderer.matches(attachment));
+    for renderer in matching {
+        if let Some(drawn) = guarded(renderer.key(), || {
+            renderer.render(attachment, id.clone(), media, cx)
+        }) {
+            return Some(drawn);
+        }
+        if renderer.waiting(attachment) {
+            return None;
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

@@ -347,7 +347,10 @@ Answers are kept, but not forever:
 | `completion/invalidate` | `completion` | `null`. Every query is asked again the next time it is typed. |
 
 A request that fails or times out draws nothing and is asked again 30
-seconds later; an answer of `null` declines until it is invalidated.
+seconds later; an answer of `null` declines until it is invalidated. A
+completion query that fails shows "Suggestions are not available." with a
+Retry row instead, and is asked again on Retry, `completion/invalidate` or a
+restart.
 
 A renderer's tree can use every element but `input`. Its buttons and switches
 send `render/event` with `renderer`, `target` (what it drew: the URL, the

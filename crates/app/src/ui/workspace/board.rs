@@ -266,6 +266,28 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Leaving a channel closes the tabs of channel-menu panels opened in
+    /// it (`ChannelsPage` drops entries with a `channelMenu`), and goes
+    /// back to the thread tab if one of them was selected.
+    pub(super) fn retire_menu_tabs(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.tab_key(cx) else {
+            return;
+        };
+        let menu =
+            |panel: &str| channel_panels::get(panel, cx).is_some_and(|panel| panel.menu.is_some());
+        let Some(state) = self.tab_states.get_mut(&key) else {
+            return;
+        };
+        let selected_menu = state
+            .panels
+            .iter()
+            .any(|tab| tab.id() == state.selected && menu(tab.panel));
+        state.panels.retain(|tab| !menu(tab.panel));
+        if selected_menu {
+            state.select(channel_tabs::THREAD);
+        }
+    }
+
     /// The tabs of the channel being left stay saved; their views go, as
     /// does any launcher panel, which belongs to the visit.
     pub(super) fn leave_channel_tabs(&mut self) {
@@ -695,6 +717,17 @@ impl Workspace {
     }
 
     /// The tab of the thread the current visit addresses.
+    /// The thread panel the current visit routed to, made if need be.
+    pub(super) fn routed_thread_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ThreadPanel>> {
+        let id = self.shown_thread_tab(cx)?;
+        self.ensure_tab_views(window, cx);
+        self.tab_views.get(&id).and_then(TabView::thread).cloned()
+    }
+
     pub(super) fn shown_thread_tab(&self, cx: &App) -> Option<String> {
         let routed = self.routed.as_ref()?;
         self.tabs(cx)

@@ -29,6 +29,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.show_page(Page::MESSAGES, window, cx);
+        self.retire_menu_tabs(cx);
         self.channel = None;
         self.leave_channel_tabs();
         if route == ChannelRoute::NewMessage {

@@ -25,6 +25,9 @@ pub fn init(cx: &mut App) {
         }),
         cx,
     );
+    // It settles its own visits: opened once the entity loads, failed
+    // with its reason (`handlesNavigation`).
+    pages::register_behaviour(PAGE, true, false, true, cx);
     pages::register_routes(
         PAGE,
         PageRoutes {

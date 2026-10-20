@@ -190,6 +190,22 @@ pub struct ThreadPanel {
 }
 
 impl ThreadPanel {
+    /// How far the exact target it opened at got (§5c.5); `None` for a
+    /// thread opened at its root.
+    pub fn target_status(&self) -> Option<TargetStatus> {
+        self.snapshot.target_status
+    }
+
+    /// Whether its root has loaded: `None` while it loads, `Some(false)`
+    /// when the read finished without it or failed.
+    pub fn root_found(&self) -> Option<bool> {
+        use buzz_relay_client::threads::ThreadStatus;
+        match self.snapshot.status {
+            ThreadStatus::Idle | ThreadStatus::Loading if self.snapshot.root.is_none() => None,
+            _ => Some(self.snapshot.root.is_some()),
+        }
+    }
+
     /// A reader's thread: links open nowhere in Buzz, nor do its working
     /// agents' threads or activity (`onOpenLink={() => false}`).
     pub fn as_reader(&mut self, cx: &mut Context<Self>) {

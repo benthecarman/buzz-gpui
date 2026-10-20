@@ -181,9 +181,45 @@ pub fn ensure_views<T: TabHost>(this: &mut T, window: &mut Window, cx: &mut Cont
         };
         this.tab_views().insert(tab.id.clone(), view);
     }
+    // A channel-menu panel's tab stays only in its own channel while the
+    // menu would offer it there (`channelContext` and `eligible`).
+    let current = this.channel_id(cx).and_then(|id| {
+        community
+            .read(cx)
+            .snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.id == id)
+            .cloned()
+    });
+    let ineligible: Vec<String> = state
+        .panels
+        .iter()
+        .filter(|opening| {
+            channel_panels::get(opening.panel, cx)
+                .and_then(|panel| panel.menu)
+                .is_some_and(|menu| {
+                    !current.as_ref().is_some_and(|channel| {
+                        channel.id == opening.channel
+                            && !channel.cached
+                            && !channel.read_only
+                            && (menu.eligible)(channel, cx)
+                    })
+                })
+        })
+        .map(|opening| opening.id())
+        .collect();
+    if !ineligible.is_empty() {
+        this.update_tabs(cx, |state| {
+            state.panels.retain(|tab| !ineligible.contains(&tab.id()));
+            if ineligible.contains(&state.selected) {
+                state.select(crate::ui::channel_tabs::THREAD);
+            }
+        });
+    }
     for opening in &state.panels {
         let id = opening.id();
-        if this.tab_views().contains_key(&id) {
+        if this.tab_views().contains_key(&id) || ineligible.contains(&id) {
             continue;
         }
         let Some(panel) = channel_panels::get(opening.panel, cx) else {

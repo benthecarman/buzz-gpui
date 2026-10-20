@@ -501,6 +501,13 @@ impl ChannelPage {
         }
     }
 
+    /// A conversation that opens no threads, as a session shown flat in
+    /// Messages does (`onOpenThread` unset for `flatSession`).
+    pub fn without_threads(&mut self, cx: &mut Context<Self>) {
+        self.message_actions
+            .update(cx, |actions, cx| actions.without_threads(cx));
+    }
+
     /// A reader's conversation: links open nowhere in Buzz and no thread
     /// opens from it (`ChannelPreview` has no `onOpenThread`).
     pub fn as_reader(&mut self, cx: &mut Context<Self>) {

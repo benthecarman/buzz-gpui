@@ -508,6 +508,7 @@ impl Workspace {
         // Media hook: the old conversation's clips and viewer stop with it.
         super::media::pause_audio(None, cx);
         super::media::dismiss_review(window, cx);
+        self.retire_menu_tabs(cx);
         self.leave_channel_tabs();
         self._revealing = None;
         let weak = cx.entity().downgrade();
@@ -522,6 +523,10 @@ impl Workspace {
         let page = cx.new(|cx| {
             let mut page = ChannelPage::new(community, channel.clone(), open_thread, window, cx);
             page.live_status = true;
+            // A session shows flat: it opens no threads.
+            if channel.channel_type == Some(buzz_relay_client::ChannelType::Session) {
+                page.without_threads(cx);
+            }
             page
         });
         if !self.preserve_focus && !self.keep_focus {
@@ -1040,6 +1045,7 @@ impl Workspace {
         (
             self.attempts,
             self.resolving.is_some()
+                || self._revealing.is_some()
                 || self.pending.is_some()
                 || self.pending_listing
                 || self.settling.is_some()
@@ -1728,11 +1734,9 @@ impl Workspace {
                     else {
                         return;
                     };
-                    let reason = if found.is_ok() {
-                        Reason::NotFound
-                    } else {
-                        Reason::HostError
-                    };
+                    // A channel this window cannot show is unavailable
+                    // (`ChannelsPage`), found or not.
+                    let reason = Reason::Page;
                     match found
                         .ok()
                         .and_then(|list| list.into_iter().find(|c| c.id == id))
@@ -1837,11 +1841,42 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match outcome {
-            Reveal::Loading => return,
-            Reveal::Shown => self.enter_visit(cx),
-            Reveal::Absent => self.route_thread(message, thread.unwrap_or(message), window, cx),
+            Reveal::Loading => {}
+            Reveal::Shown => {
+                self._revealing = None;
+                self.enter_visit(cx);
+            }
+            Reveal::Absent => {
+                self._revealing = None;
+                self.route_thread(message, thread.unwrap_or(message), window, cx);
+            }
         }
+    }
+
+    /// The routed thread found its message, or found it missing: the visit
+    /// opens, or fails as not found (unavailable on a read error).
+    fn routed_status(&mut self, panel: &Entity<thread::ThreadPanel>, cx: &mut Context<Self>) {
+        use buzz_relay_client::threads::TargetStatus;
+        let panel = panel.read(cx);
+        let reason = match panel.target_status() {
+            Some(TargetStatus::Loading) => return,
+            Some(TargetStatus::Ready) => None,
+            Some(TargetStatus::Unavailable) => Some(Reason::NotFound),
+            Some(TargetStatus::Error) => Some(Reason::Page),
+            // Opened at its root: the visit opens once the root loads.
+            None => match panel.root_found() {
+                None => return,
+                Some(true) => None,
+                Some(false) => Some(Reason::NotFound),
+            },
+        };
         self._revealing = None;
+        if let Some(reason) = reason
+            && let Some(target) = self.history.current().cloned()
+        {
+            self.fail_presenting(target, reason, cx);
+        }
+        cx.notify();
     }
 
     /// The current visit addresses a thread: its tab is selected, or
@@ -1862,6 +1897,13 @@ impl Workspace {
             root,
         });
         self.enter_visit(cx);
+        // The visit opens once the thread finds its message, and fails as
+        // not found when it is missing (`ThreadPanel`'s exact target).
+        if let Some(panel) = self.routed_thread_panel(window, cx) {
+            self._revealing =
+                Some(cx.observe(&panel, |this, panel, cx| this.routed_status(&panel, cx)));
+            self.routed_status(&panel, cx);
+        }
         // Routed openings move focus to the thread, unless a dialog, such
         // as the members one this visit opens, holds it.
         if self.dialog.is_none()

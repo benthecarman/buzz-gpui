@@ -693,6 +693,16 @@ pub(super) fn answered(key: &str, target: &str) -> Option<Option<Rc<Node>>> {
 
 /// Whether [`ask_with`] should ask about `target` now: never asked, made
 /// stale, or failed a while ago.
+/// Asked, with no answer yet to show.
+fn waiting(key: &str, target: &str) -> bool {
+    ANSWERS.with_borrow(|answers| {
+        answers
+            .entries
+            .get(&(key.to_owned(), target.to_owned()))
+            .is_some_and(|answer| answer.shown().is_none())
+    })
+}
+
 pub(super) fn due(key: &str, target: &str) -> bool {
     ANSWERS.with_borrow(|answers| {
         answers
@@ -968,6 +978,13 @@ impl MessageRenderer for Message {
                 .is_none_or(|prefix| row.content.starts_with(prefix.as_str()))
     }
 
+    fn waiting(&self, row: &MessageRow) -> bool {
+        waiting(
+            self.key,
+            &format!("{}:{}", row.id.to_hex(), hashed(&row.content)),
+        )
+    }
+
     fn render(&self, row: &Arc<MessageRow>, _: &Directory, cx: &App) -> Option<AnyElement> {
         // An edit is a new target.
         let target = format!("{}:{}", row.id.to_hex(), hashed(&row.content));
@@ -1081,6 +1098,14 @@ struct AttachmentView {
 impl AttachmentRenderer for AttachmentView {
     fn key(&self) -> &str {
         self.key
+    }
+
+    fn waiting(&self, attachment: &Attachment) -> bool {
+        let removable = removable(&self.plugin, &attachment.url);
+        waiting(
+            self.key,
+            &format!("{}#removable={removable}", attachment.url),
+        )
     }
 
     fn matches(&self, attachment: &Attachment) -> bool {
@@ -1551,7 +1576,7 @@ pub fn insert(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, capab
     let text = params
         .get("text")
         .and_then(Value::as_str)
-        .filter(|text| !text.is_empty() && text.chars().count() <= 10_000)
+        .filter(|text| !text.is_empty())
         .ok_or((protocol::INVALID_PARAMS, "text is required".to_owned()))?
         .to_owned();
     let composer = granted(plugin, id).ok_or((1, "That composer is closed.".to_owned()))?;
