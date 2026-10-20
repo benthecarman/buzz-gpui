@@ -82,9 +82,13 @@ jobs:
         with:
           path: /tmp/buzzd-deps.nar
           key: ${{ steps.deps.outputs.key }}
+      # The dependency build refers to the vendored crate sources, which
+      # are not in the kept build, so fetch them before importing it.
       - name: Import the dependency build
         if: steps.restore.outputs.cache-hit == 'true'
-        run: sudo "$(command -v nix-store)" --import < /tmp/buzzd-deps.nar
+        run: |
+          nix build --no-link .#buzzd.cargoArtifacts.cargoVendorDir
+          sudo "$(command -v nix-store)" --import < /tmp/buzzd-deps.nar
       - run: nix build .#buzzd --print-build-logs
       - name: Export the dependency build
         if: steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/master'
