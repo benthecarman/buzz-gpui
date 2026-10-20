@@ -2501,14 +2501,14 @@ pub fn contributions(cx: &App) -> Value {
             // A plugin page's own icon (a name or `data:image/` URL).
             "icon": super::contribute::page_icon(spec.page.key())
                 .unwrap_or_else(|| format!("{:?}", spec.icon)),
-            "layout": match bundled_page(spec.page.key()) {
+            "layout": match bundled_page(spec.page.key(), cx) {
                 Some((workspace, _, _)) => if workspace { "workspace" } else { "document" },
                 None if crate::ui::pages::edge_to_edge(spec.page, cx) => "workspace",
                 None => "document",
             },
-            "companion": bundled_page(spec.page.key())
+            "companion": bundled_page(spec.page.key(), cx)
                 .map_or_else(|| !crate::ui::pages::solo(spec.page, cx), |(_, companion, _)| companion),
-            "handlesNavigation": bundled_page(spec.page.key())
+            "handlesNavigation": bundled_page(spec.page.key(), cx)
                 .map_or_else(|| crate::ui::pages::settles(spec.page, cx), |(_, _, handles)| handles),
             "primary": !matches!(spec.placement, Placement::Hidden),
         })).collect::<Vec<_>>(),
@@ -2640,11 +2640,11 @@ pub fn contributions(cx: &App) -> Value {
             }));
             continue;
         }
-        // Buzz's own renderers by buzz-app's titles; Diffs sits at 0.
+        // Buzz's own renderers by buzz-app's titles.
         let entry = json!({
             "key": key,
             "title": title.or(named).unwrap_or_else(|| title_of(&key)),
-            "order": order.flatten().or((key == "buzz.diffs/diff").then_some(0)),
+            "order": order.flatten(),
         });
         if let Some(list) = lists[kind].as_array_mut() {
             list.push(entry);
@@ -2658,7 +2658,11 @@ pub fn contributions(cx: &App) -> Value {
 
 /// Buzz's own pages' layout, companion and navigation flags, as buzz-app
 /// declares them: `(workspace layout, companion, handlesNavigation)`.
-fn bundled_page(key: &str) -> Option<(bool, bool, bool)> {
+/// One of Buzz's own that runs as a program declares its own.
+fn bundled_page(key: &str, cx: &App) -> Option<(bool, bool, bool)> {
+    if super::ExternalPlugins::bundled_status(crate::plugins::plugin_of(key), cx).is_some() {
+        return None;
+    }
     Some(match key {
         "buzz.me/me" => (true, true, false),
         "buzz.channels/channels" => (true, true, true),
@@ -2666,8 +2670,7 @@ fn bundled_page(key: &str) -> Option<(bool, bool, bool)> {
         "buzz.inbox/inbox"
         | "buzz.reminders/reminders"
         | "buzz.agents/agents"
-        | "buzz.workflows/workflows"
-        | "buzz.bestie/bestie" => (true, false, false),
+        | "buzz.workflows/workflows" => (true, false, false),
         key if key.starts_with("buzz.") => (false, false, false),
         _ => return None,
     })
@@ -2692,7 +2695,6 @@ const BUNDLED_COMPLETIONS: [(&str, &str, i32, &str); 3] = [
 fn title_of(key: &str) -> String {
     match key {
         "buzz.projects/resources" => "Issues and pull requests".to_owned(),
-        "buzz.diffs/diff" => "Code diff".to_owned(),
         "buzz.voice-notes/player" => "Voice note".to_owned(),
         "buzz.emoji/custom" => "Custom emoji".to_owned(),
         _ => super::contribute::titled(key).map_or_else(|| key.to_owned(), |(title, _)| title),

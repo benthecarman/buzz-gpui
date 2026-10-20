@@ -68,7 +68,7 @@
 
         devShells.default = pkgs.mkShell {
           # The Rust toolchain buzzd is built with, so local and CI checks match.
-          nativeBuildInputs = with pkgs; [ pkg-config cmake perl rustc cargo clippy rustfmt ];
+          nativeBuildInputs = with pkgs; [ pkg-config cmake perl rustc cargo clippy rustfmt nodejs_22 ];
           buildInputs = runtimeLibs ++ playback ++ (with pkgs; [ vulkan-headers alsa-lib zstd ]);
           env = {
             RUST_BACKTRACE = "1";

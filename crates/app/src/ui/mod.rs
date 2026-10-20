@@ -8,7 +8,6 @@ pub(crate) mod agents;
 pub mod agents2;
 pub(crate) mod archives;
 mod audience_address;
-mod bestie;
 mod canvas;
 mod channel;
 mod channel_activity;
@@ -24,7 +23,6 @@ pub mod composer;
 pub mod composer_completions;
 pub mod composer_tools;
 
-mod diff;
 pub(crate) mod emoji_picker;
 mod feedback;
 mod form_fields;

@@ -173,7 +173,16 @@ impl ExternalView {
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
-        Self::framed(plugin, contribution, title, close, Value::Null, cx).0
+        Self::framed(
+            plugin,
+            contribution,
+            title,
+            DialogSize::Default,
+            close,
+            Value::Null,
+            cx,
+        )
+        .0
     }
 
     /// A dialog titled `title` around a plugin view of kind `dialog`, with
@@ -182,6 +191,7 @@ impl ExternalView {
         plugin: &str,
         contribution: &str,
         title: SharedString,
+        size: DialogSize,
         close: Close,
         extra: Value,
         cx: &mut App,
@@ -198,7 +208,17 @@ impl ExternalView {
             cx,
         );
         let id = view.read(cx).id.clone();
-        (cx.new(|_| Framed { title, view, close }).into(), id)
+        (
+            cx.new(|cx| Framed {
+                title,
+                size,
+                view,
+                close,
+                focus: cx.focus_handle(),
+            })
+            .into(),
+            id,
+        )
     }
 
     /// A composer accessory, shown above one composer.
@@ -1236,7 +1256,9 @@ impl Render for ExternalView {
             .flex()
             .flex_col()
             .gap(space::S4)
-            .when(framed && !self.edge_to_edge, |body| body.p(space::S6));
+            .when(framed && !self.edge_to_edge, |body| body.p(space::S6))
+            // So a growing column can fill the page.
+            .when(framed, |body| body.min_h_full());
         // A Settings tab starts with the app's Provider field.
         if let Some((agent, _)) = &self.agent
             && let Some(control) = agent.type_control(false, window, cx)
@@ -1377,18 +1399,88 @@ pub fn open_route(view: &AnyView, params: Option<&Value>, _: &mut Window, cx: &m
 /// the plugin made one.
 pub type Accept = Rc<dyn Fn(Option<crate::ui::composer::Captured>, &mut Window, &mut App) -> bool>;
 
+/// How wide a plugin's dialog is (`ui/openDialog` `size`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogSize {
+    Default,
+    Wide,
+    /// The window less 24px a side, the body scrolling, as a diff's
+    /// expanded view (`size="expanded"`).
+    Expanded,
+}
+
 /// An account action's dialog around the plugin's view.
 struct Framed {
     title: SharedString,
+    size: DialogSize,
     view: Entity<ExternalView>,
     close: Close,
+    focus: FocusHandle,
 }
 
 impl Render for Framed {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let close = self.close.clone();
-        buzz_ui::Dialog::new("plugin-dialog", self.title.clone())
-            .on_close(move |_, window, cx| close(window, cx))
-            .child(self.view.clone())
+        if self.size != DialogSize::Expanded {
+            let dialog = buzz_ui::Dialog::new("plugin-dialog", self.title.clone())
+                .on_close(move |_, window, cx| close(window, cx));
+            let dialog = if self.size == DialogSize::Wide {
+                dialog.size(buzz_ui::DialogSize::Wide)
+            } else {
+                dialog
+            };
+            return dialog.child(self.view.clone()).into_any_element();
+        }
+        // Like buzz-app's expanded dialog, only Escape and the close
+        // button dismiss it.
+        if !self.focus.contains_focused(window, cx) {
+            self.focus.focus(window, cx);
+        }
+        let c = *cx.colors();
+        let inset = rems(3.).to_pixels(window.rem_size());
+        let viewport = window.viewport_size();
+        let on_escape = close.clone();
+        div()
+            .id("plugin-dialog-expanded")
+            .key_context(buzz_ui::DIALOG_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(move |_: &buzz_ui::Cancel, window, cx| on_escape(window, cx))
+            .flex()
+            .flex_col()
+            .w(viewport.width - inset)
+            .h(viewport.height - inset)
+            .overflow_hidden()
+            .p(rems(1.5))
+            .bg(c.surface_popover)
+            .border_1()
+            .border_color(c.border_standard)
+            .rounded(buzz_ui::tokens::radius::PANEL)
+            .shadow(buzz_ui::tokens::shadow::sm())
+            .text_color(c.text_standard)
+            .text_body()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap(rems(1.))
+                    .child(div().min_w_0().text_label().child(self.title.clone()))
+                    .child(
+                        buzz_ui::IconButton::new("plugin-dialog-close", IconName::X)
+                            .size(buzz_ui::IconButtonSize::Sm)
+                            .surface(buzz_ui::Surface::Floating)
+                            .on_click(move |_, window, cx| close(window, cx)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("plugin-dialog-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .py(rems(1.5))
+                    .child(self.view.clone()),
+            )
+            .into_any_element()
     }
 }

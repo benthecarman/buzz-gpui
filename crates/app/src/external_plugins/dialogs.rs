@@ -55,11 +55,24 @@ pub fn open(plugin: &str, params: &Value, cx: &mut App) -> Result<Value, Failure
     {
         return Err((1, "Another dialog is open.".to_owned()));
     }
+    use super::view::DialogSize;
+    let size = match text("size") {
+        None | Some("default") => DialogSize::Default,
+        Some("wide") => DialogSize::Wide,
+        Some("expanded") => DialogSize::Expanded,
+        Some(_) => {
+            return Err((
+                INVALID_PARAMS,
+                "size is default, wide or expanded".to_owned(),
+            ));
+        }
+    };
     let title: SharedString = title.chars().take(64).collect::<String>().into();
     let (view, id) = super::view::ExternalView::framed(
         plugin,
         id,
         title,
+        size,
         Rc::new(|_, cx| close(cx)),
         json!({ "context": context }),
         cx,

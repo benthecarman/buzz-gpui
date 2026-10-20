@@ -40,7 +40,9 @@ case ${1:-} in
     # carries into the transient unit. Unset variables stay unset.
     nix develop "$ROOT" --command bash -c '
       env=(-E WAYLAND_DISPLAY=gui-testing)
-      for var in DBUS_SESSION_BUS_ADDRESS LD_LIBRARY_PATH XDG_DATA_DIRS \
+      # The unit has no dev shell PATH: Node plugins use the shell'"'"'s node.
+      [[ -v BUZZ_NODE ]] || export BUZZ_NODE=$(command -v node || true)
+      for var in BUZZ_NODE BUZZ_BUNDLED_PLUGINS DBUS_SESSION_BUS_ADDRESS LD_LIBRARY_PATH XDG_DATA_DIRS \
         BUZZ_DEV_NSEC_FILE BUZZ_DEV_PICK_FILE BUZZODZ_SAFE_MODE SSL_CERT_FILE \
         BUZZ_UPDATE_URL BUZZ_UPDATE_KIND BUZZ_UPDATE_INSTALLER \
         VK_DRIVER_FILES VK_ICD_FILENAMES VK_LOADER_DRIVERS_DISABLE \

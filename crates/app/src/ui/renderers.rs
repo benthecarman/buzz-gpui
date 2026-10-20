@@ -280,12 +280,12 @@ pub fn render_text(key: &str, matched: &str, message: &str, cx: &App) -> Option<
     guarded(key, || renderer.render(matched, message, cx))
 }
 
-/// The bundled features: diffs, voice notes and custom emoji.
+/// The bundled features: voice notes and custom emoji.
 fn bundled() -> Registry {
     Registry {
         text: Vec::new(),
         accessories: Vec::new(),
-        messages: vec![Rc::new(Diffs)],
+        messages: Vec::new(),
         links: Vec::new(),
         inline: vec![Rc::new(Emoji)],
         attachments: vec![Rc::new(VoiceNotes)],
@@ -615,22 +615,6 @@ pub fn attachment(
 
 // ---------------------------------------------------------------------------
 // Bundled renderers
-
-struct Diffs;
-
-impl MessageRenderer for Diffs {
-    fn key(&self) -> &str {
-        "buzz.diffs/diff"
-    }
-
-    fn matches(&self, row: &MessageRow) -> bool {
-        row.diff.is_some()
-    }
-
-    fn render(&self, row: &Arc<MessageRow>, _: &Directory, _: &App) -> Option<AnyElement> {
-        super::diff::card(row)
-    }
-}
 
 struct VoiceNotes;
 

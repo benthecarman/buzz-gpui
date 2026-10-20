@@ -507,6 +507,7 @@ fn summary_of(value: Value) -> Option<super::protocol::Node> {
         text: text.chars().take(120).collect(),
         style: Default::default(),
         tone: Default::default(),
+        truncate: false,
     })
 }
 

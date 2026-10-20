@@ -54,6 +54,22 @@ pub struct Connection {
     runtime: tokio::runtime::Handle,
 }
 
+/// The Node that runs `node` commands: `BUZZ_NODE`, else the one
+/// installed beside the app (`../lib/buzz-gpui/node/bin/node`). `None`
+/// finds it on `PATH`.
+fn bundled_node() -> Option<std::path::PathBuf> {
+    if let Some(node) = std::env::var_os("BUZZ_NODE") {
+        return Some(node.into());
+    }
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let node = exe
+        .parent()?
+        .parent()?
+        .join("lib/buzz-gpui/node/bin")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    node.is_file().then_some(node)
+}
+
 impl Connection {
     /// Starts the plugin in `folder`.
     pub fn start(
@@ -66,9 +82,17 @@ impl Connection {
         let program = &manifest.command[0];
         let executable = if program.contains('/') || program.contains('\\') {
             folder.join(program)
+        } else if program == "node"
+            && let Some(node) = bundled_node()
+        {
+            node
         } else {
             buzz_desktop::process::resolve_program(program, &path)
         };
+        // Somewhere to keep state that is not in the folder, which may be
+        // read-only once installed.
+        let data = crate::plugins::home().join("data").join(&manifest.id);
+        let _ = std::fs::create_dir_all(&data);
         let mut command = Command::new(&executable);
         command
             .args(&manifest.command[1..])
@@ -88,6 +112,7 @@ impl Connection {
             .env("PATH", &path)
             .env("BUZZ_PLUGIN_ID", &manifest.id)
             .env("BUZZ_PLUGIN_API_VERSION", protocol::API_VERSION.to_string())
+            .env("BUZZ_PLUGIN_DATA_DIR", &data)
             // Python buffers a piped stdout; a plugin that forgets to
             // flush would look hung.
             .env("PYTHONUNBUFFERED", "1");

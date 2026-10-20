@@ -51,6 +51,16 @@ jobs:
       - name: Test
         run: nix develop --command cargo test --workspace --locked
 
+  plugins:
+    name: Node plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      # Types, tests and the build of Buzz's own Node plugins.
+      - name: Check
+        run: nix develop --command sh -c 'cd plugins && npm ci --no-audit --no-fund && npm run check'
+
   buzzd:
     name: Nix package (buzzd)
     runs-on: ubuntu-latest

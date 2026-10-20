@@ -117,4 +117,9 @@ assets = [
     ["../../assets/icons/buzz-128.png", "usr/share/icons/hicolor/128x128/apps/buzz-gpui.png", "644"],
     ["../../assets/icons/buzz-256.png", "usr/share/icons/hicolor/256x256/apps/buzz-gpui.png", "644"],
     ["../../assets/icons/buzz-512.png", "usr/share/icons/hicolor/512x512/apps/buzz-gpui.png", "644"],
+    # Staged by scripts/package-deb.sh: Buzz's own Node plugins and the
+    # Node that runs them.
+    ["target/release/bundle/node/bin/node", "usr/lib/buzz-gpui/node/bin/", "755"],
+    ["target/release/bundle/node/LICENSE", "usr/lib/buzz-gpui/node/", "644"],
+    ["target/release/bundle/plugins/**/*", "usr/share/buzz-gpui/plugins/", "644"],
 ]

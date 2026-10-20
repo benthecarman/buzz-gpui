@@ -66,12 +66,14 @@ A plugin folder holds `buzz-plugin.json` and whatever the plugin needs:
 | `id` | Unique. Lowercase letters, digits, `.`, `-` and `_`, such as `com.example.weather`. Ids starting with `buzz.` are reserved. |
 | `name` | Shown in Settings. 1 to 64 characters. |
 | `description` | Optional. Shown in Settings. |
-| `command` | The program and its arguments. A program containing `/` is relative to the folder, such as `./plugin`. Otherwise Buzz finds it on `PATH`. |
+| `command` | The program and its arguments. A program containing `/` is relative to the folder, such as `./plugin`. Otherwise Buzz finds it on `PATH`, except `node`, which runs the Node that comes with Buzz when it has one. |
 | `apiVersion` | Optional. `1`, the only version so far. |
 | `permissions` | Optional. What the plugin may do as you. `send-messages`: send, edit, react to and delete messages, and upload files to attach. `publish-events`: publish other Nostr events (see `events/publish`). `manage-agents`: create, change and remove your agents and teams. `manage-channels`: start DMs; create, join, leave, archive and delete channels; change members, details, workflows and your kit. Reminders need `send-messages`, signing a Git token `publish-events`, and an agent log proof `manage-agents`. Reading needs no permission, and neither do your read marks and thread follows. |
 
 The plugin runs in its folder. Buzz sets `BUZZ_PLUGIN_ID`,
-`BUZZ_PLUGIN_API_VERSION` and `PYTHONUNBUFFERED=1`.
+`BUZZ_PLUGIN_API_VERSION`, `BUZZ_PLUGIN_DATA_DIR` (a folder of its own for
+files it keeps, which outlives updates and is never watched) and
+`PYTHONUNBUFFERED=1`.
 
 Buzz watches the folder. Saving any file restarts the plugin, except for files
 under hidden folders (such as `.cache`), `node_modules`, `target`,
@@ -462,12 +464,13 @@ can hold at most 5,000 elements, nested at most 32 deep.
 
 | `type` | Fields |
 | --- | --- |
-| `column` | `children`, `gap` (`none`, `sm` (default), `md`, `lg`) |
-| `row` | `children`, `gap`, `justify` (`start`, `center`, `end`, `between`), `wrap` |
-| `card` | `title` (optional), `children` |
-| `text` | `text`, `style` (`body`, `small`, `label`, `title`, `heading`, `code`), `tone` (`default`, `subtle`, `accent`, `success`, `warning`, `danger`) |
+| `column` | `children`, `gap` (`none`, `sm` (default), `md`, `lg`), `align` (`start`, `center`, `end` or `stretch` (default): across the column), `justify` (as a row's, down the column), `grow` (takes the height left in its parent, such as to centre something on a page), `padding` (`none` (default), `sm`, `md`, `lg`), `background` (`inset`, as a card's header, or `panel`) |
+| `row` | `children`, `gap`, `justify` (`start`, `center`, `end`, `between`), `wrap`, `grow` (takes the width left), `padding`, `background` |
+| `header` | `title`, `icon`, `children` (its actions, such as buttons): a page or panel's title bar, as Buzz's own pages have. Put it first in a `workspace` page. |
+| `card` | `title` (optional), `children`, `padding` (default `md`), `gap` (default `sm`) |
+| `text` | `text`, `style` (`body`, `small`, `label`, `title`, `heading`, `code`), `tone` (`default`, `subtle`, `accent`, `success`, `warning`, `danger`), `truncate` (one line, cut with an ellipsis) |
 | `markdown` | `text`, rendered as a Buzz message is |
-| `button` | `id`, `label`, `variant` (`prominent`, `subtle`, `ghost`, `outline`, `destructive`), `icon`, `disabled`, `loading` |
+| `button` | `id`, `label`, `variant` (`prominent`, `subtle`, `ghost`, `outline`, `destructive`), `icon`, `disabled`, `loading`, `size` (`sm` for a small one). With an empty `label` and an `icon`, an icon button. |
 | `link` | `label`, `url`. Opens like a link in a message: a panel that matches it opens; otherwise the browser does. |
 | `input` | `id`, `value`, `placeholder`, `version`, `clearOnSubmit` |
 | `switch` | `id`, `checked`, `label` |
@@ -481,9 +484,11 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `thread` | `id`, `channel`, `root`, `height` (pixels, default 480): Buzz's own thread view; closing it sends `close` (only in views) |
 | `avatar` | `pubkey`, `size` (`small`, `default` or `large`): their profile picture, or their initial |
 | `badge` | `text`, `tone` |
-| `icon` | `name` |
+| `icon` | `name`, `size` (pixels, 8 to 128, default 16) |
 | `divider` | none |
 | `spinner` | none |
+| `code` | `lines`, each `{"text","tone"}` or `{"cells"}`, a row of `{"text","tone","kind"}`: `kind` `text` (the default, taking the width left), `number` (a line number in a gutter) or `omitted` (a gutter with no line, as a split diff's empty side). `tone` is `context` (the default), `added`, `removed`, `hunk` or `meta`. `wrap` (default `true`: long lines wrap; `false` scrolls sideways), `minWidth` (pixels, up to 2400: narrower, it scrolls sideways). Monospace, as Buzz draws a diff. |
+| `scroll` | `children`, `maxHeight` (pixels), `padding`: scrolls once taller than `maxHeight`; a wheel it cannot use scrolls the page |
 
 Buzz keeps what is typed in an `input`, so typing never waits on the plugin.
 `value` is the text a field starts with. To replace the text later, send a
@@ -666,7 +671,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agents/portable` | none | `{"agents","warnings"}`: identities earlier agent systems saved on this device, `{"pubkey","name","picture","relay","source"}`, that are not agents yet |
 | `agents/port` | `pubkey` (from `agents/portable`), `type` | The new agent, keeping the identity's key, name and picture, in the selected community. Needs `manage-agents`. |
 | `agent/createConfig` | `view` (an open `agentCreate`), `config` (an object) | `null`. The new agent will start with this config. |
-| `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
+| `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB), `size` (`default`, `wide`, or `expanded`: the window less 24px a side, with the body scrolling, closed only by Escape and its close button) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
 | `ui/closeView` | `view` (an open `dialog`, panel or provider dialog) | `null`, once it has closed |
 | `reaction/select` | `view` (an open `reactionPicker`), `emoji` (a unicode emoji, or `:shortcode:` for one of the community's custom emoji) | `null`. Buzz reacts with it, or takes the reaction back if it is already yours, and closes the picker. Nothing is sent when the picker has closed, its message is gone or a reaction to it is still on its way; the answer is `null` either way, where buzz-app's `select` answers `false`. |
 | `composer/settle` | `view`, `element` (a composer that handed the plugin its draft), `sent` | `null`. With `sent: true` the composer clears; otherwise it keeps the draft to try again. |
@@ -824,6 +829,16 @@ you added from running for that launch. Their switches stay as they were.
   actions, completions and settings cards, goes until it runs again.
 - **Settings → Plugins** shows each plugin's state. **Reload** reads the
   manifest again and restarts the plugin.
+
+## Buzz's own plugins
+
+Some of Buzz's own plugins are programs on this API too, written in
+TypeScript in [`plugins/`](../plugins): Bestie and Diffs so far. They ship with Buzz
+and the Node that runs them, and Settings → Plugins lists them under Built
+in with the rest of Buzz's own. They are trusted: they may use `buzz.` ids,
+are allowed the permissions they ask for, and run in safe mode.
+[`plugins/README.md`](../plugins/README.md) explains how to build and work
+on them.
 
 ## How this differs from buzz-app
 

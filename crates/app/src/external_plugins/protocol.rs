@@ -87,17 +87,26 @@ impl Permission {
 
 impl Manifest {
     pub fn parse(text: &str) -> Result<Self, String> {
+        Self::parse_as(text, false)
+    }
+
+    /// A manifest Buzz ships with the app, which may use a `buzz.` id.
+    pub fn parse_bundled(text: &str) -> Result<Self, String> {
+        Self::parse_as(text, true)
+    }
+
+    fn parse_as(text: &str, bundled: bool) -> Result<Self, String> {
         let mut manifest: Self =
             serde_json::from_str(text).map_err(|error| format!("{MANIFEST}: {error}"))?;
         manifest
             .permissions
             .sort_by_key(|permission| *permission as u8);
         manifest.permissions.dedup();
-        manifest.validate()?;
+        manifest.validate(bundled)?;
         Ok(manifest)
     }
 
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self, bundled: bool) -> Result<(), String> {
         if !valid_plugin_id(&self.id) {
             return Err(format!(
                 "“{}” is not a plugin id. Use lowercase letters, digits, “.”, “-” and “_”, \
@@ -105,7 +114,7 @@ impl Manifest {
                 self.id
             ));
         }
-        if self.id == "buzz" || self.id.starts_with("buzz.") {
+        if !bundled && (self.id == "buzz" || self.id.starts_with("buzz.")) {
             return Err("Plugin ids starting with “buzz.” are reserved for Buzz.".into());
         }
         if self.name.trim().is_empty() || self.name.chars().count() > 64 {
@@ -1072,6 +1081,21 @@ pub enum Node {
         children: Vec<Node>,
         #[serde(default)]
         gap: Gap,
+        /// Where children sit across the column (default `stretch`).
+        #[serde(default)]
+        align: Align,
+        /// Where children sit down the column.
+        #[serde(default)]
+        justify: Justify,
+        /// Takes the height left in its parent column, such as to centre
+        /// something on a page.
+        #[serde(default)]
+        grow: bool,
+        /// Space inside its edges.
+        #[serde(default = "no_gap")]
+        padding: Gap,
+        #[serde(default)]
+        background: Option<Background>,
     },
     Row {
         #[serde(default)]
@@ -1082,12 +1106,33 @@ pub enum Node {
         justify: Justify,
         #[serde(default)]
         wrap: bool,
+        /// Takes the width left in its parent row.
+        #[serde(default)]
+        grow: bool,
+        #[serde(default = "no_gap")]
+        padding: Gap,
+        #[serde(default)]
+        background: Option<Background>,
+    },
+    /// A page or panel's title bar, as Buzz's own pages have, with
+    /// `children` as its actions.
+    Header {
+        title: String,
+        #[serde(default)]
+        icon: Option<String>,
+        #[serde(default)]
+        children: Vec<Node>,
     },
     Card {
         #[serde(default)]
         title: Option<String>,
         #[serde(default)]
         children: Vec<Node>,
+        /// Space inside its border (default `md`).
+        #[serde(default = "md_gap")]
+        padding: Gap,
+        #[serde(default)]
+        gap: Gap,
     },
     Text {
         text: String,
@@ -1095,6 +1140,9 @@ pub enum Node {
         style: TextStyle,
         #[serde(default)]
         tone: Tone,
+        /// One line, cut with an ellipsis.
+        #[serde(default)]
+        truncate: bool,
     },
     Markdown {
         text: String,
@@ -1110,6 +1158,9 @@ pub enum Node {
         disabled: bool,
         #[serde(default)]
         loading: bool,
+        /// `sm` for a small button; without a label, an icon button.
+        #[serde(default)]
+        size: Option<String>,
     },
     Link {
         label: String,
@@ -1263,9 +1314,30 @@ pub enum Node {
     },
     Icon {
         name: String,
+        /// Pixels, 8 to 128 (default 16).
+        #[serde(default)]
+        size: Option<u32>,
     },
     Divider,
     Spinner,
+    /// Monospace lines, such as code or a diff, each a row of cells.
+    Code {
+        lines: Vec<CodeLine>,
+        /// Long lines wrap (default); otherwise the block scrolls sideways.
+        #[serde(default = "yes")]
+        wrap: bool,
+        /// Pixels, up to 2400: narrower, it scrolls sideways.
+        #[serde(default)]
+        min_width: Option<u32>,
+    },
+    /// Its children, scrolling once taller than `max_height` pixels.
+    Scroll {
+        #[serde(default)]
+        children: Vec<Node>,
+        max_height: u32,
+        #[serde(default = "no_gap")]
+        padding: Gap,
+    },
     /// An element this app does not know; it draws nothing.
     #[serde(other)]
     Unknown,
@@ -1279,6 +1351,83 @@ pub enum Gap {
     Sm,
     Md,
     Lg,
+}
+
+fn no_gap() -> Gap {
+    Gap::None
+}
+
+fn md_gap() -> Gap {
+    Gap::Md
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// A fill behind a row or column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Background {
+    /// Set into the surface, as a card's header.
+    Inset,
+    Panel,
+}
+
+/// One line of a `code` block: `text` and `tone`, or `cells`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct CodeLine {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub tone: CodeTone,
+    #[serde(default)]
+    pub cells: Vec<CodeCell>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct CodeCell {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub tone: CodeTone,
+    #[serde(default)]
+    pub kind: CellKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodeTone {
+    Added,
+    Removed,
+    Hunk,
+    Meta,
+    #[default]
+    #[serde(other)]
+    Context,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CellKind {
+    /// A line number, right-aligned in a 7-character gutter.
+    Number,
+    /// A gutter with no line on this side, as a split diff draws one.
+    Omitted,
+    /// Takes the width left.
+    #[default]
+    #[serde(other)]
+    Text,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Align {
+    Start,
+    Center,
+    End,
+    #[default]
+    Stretch,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -1355,7 +1504,9 @@ impl Node {
         match self {
             Node::Column { children, .. }
             | Node::Row { children, .. }
-            | Node::Card { children, .. } => children,
+            | Node::Card { children, .. }
+            | Node::Header { children, .. }
+            | Node::Scroll { children, .. } => children,
             _ => &[],
         }
     }

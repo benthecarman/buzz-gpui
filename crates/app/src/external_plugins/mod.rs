@@ -12,6 +12,11 @@
 //!
 //! Plugins load from the folder the user picked, and the app watches it:
 //! saving a file restarts the plugin, and open views ask for a new tree.
+//!
+//! Some of Buzz's own plugins are programs too, shipped beside the app
+//! ([`bundled_plugins_dir`]). They are trusted, may use `buzz.` ids, are
+//! not saved with the folders people add, and follow the Built in
+//! switches in Settings → Plugins ([`crate::plugins`]).
 
 mod agents;
 mod capabilities;
@@ -146,6 +151,9 @@ enum Added {
 
 pub struct Plugin {
     pub path: PathBuf,
+    /// Shipped with the app: trusted, switched by its Built in row and
+    /// never saved in `external.json`.
+    pub bundled: bool,
     pub enabled: bool,
     pub manifest: Result<Manifest, String>,
     pub status: Status,
@@ -178,6 +186,7 @@ impl Plugin {
             manifest: read_manifest(&saved.path),
             fingerprint: fingerprint(&saved.path),
             path: saved.path,
+            bundled: false,
             enabled: saved.enabled,
             approved: saved.approved,
             publisher: saved.publisher,
@@ -192,6 +201,30 @@ impl Plugin {
             services: Vec::new(),
             subscriptions: Default::default(),
             agent_types: Default::default(),
+        }
+    }
+
+    /// One of Buzz's own plugins in `folder`, allowed what it asks for.
+    fn load_bundled(folder: PathBuf) -> Self {
+        let manifest = read_bundled_manifest(&folder);
+        let mut plugin = Self::load(SavedPlugin {
+            path: folder,
+            enabled: false,
+            approved: Vec::new(),
+            publisher: None,
+            source: None,
+        });
+        plugin.bundled = true;
+        plugin.manifest = manifest;
+        plugin.trust();
+        plugin.enabled = plugin.id().is_some_and(crate::plugins::enabled);
+        plugin
+    }
+
+    /// A bundled plugin may do what its manifest asks.
+    fn trust(&mut self) {
+        if let Ok(manifest) = &self.manifest {
+            self.approved = manifest.permissions.clone();
         }
     }
 
@@ -244,19 +277,64 @@ pub struct ExternalPlugins {
     /// paused for this launch.
     pub safe_mode: bool,
     file: PathBuf,
+    /// Whether bundled plugin folders are watched like added ones: only
+    /// for a development copy, never an installed one.
+    watch_bundled: bool,
     plugins: Vec<Plugin>,
     next_view: u64,
 }
 
 impl Global for ExternalPlugins {}
 
-fn read_manifest(folder: &Path) -> Result<Manifest, String> {
+fn manifest_text(folder: &Path) -> Result<String, String> {
     let path = folder.join(MANIFEST);
-    let text = std::fs::read_to_string(&path).map_err(|error| match error.kind() {
+    std::fs::read_to_string(&path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => format!("This folder has no {MANIFEST}."),
         _ => format!("Could not read {MANIFEST}: {error}"),
-    })?;
-    Manifest::parse(&text)
+    })
+}
+
+fn read_manifest(folder: &Path) -> Result<Manifest, String> {
+    Manifest::parse(&manifest_text(folder)?)
+}
+
+fn read_bundled_manifest(folder: &Path) -> Result<Manifest, String> {
+    Manifest::parse_bundled(&manifest_text(folder)?)
+}
+
+/// Where Buzz's own plugin programs are, and whether to watch them:
+/// `BUZZ_BUNDLED_PLUGINS` (watched, for working on them), else
+/// `../share/buzz-gpui/plugins` beside the executable (an installed
+/// app), else, in a debug build, the checkout's `plugins` folder
+/// (watched). Each holds one folder per plugin.
+pub fn bundled_plugins_dir() -> Option<(PathBuf, bool)> {
+    if let Some(dir) = std::env::var_os("BUZZ_BUNDLED_PLUGINS") {
+        return Some((PathBuf::from(dir), true));
+    }
+    let installed = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("share/buzz-gpui/plugins")))
+        .filter(|dir| dir.is_dir());
+    if let Some(dir) = installed {
+        return Some((dir, false));
+    }
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
+    (cfg!(debug_assertions) && checkout.is_dir())
+        .then(|| (checkout.canonicalize().unwrap_or(checkout), true))
+}
+
+/// The plugin folders in `dir`: those holding a manifest, by name.
+fn bundled_folders(dir: &Path) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join(MANIFEST).is_file())
+        .collect();
+    folders.sort();
+    folders
 }
 
 /// A hash of the folder's file names, sizes and times, to notice saves.
@@ -336,10 +414,27 @@ impl ExternalPlugins {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
+        let mut plugins: Vec<Plugin> = saved.plugins.into_iter().map(Plugin::load).collect();
+        let bundled_dir = bundled_plugins_dir();
+        for folder in bundled_dir
+            .as_ref()
+            .map(|(dir, _)| bundled_folders(dir))
+            .unwrap_or_default()
+        {
+            let plugin = Plugin::load_bundled(folder);
+            match &plugin.manifest {
+                Ok(manifest) => tracing::info!(id = %manifest.id, "bundled plugin found"),
+                Err(reason) => {
+                    tracing::warn!(path = %plugin.path.display(), %reason, "bundled plugin unreadable")
+                }
+            }
+            plugins.push(plugin);
+        }
         cx.set_global(Self {
             safe_mode: std::env::var("BUZZODZ_SAFE_MODE").as_deref() == Ok("1"),
             file,
-            plugins: saved.plugins.into_iter().map(Plugin::load).collect(),
+            watch_bundled: bundled_dir.is_some_and(|(_, watched)| watched),
+            plugins,
             next_view: 0,
         });
         let enabled: Vec<PathBuf> = cx
@@ -356,9 +451,11 @@ impl ExternalPlugins {
             loop {
                 cx.background_executor().timer(POLL).await;
                 let paths = cx.update(|cx| {
-                    cx.global::<Self>()
+                    let state = cx.global::<Self>();
+                    state
                         .plugins
                         .iter()
+                        .filter(|plugin| !plugin.bundled || state.watch_bundled)
                         .map(|plugin| plugin.path.clone())
                         .collect::<Vec<_>>()
                 });
@@ -478,39 +575,60 @@ impl ExternalPlugins {
     /// `plugins/list` (`pluginStatus`): every plugin, built in or added,
     /// and whether it is running.
     fn plugin_list(cx: &App) -> Value {
-        let added = cx.global::<Self>().plugins.iter().filter_map(|plugin| {
-            let id = plugin.id()?;
-            Some(json!({
-                "id": id,
-                "name": plugin.name(),
-                "builtIn": false,
-                "status": match &plugin.status {
-                    Status::Off => "off",
-                    Status::Paused => "paused",
-                    Status::Starting => "starting",
-                    Status::Running => "running",
-                    Status::Failed(_) => "failed",
-                },
-                "active": plugin.status == Status::Running,
-                // Changes with each start, so a quick restart still shows
-                // (`revision`).
-                "run": plugin.generation,
-            }))
-        });
+        let label = |status: &Status| match status {
+            Status::Off => "off",
+            Status::Paused => "paused",
+            Status::Starting => "starting",
+            Status::Running => "running",
+            Status::Failed(_) => "failed",
+        };
+        let state = cx.global::<Self>();
+        let added = state
+            .plugins
+            .iter()
+            .filter(|plugin| !plugin.bundled)
+            .filter_map(|plugin| {
+                let id = plugin.id()?;
+                Some(json!({
+                    "id": id,
+                    "name": plugin.name(),
+                    "builtIn": false,
+                    "status": label(&plugin.status),
+                    "active": plugin.status == Status::Running,
+                    // Changes with each start, so a quick restart still shows
+                    // (`revision`).
+                    "run": plugin.generation,
+                }))
+            });
         let built_in = cx
             .try_global::<crate::plugins::Plugins>()
             .map(|plugins| plugins.rows().to_vec())
             .unwrap_or_default()
             .into_iter()
             .map(|row| {
-                json!({
-                    "id": row.id,
-                    "name": row.name,
-                    "builtIn": true,
-                    "status": if row.enabled { "running" } else { "off" },
-                    "active": row.enabled,
-                    "run": 0,
-                })
+                // One of Buzz's own that runs as a program reports its run.
+                match state
+                    .plugins
+                    .iter()
+                    .find(|plugin| plugin.bundled && plugin.id() == Some(row.id.as_str()))
+                {
+                    Some(plugin) => json!({
+                        "id": row.id,
+                        "name": row.name,
+                        "builtIn": true,
+                        "status": label(&plugin.status),
+                        "active": plugin.status == Status::Running,
+                        "run": plugin.generation,
+                    }),
+                    None => json!({
+                        "id": row.id,
+                        "name": row.name,
+                        "builtIn": true,
+                        "status": if row.enabled { "running" } else { "off" },
+                        "active": row.enabled,
+                        "run": 0,
+                    }),
+                }
             });
         Value::Array(built_in.chain(added).collect())
     }
@@ -643,6 +761,7 @@ impl ExternalPlugins {
             plugins: self
                 .plugins
                 .iter()
+                .filter(|plugin| !plugin.bundled)
                 .map(|plugin| SavedPlugin {
                     path: plugin.path.clone(),
                     enabled: plugin.enabled,
@@ -703,6 +822,14 @@ impl ExternalPlugins {
     }
 
     pub fn remove(path: &Path, cx: &mut App) {
+        if cx
+            .global::<Self>()
+            .plugins
+            .iter()
+            .any(|plugin| plugin.path == path && plugin.bundled)
+        {
+            return;
+        }
         Self::stop(path, Status::Off, cx);
         let state = cx.global_mut::<Self>();
         let installed = state
@@ -864,6 +991,10 @@ impl ExternalPlugins {
             return;
         };
         let plugin = &mut state.plugins[index];
+        if plugin.bundled {
+            // Its Built in row is the switch.
+            return;
+        }
         plugin.enabled = enabled;
         if enabled && let Ok(manifest) = &plugin.manifest {
             plugin.approved = manifest.permissions.clone();
@@ -884,7 +1015,12 @@ impl ExternalPlugins {
         };
         let plugin = &mut state.plugins[index];
         let before = plugin.id().map(str::to_owned);
-        plugin.manifest = read_manifest(path);
+        if plugin.bundled {
+            plugin.manifest = read_bundled_manifest(path);
+            plugin.trust();
+        } else {
+            plugin.manifest = read_manifest(path);
+        }
         // Already restarting for this version: the poll need not.
         plugin.fingerprint = fingerprint(path);
         if plugin.id() != before.as_deref() {
@@ -908,6 +1044,39 @@ impl ExternalPlugins {
         {
             Self::reload(&path, cx);
         }
+    }
+
+    /// Starts or stops Buzz's own plugins to match their Built in
+    /// switches, after one changed.
+    pub fn sync_bundled(cx: &mut App) {
+        if !cx.has_global::<Self>() {
+            return;
+        }
+        let state = cx.global_mut::<Self>();
+        let mut changed: Vec<(PathBuf, bool)> = Vec::new();
+        for plugin in state.plugins.iter_mut().filter(|plugin| plugin.bundled) {
+            let wanted = plugin.id().is_some_and(crate::plugins::enabled);
+            if plugin.enabled != wanted {
+                plugin.enabled = wanted;
+                changed.push((plugin.path.clone(), wanted));
+            }
+        }
+        for (path, enabled) in changed {
+            if enabled {
+                Self::start(&path, cx);
+            } else {
+                Self::stop(&path, Status::Off, cx);
+            }
+        }
+    }
+
+    /// The status of Buzz's own plugin `id`, if it runs as a program.
+    pub fn bundled_status(id: &str, cx: &App) -> Option<Status> {
+        cx.try_global::<Self>()?
+            .plugins
+            .iter()
+            .find(|plugin| plugin.bundled && plugin.id() == Some(id))
+            .map(|plugin| plugin.status.clone())
     }
 
     pub fn status(id: &str, cx: &App) -> Status {
@@ -984,7 +1153,8 @@ impl ExternalPlugins {
             Self::stop(path, Status::Failed(reason), cx);
             return;
         }
-        if state.safe_mode {
+        // Buzz's own plugins run in safe mode, as its compiled-in ones do.
+        if state.safe_mode && !state.plugins[index].bundled {
             Self::stop(path, Status::Paused, cx);
             return;
         }
@@ -2910,6 +3080,30 @@ mod tests {
         .unwrap();
         assert_eq!(read_manifest(&folder).unwrap().id, "com.example.a");
         let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn buzzs_own_plugins_may_use_its_ids_and_are_trusted() {
+        let dir = std::env::temp_dir().join(format!("buzz-bundled-{}", uuid::Uuid::new_v4()));
+        let own = dir.join("todos");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(dir.join("sdk")).unwrap();
+        std::fs::write(
+            own.join(MANIFEST),
+            r#"{ "id": "buzz.todos", "name": "Todos", "command": ["node", "dist/plugin.mjs"],
+                 "permissions": ["publish-events"] }"#,
+        )
+        .unwrap();
+        // Only folders with a manifest are plugins.
+        assert_eq!(bundled_folders(&dir), std::slice::from_ref(&own));
+        // Someone's folder cannot take a Buzz id.
+        assert!(read_manifest(&own).unwrap_err().contains("reserved"));
+        let plugin = Plugin::load_bundled(own);
+        assert!(plugin.bundled);
+        assert_eq!(plugin.id(), Some("buzz.todos"));
+        assert!(plugin.may(Permission::PublishEvents));
+        assert!(plugin.unapproved().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

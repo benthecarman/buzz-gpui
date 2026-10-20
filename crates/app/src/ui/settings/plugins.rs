@@ -72,10 +72,25 @@ impl SettingsPage {
                         } else {
                             let id = plugin.id.clone();
                             let enabled = plugin.enabled;
+                            // One of Buzz's own that runs as a program
+                            // says when it could not.
+                            let stopped = match ExternalPlugins::bundled_status(&plugin.id, cx) {
+                                Some(Status::Failed(reason)) => Some(
+                                    div()
+                                        .text_body_sm()
+                                        .text_color(c.text_danger)
+                                        .child(format!(
+                                            "Stopped: {}",
+                                            reason.lines().next().unwrap_or_default()
+                                        ))
+                                        .into_any_element(),
+                                ),
+                                _ => None,
+                            };
                             preference_row(
                                 icon,
                                 plugin.name.clone(),
-                                None,
+                                stopped,
                                 vec![
                                     Switch::new(
                                         SharedString::from(format!("plugin-{}", plugin.id)),
@@ -226,6 +241,7 @@ fn your_plugins(cx: &mut Context<SettingsPage>) -> AnyElement {
         .global::<ExternalPlugins>()
         .plugins()
         .iter()
+        .filter(|plugin| !plugin.bundled)
         .enumerate()
         .map(|(index, plugin)| {
             let path = plugin.path.clone();

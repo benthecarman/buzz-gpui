@@ -115,7 +115,7 @@ fn trees_parse_with_defaults_and_unknown_elements() {
         ],
     }))
     .unwrap();
-    let Node::Column { children, gap } = tree else {
+    let Node::Column { children, gap, .. } = tree else {
         panic!("not a column");
     };
     assert_eq!(gap, Gap::Sm);
@@ -124,7 +124,8 @@ fn trees_parse_with_defaults_and_unknown_elements() {
         Node::Text {
             text: "Hi".into(),
             style: TextStyle::Heading,
-            tone: Tone::Default
+            tone: Tone::Default,
+            truncate: false,
         }
     );
     assert!(matches!(

@@ -244,6 +244,7 @@ impl Plugins {
             }
         };
         state.mirror();
+        crate::external_plugins::ExternalPlugins::sync_bundled(cx);
         if let Some(reason) = failed {
             use crate::ui::toasts::{self, Notice};
             toasts::show(

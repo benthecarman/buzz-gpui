@@ -3,13 +3,17 @@
 //! to `send`; fields come ready-made from the caller, which keeps their
 //! text.
 
-use super::protocol::{AvatarSize, ButtonStyle, Gap, Justify, Node, TextStyle, Tone};
+use super::protocol::{
+    Align, AvatarSize, Background, ButtonStyle, CellKind, CodeLine, CodeTone, Gap, Justify, Node,
+    TextStyle, Tone,
+};
 use crate::community::Community;
 use crate::ui::markdown;
 use crate::ui::navigation;
 use buzz_ui::{
-    ActiveTheme, Avatar, Badge, BadgeTone, Button, ButtonVariant, Checkbox, Colors, Divider, Icon,
-    Radio, Spinner, Switch, TextField, TypeStyled, tokens::space,
+    ActiveTheme, Avatar, Badge, BadgeTone, Button, ButtonSize, ButtonVariant, Checkbox, Colors,
+    Divider, Icon, IconButton, IconButtonSize, PanelHeader, Radio, Spinner, Switch, TextField,
+    TypeStyled, tokens::space,
 };
 use gpui_kit::component::input::InputState;
 use gpui_kit::*;
@@ -71,7 +75,9 @@ pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
         match node {
             Node::Column { children, .. }
             | Node::Row { children, .. }
-            | Node::Card { children, .. } => stack.extend(children.iter().rev()),
+            | Node::Card { children, .. }
+            | Node::Header { children, .. }
+            | Node::Scroll { children, .. } => stack.extend(children.iter().rev()),
             Node::Composer {
                 id,
                 channel,
@@ -146,7 +152,9 @@ pub fn inputs(node: &Node) -> Vec<InputNode<'_>> {
         match node {
             Node::Column { children, .. }
             | Node::Row { children, .. }
-            | Node::Card { children, .. } => stack.extend(children.iter().rev()),
+            | Node::Card { children, .. }
+            | Node::Header { children, .. }
+            | Node::Scroll { children, .. } => stack.extend(children.iter().rev()),
             Node::Input {
                 id,
                 value,
@@ -172,6 +180,133 @@ fn gap_of(div: Div, gap: Gap) -> Div {
         Gap::Sm => div.gap(space::S2),
         Gap::Md => div.gap(space::S4),
         Gap::Lg => div.gap(space::S6),
+    }
+}
+
+fn padding_of(div: Div, padding: Gap) -> Div {
+    match padding {
+        Gap::None => div,
+        Gap::Sm => div.p(space::S2),
+        Gap::Md => div.p(space::S4),
+        Gap::Lg => div.p(space::S6),
+    }
+}
+
+fn background_of(div: Div, background: Option<Background>, c: &Colors) -> Div {
+    match background {
+        Some(Background::Inset) => div.bg(c.surface_inset),
+        Some(Background::Panel) => div.bg(c.surface_panel),
+        None => div,
+    }
+}
+
+/// One `ch` of the 12px mono face (JetBrains Mono advances 0.6em).
+const CH: f32 = 0.75 * 0.6;
+/// A line number's gutter: 7ch.
+const GUTTER: f32 = 7. * CH;
+
+/// A `code` block's lines: gutters of line numbers, then the text,
+/// filled by tone, as a diff draws them.
+fn code(lines: &[CodeLine], wrap: bool, c: &Colors) -> Div {
+    let tone = |tone: CodeTone| match tone {
+        CodeTone::Added => (Some(c.affordance_success), c.text_success),
+        CodeTone::Removed => (Some(c.affordance_danger), c.text_danger),
+        CodeTone::Hunk | CodeTone::Meta => (Some(c.surface_inset), c.text_subtle),
+        CodeTone::Context => (None, c.text_standard),
+    };
+    let cell = |text: &str, cell_tone: CodeTone, kind: CellKind| {
+        let (fill, color) = tone(cell_tone);
+        let cell = match kind {
+            CellKind::Number => div()
+                .flex_none()
+                .w(rems(GUTTER))
+                .px(rems(CH))
+                .flex()
+                .justify_end()
+                .whitespace_nowrap()
+                .child(text.to_owned()),
+            // An empty side, marked by a 2px rule at 4.6ch.
+            CellKind::Omitted => {
+                return div().flex_none().w(rems(GUTTER)).relative().child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(rems(5.6 * CH))
+                        .w(px(2.))
+                        .bg(c.border_standard),
+                );
+            }
+            CellKind::Text => {
+                let cell = div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl(rems(0.375))
+                    .child(text.to_owned());
+                if wrap { cell } else { cell.whitespace_nowrap() }
+            }
+        };
+        let cell = cell.text_color(color);
+        match fill {
+            Some(fill) => cell.bg(fill),
+            None => cell,
+        }
+    };
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .text_mono()
+        .children(lines.iter().map(|line| {
+            let row = div().flex().w_full().min_h(rems(1.));
+            if line.cells.is_empty() {
+                let text = line.text.as_deref().unwrap_or_default();
+                row.child(cell(text, line.tone, CellKind::Text))
+            } else {
+                row.children(
+                    line.cells
+                        .iter()
+                        .map(|one| cell(&one.text, one.tone, one.kind)),
+                )
+            }
+        }))
+}
+
+thread_local! {
+    /// Scroll areas' handles by element id, so a wheel they cannot use
+    /// passes to the page.
+    static SCROLLS: std::cell::RefCell<HashMap<SharedString, ScrollHandle>> = Default::default();
+}
+
+fn scroll_handle(id: &SharedString) -> ScrollHandle {
+    SCROLLS.with_borrow_mut(|handles| {
+        if handles.len() > 1024 && !handles.contains_key(id) {
+            handles.clear();
+        }
+        handles.entry(id.clone()).or_default().clone()
+    })
+}
+
+/// Lets the page scroll once the area cannot, as a browser chains wheel
+/// scrolling. Runs after the area applied the delta.
+fn chain_scroll(handle: ScrollHandle) -> impl Fn(&ScrollWheelEvent, &mut Window, &mut App) {
+    move |event, window, cx| {
+        let delta = event.delta.pixel_delta(window.line_height()).y;
+        let max = handle.max_offset().y;
+        let before = -handle.offset().y + delta;
+        let consumed = (delta < px(0.) && before < max) || (delta > px(0.) && before > px(0.));
+        if consumed {
+            cx.stop_propagation();
+        }
+    }
+}
+
+fn justify_of(div: Div, justify: Justify) -> Div {
+    match justify {
+        Justify::Start => div,
+        Justify::Center => div.justify_center(),
+        Justify::End => div.justify_end(),
+        Justify::Between => div.justify_between(),
     }
 }
 
@@ -203,34 +338,64 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
         Node::Column {
             children: nodes,
             gap,
-        } => gap_of(div().flex().flex_col().min_w_0(), *gap)
-            .children(children(nodes, path, draw, cx))
-            .into_any_element(),
+            align,
+            justify,
+            grow,
+            padding,
+            background,
+        } => {
+            let column = gap_of(div().flex().flex_col().min_w_0(), *gap);
+            let column = background_of(column, *background, &c);
+            let column = match align {
+                Align::Start => column.items_start(),
+                Align::Center => column.items_center(),
+                Align::End => column.items_end(),
+                Align::Stretch => column,
+            };
+            let column = padding_of(justify_of(column, *justify), *padding);
+            let column = if *grow { column.flex_1() } else { column };
+            column
+                .children(children(nodes, path, draw, cx))
+                .into_any_element()
+        }
         Node::Row {
             children: nodes,
             gap,
             justify,
             wrap,
+            grow,
+            padding,
+            background,
         } => {
             let row = gap_of(div().flex().flex_row().items_center().min_w_0(), *gap);
-            let row = match justify {
-                Justify::Start => row,
-                Justify::Center => row.justify_center(),
-                Justify::End => row.justify_end(),
-                Justify::Between => row.justify_between(),
-            };
+            let row = padding_of(background_of(row, *background, &c), *padding);
+            let row = justify_of(row, *justify);
             let row = if *wrap { row.flex_wrap() } else { row };
+            let row = if *grow { row.flex_1() } else { row };
             row.children(children(nodes, path, draw, cx))
                 .into_any_element()
+        }
+        Node::Header {
+            title,
+            icon,
+            children: nodes,
+        } => {
+            let mut header = PanelHeader::new().joined(true).label(
+                icon.as_deref().map(|name| super::icon(Some(name))),
+                title.clone(),
+            );
+            for action in children(nodes, path, draw, cx) {
+                header = header.action(action);
+            }
+            header.into_any_element()
         }
         Node::Card {
             title,
             children: nodes,
-        } => div()
-            .flex()
-            .flex_col()
-            .gap(space::S2)
-            .p(space::S4)
+            padding,
+            gap,
+        } => padding_of(gap_of(div().flex().flex_col().min_w_0(), *gap), *padding)
+            .overflow_hidden()
             .border_1()
             .border_color(c.border_standard)
             .rounded(rems(0.75))
@@ -241,8 +406,18 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
             )
             .children(children(nodes, path, draw, cx))
             .into_any_element(),
-        Node::Text { text, style, tone } => {
+        Node::Text {
+            text,
+            style,
+            tone,
+            truncate,
+        } => {
             let text = div().child(text.clone());
+            let text = if *truncate {
+                text.min_w_0().truncate()
+            } else {
+                text
+            };
             let text = match style {
                 TextStyle::Body => text.text_body(),
                 TextStyle::Small => text.text_body_sm(),
@@ -268,7 +443,24 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
             icon,
             disabled,
             loading,
+            size,
         } => {
+            let small = size.as_deref() == Some("sm");
+            if label.is_empty()
+                && let Some(icon) = icon.as_deref()
+            {
+                let send = draw.send.clone();
+                let id = id.clone();
+                return IconButton::new(element_id("button"), super::icon(Some(icon)))
+                    .size(if small {
+                        IconButtonSize::Sm
+                    } else {
+                        IconButtonSize::Md
+                    })
+                    .disabled(*disabled)
+                    .on_click(move |_, _, cx| send(&id, "click", None, cx))
+                    .into_any_element();
+            }
             let (variant, destructive) = match variant {
                 ButtonStyle::Prominent => (ButtonVariant::Prominent, false),
                 ButtonStyle::Subtle => (ButtonVariant::Subtle, false),
@@ -277,6 +469,11 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 ButtonStyle::Destructive => (ButtonVariant::Subtle, true),
             };
             let mut button = Button::new(element_id("button"), label.clone())
+                .size(if small {
+                    ButtonSize::Sm
+                } else {
+                    ButtonSize::Md
+                })
                 .variant(variant)
                 .disabled(*disabled)
                 .loading(*loading);
@@ -498,10 +695,52 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 Tone::Danger => BadgeTone::Danger,
             })
             .into_any_element(),
-        Node::Icon { name } => Icon::new(super::icon(Some(name)))
-            .size(16.)
+        Node::Icon { name, size } => Icon::new(super::icon(Some(name)))
+            .size(size.unwrap_or(16).clamp(8, 128) as f32)
             .into_any_element(),
         Node::Divider => Divider::horizontal().into_any_element(),
+        Node::Code {
+            lines,
+            wrap,
+            min_width,
+        } => {
+            let block = code(lines, *wrap, &c);
+            match min_width {
+                Some(width) => div()
+                    .id(element_id("code"))
+                    .w_full()
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .child(block.min_w(px((*width).min(2400) as f32)))
+                    .into_any_element(),
+                None if !*wrap => div()
+                    .id(element_id("code"))
+                    .w_full()
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .child(block)
+                    .into_any_element(),
+                None => block.into_any_element(),
+            }
+        }
+        Node::Scroll {
+            children: nodes,
+            max_height,
+            padding,
+        } => {
+            let id = element_id("scroll");
+            let handle = scroll_handle(&id);
+            padding_of(div(), *padding)
+                .id(id)
+                .flex()
+                .flex_col()
+                .max_h(px((*max_height).clamp(40, 4000) as f32))
+                .overflow_y_scroll()
+                .track_scroll(&handle)
+                .on_scroll_wheel(chain_scroll(handle))
+                .children(children(nodes, path, draw, cx))
+                .into_any_element()
+        }
         Node::Spinner => Spinner::new().size(16.).into_any_element(),
         Node::Unknown => div().into_any_element(),
     }
