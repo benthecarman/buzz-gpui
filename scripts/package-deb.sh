@@ -52,6 +52,8 @@ docker run --rm \
       mkdir -p "$bundle/plugins/$(basename "$folder")"
       cp -r "$manifest" "$folder/dist" "$bundle/plugins/$(basename "$folder")/"
     done
+    # The bundled Node runs every bundled plugin.
+    /opt/node/bin/node scripts/check-plugins.mjs "$bundle/plugins"
     # Toolchains live in the mounted rustup cache; install one if it is empty.
     if [ ! -x /root/.cargo/bin/rustup ]; then
       curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --no-modify-path

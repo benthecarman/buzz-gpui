@@ -38,6 +38,10 @@ hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null
 cp -R "$mount/Buzz.app" "$work/"
 hdiutil detach "$mount" >/dev/null
 app="$work/Buzz.app"
+
+# The bundled Node runs every bundled plugin.
+"$app/Contents/Resources/node/bin/node" "$here/scripts/check-plugins.mjs" \
+  "$app/Contents/Resources/plugins"
 du -sh "$app"
 codesign --verify --deep --strict "$app"
 
