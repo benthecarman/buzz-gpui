@@ -53,8 +53,8 @@ export interface PluginSpec {
   contributions: Params | (() => Params);
   /** Makes a view for each contribution id that opens one. */
   views?: Record<string, ViewFactory>;
-  /** Runs once, before `initialize` is answered: register handlers here. */
-  setup?(host: Connection): unknown;
+  /** Runs once, before `initialize` is answered, with its params (`app`, `host`): register handlers here. */
+  setup?(host: Connection, init: Params): unknown;
 }
 
 interface Open {
@@ -100,8 +100,8 @@ export function serve(spec: PluginSpec, host: Connection): void {
   };
 
   let setup: Promise<unknown> | undefined;
-  host.handle("initialize", async () => {
-    setup ??= Promise.resolve(spec.setup?.(host));
+  host.handle("initialize", async (params: Params) => {
+    setup ??= Promise.resolve(spec.setup?.(host, params));
     await setup;
     return typeof spec.contributions === "function" ? spec.contributions() : spec.contributions;
   });

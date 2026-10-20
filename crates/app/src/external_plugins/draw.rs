@@ -17,7 +17,7 @@ use buzz_ui::{
     MenuLabel, PanelHeader, Popover, Radio, Select, Spinner, Switch, TextField, TypeStyled,
     tokens::{radius, space},
 };
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::*;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -29,7 +29,7 @@ pub type Send = Rc<dyn Fn(&str, &str, Option<Value>, &mut App)>;
 pub struct Draw<'a> {
     pub send: Send,
     /// The text fields by id; an input without one draws nothing.
-    pub fields: &'a HashMap<String, Entity<InputState>>,
+    pub fields: &'a HashMap<String, FieldState>,
     /// Markdown resolves mentions and channels in this community.
     pub community: Option<Entity<Community>>,
     /// Names where Markdown shows, and keeps element ids apart.
@@ -140,6 +140,26 @@ pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
     found
 }
 
+/// A text field's state: one line, or a text area.
+#[derive(Clone)]
+pub enum FieldState {
+    Line(Entity<InputState>),
+    Area(Entity<TextareaState>),
+}
+
+impl FieldState {
+    pub fn set_text(&self, text: String, window: &mut Window, cx: &mut App) {
+        match self {
+            FieldState::Line(state) => {
+                state.update(cx, |state, cx| state.set_value(text, window, cx))
+            }
+            FieldState::Area(state) => {
+                state.update(cx, |state, cx| state.set_value(text, window, cx))
+            }
+        }
+    }
+}
+
 /// An input in the tree, for the caller to make its field.
 pub struct InputNode<'a> {
     pub id: &'a str,
@@ -147,6 +167,8 @@ pub struct InputNode<'a> {
     pub placeholder: Option<&'a String>,
     pub version: u64,
     pub clear_on_submit: bool,
+    /// A text area's least and most lines; `None` for one line.
+    pub area: Option<(usize, usize)>,
 }
 
 /// Every input in `node`.
@@ -173,7 +195,30 @@ pub fn inputs(node: &Node) -> Vec<InputNode<'_>> {
                 placeholder: placeholder.as_ref(),
                 version: *version,
                 clear_on_submit: *clear_on_submit,
+                area: None,
             }),
+            Node::Textarea {
+                id,
+                value,
+                placeholder,
+                version,
+                rows,
+                max_rows,
+                ..
+            } => {
+                let least = rows.unwrap_or(3).clamp(1, 40) as usize;
+                found.push(InputNode {
+                    id,
+                    value: value.as_ref(),
+                    placeholder: placeholder.as_ref(),
+                    version: *version,
+                    clear_on_submit: false,
+                    area: Some((
+                        least,
+                        (max_rows.unwrap_or(8).clamp(1, 40) as usize).max(least),
+                    )),
+                })
+            }
             _ => {}
         }
     }
@@ -592,7 +637,7 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
         Node::Input {
             id, disabled, grow, ..
         } => match draw.fields.get(id) {
-            Some(state) => {
+            Some(FieldState::Line(state)) => {
                 let field = TextField::new(state).disabled(*disabled);
                 if *grow {
                     div().flex_1().min_w_0().child(field).into_any_element()
@@ -600,7 +645,13 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                     field.into_any_element()
                 }
             }
-            None => div().into_any_element(),
+            _ => div().into_any_element(),
+        },
+        Node::Textarea { id, disabled, .. } => match draw.fields.get(id) {
+            Some(FieldState::Area(state)) => buzz_ui::TextArea::new(state)
+                .disabled(*disabled)
+                .into_any_element(),
+            _ => div().into_any_element(),
         },
         Node::Checkbox {
             id,

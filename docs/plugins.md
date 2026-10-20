@@ -436,6 +436,7 @@ Clicks, toggles and typing come back as events:
 | `choice`, `menu`, `select` | `change` | the chosen option's `value` |
 | `input` | `change` | the field's text |
 | `input` | `submit` (Enter) | the field's text |
+| `textarea` | `change` | the field's text |
 | `composer` | `sent` | `{"id"}` of the message it sent |
 | `composer` | `submit` (with `submit: "plugin"`) | the draft `{"content","mentions","references","attachments"}` |
 | `composer` | `ready` | `{"composer"}`, for `composer/insert` |
@@ -478,6 +479,7 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `button` | `id`, `label`, `variant` (`prominent`, `subtle`, `ghost`, `outline`, `destructive`), `icon`, `disabled`, `loading`, `size` (`sm` for a small one), `tooltip`. With an empty `label` and an `icon`, an icon button. |
 | `link` | `label`, `url`. Opens like a link in a message: a panel that matches it opens; otherwise the browser does. |
 | `input` | `id`, `value`, `placeholder`, `version`, `clearOnSubmit`, `disabled`, `grow` (takes the width left in its row) |
+| `textarea` | `id`, `value`, `placeholder`, `version`, `rows` (lines it shows at least, default 3), `maxRows` (lines it grows to, default 8), `disabled`: text of several lines, kept as an `input`'s is |
 | `switch` | `id`, `checked`, `label` |
 | `checkbox` | `id`, `checked`, `label`, `indeterminate` (drawn part-way, as a task in progress), `completed` (the label struck through and muted), `disabled`; sends `toggle` like a switch |
 | `choice` | `id`, `value`, `options` (`[{"value","label"}]`, up to 50), drawn as radio buttons; sends `change` with the chosen `value` |
@@ -608,6 +610,10 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `read/mark` | `all: true`, or `channel` with an optional `message`, `read` (default `true`), and `through` with an optional `root` | `{"durability","sync"}` once saved (`ReadMutationResult`), or with `all` a list of them, one per channel marked, each with its `channel`: `durability` is `saved`, and `sync` `pending` when this connection syncs read marks to the relay or `local-only` when the mark stays here (Buzz does not tell a mark that changed nothing apart). Marks everything read, a channel or message read or unread, or a channel or thread read up to `message`. Read marks sync to your other devices; unread marks stay on this device, as in buzz-app. |
 | `read/markLocal` | `channel`, and optionally `thread` (its root) or `message` | `{"durability":"saved","sync":"local-only"}`, after marking it unread on this device only; it never syncs |
 | `read/clearLocal` | `channel`, and optionally `thread` or `message` | As `read/markLocal`, after dropping an unread mark made on this device |
+| `feedback/watch` | none | `{"watch","state"}`, then `feedback/changed` with `state` whenever it changes: `{"hydrated","available","error","pending"}`, whether feedback can be sent now and the feedback on its way, `{"id","content","delivery","error"}` (`delivery` as `outbox/get`'s). Stop with `feedback/unwatch`. |
+| `feedback/upload` | `path` | Checks a PNG, JPEG, GIF or WebP image, strips the editor's private metadata, and uploads it to the deployment's feedback storage: `{"name","url","mime","size","sha256"}`. Needs `send-messages`. |
+| `feedback/send` | `message`, `category` (`bug`, `praise`, `needs-work` or none), `attachments` (from `feedback/upload`), `diagnostics` (text to attach, checked against the event's limits before it uploads, or the attachment an earlier send returned) | `{"diagnostics"}`, the diagnostics attachment, for a later send to reuse. Sends product feedback (kind 42000) to the deployment's private inbox through the durable outbox. Needs `send-messages`. |
+| `feedback/retry`, `feedback/dismiss` | `id` (the pending feedback's) | `null`. Sends it again as the same event, or forgets it on this device (which does not undo a delivery). Needs `send-messages`. |
 | `outbox/get` | `id` (optional) | One event's `{"id","kind","channel","delivery","error","acknowledged","createdAt","content","tags","pubkey","sig"}` (`pubkey` and `sig` once signed) while Buzz still holds it, or `null`; without `id`, every event still on its way. `delivery` is `sending`, `accepted`, `unknown`, `failed` or `seen` (the relay showed it back). |
 | `outbox/watch` | none | `{"watch"}`. Buzz then sends `outbox/changed` with `events`, the events still on their way, now and whenever that changes; one that leaves was delivered or dismissed. Stop with `outbox/unwatch`. |
 | `outbox/retry`, `outbox/dismiss` | `id` (one of your events whose `delivery` is `failed`) | `null`. Sends it again, or drops it (`outbox.retry`, `outbox.dismiss`). Needs `publish-events`. |
@@ -681,6 +687,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agents/portable` | none | `{"agents","warnings"}`: identities earlier agent systems saved on this device, `{"pubkey","name","picture","relay","source"}`, that are not agents yet |
 | `agents/port` | `pubkey` (from `agents/portable`), `type` | The new agent, keeping the identity's key, name and picture, in the selected community. Needs `manage-agents`. |
 | `agent/createConfig` | `view` (an open `agentCreate`), `config` (an object) | `null`. The new agent will start with this config. |
+| `ui/pickFiles` | `multiple`, `prompt`, `images` (a hint; check what you get) | The paths of the files chosen in the system's file dialog, or `[]` when cancelled |
 | `ui/confirm` | `title`, `description`, `confirm` (default "Confirm"), `cancel` (default "Cancel"), `destructive` | `true` once the user confirms, `false` if they cancel or close it (`AlertDialog`). A second question answers the first `false`. |
 | `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB), `size` (`default`, `wide`, or `expanded`: the window less 24px a side, with the body scrolling, closed only by Escape and its close button) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
 | `ui/closeView` | `view` (an open `dialog`, panel or provider dialog) | `null`, once it has closed |
@@ -844,8 +851,8 @@ you added from running for that launch. Their switches stay as they were.
 ## Buzz's own plugins
 
 Some of Buzz's own plugins are programs on this API too, written in
-TypeScript in [`plugins/`](../plugins): Bestie, Diffs, Todos and Channel
-Usage so far. They ship with Buzz
+TypeScript in [`plugins/`](../plugins): Bestie, Diffs, Todos, Channel
+Usage and Feedback so far. They ship with Buzz
 and the Node that runs them, and Settings → Plugins lists them under Built
 in with the rest of Buzz's own. They are trusted: they may use `buzz.` ids,
 are allowed the permissions they ask for, and run in safe mode.

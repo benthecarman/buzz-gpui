@@ -107,6 +107,14 @@ export function input(id: string, props: InputProps = {}): Element {
   return element("input", { id, ...props });
 }
 
+/** A text area of several lines; it sends `change` as the text changes. */
+export function textarea(
+  id: string,
+  props: { value?: string; placeholder?: string; version?: number; rows?: number; maxRows?: number; disabled?: boolean } = {},
+): Element {
+  return element("textarea", { id, ...props });
+}
+
 export function toggle(id: string, checked: boolean, props: { label?: string } = {}): Element {
   return element("switch", { id, checked, ...props });
 }

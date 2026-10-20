@@ -1209,6 +1209,24 @@ pub enum Node {
         #[serde(default)]
         grow: bool,
     },
+    /// A text area of several lines; each change is sent as an event.
+    Textarea {
+        id: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        placeholder: Option<String>,
+        /// Bumping it puts `value` into the field again.
+        #[serde(default)]
+        version: u64,
+        /// Lines it shows at least (default 3) and grows to (default 8).
+        #[serde(default)]
+        rows: Option<u32>,
+        #[serde(default)]
+        max_rows: Option<u32>,
+        #[serde(default)]
+        disabled: bool,
+    },
     Switch {
         id: String,
         checked: bool,

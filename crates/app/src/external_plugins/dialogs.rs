@@ -65,6 +65,38 @@ pub fn confirm(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failur
     Ok(cx.spawn(async move |_| Ok(Value::Bool(receiver.await.unwrap_or(false)))))
 }
 
+/// `ui/pickFiles`: the files the user chooses in the system's dialog, as
+/// paths (none when they cancel). `multiple` allows several. In
+/// development, `BUZZ_DEV_PICK_FILE` stands in for the dialog.
+pub fn pick_files(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    if let Some(path) = std::env::var_os("BUZZ_DEV_PICK_FILE") {
+        let path = std::path::PathBuf::from(path)
+            .to_string_lossy()
+            .into_owned();
+        return Ok(Task::ready(Ok(json!([path]))));
+    }
+    let prompt = params
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(|prompt| SharedString::from(prompt.chars().take(64).collect::<String>()));
+    let paths = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: params.get("multiple").and_then(Value::as_bool) == Some(true),
+        prompt,
+    });
+    Ok(cx.spawn(async move |_| match paths.await {
+        Ok(Ok(Some(paths))) => Ok(Value::Array(
+            paths
+                .into_iter()
+                .map(|path| Value::String(path.to_string_lossy().into_owned()))
+                .collect(),
+        )),
+        Ok(Ok(None)) | Err(_) => Ok(json!([])),
+        Ok(Err(error)) => Err((3, format!("The file dialog failed: {error}"))),
+    }))
+}
+
 /// The open plugin dialog over the workspace, if any.
 pub fn dialog(window: &Window, cx: &App) -> Option<AnyElement> {
     if let Some(question) = cx

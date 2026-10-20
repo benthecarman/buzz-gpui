@@ -2,7 +2,7 @@
 //! app's components. Fields keep their text here, so typing does not wait
 //! on the plugin; each change and Enter is sent to it as an event.
 
-use super::draw::{self, Draw};
+use super::draw::{self, Draw, FieldState};
 use super::protocol::Node;
 use super::{ExternalPlugins, Status};
 use crate::agents2::registry::AgentView;
@@ -10,7 +10,7 @@ use crate::community::{AppState, Community};
 use crate::ui::account_actions::Close;
 use crate::ui::channel_panels::Opening;
 use buzz_ui::{ActiveTheme, Button, IconName, Spinner, TypeStyled, tokens::space};
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{Value, json};
@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 struct Field {
-    state: Entity<InputState>,
+    state: FieldState,
     /// The tree's `version` when its value was last put in.
     version: u64,
     clear_on_submit: bool,
@@ -773,42 +773,79 @@ impl ExternalView {
         &mut self,
         id: &str,
         placeholder: Option<&String>,
+        area: Option<(usize, usize)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (&mut Field, bool) {
+        // A field that changed between one line and an area starts over.
+        let kind_changed = self
+            .fields
+            .get(id)
+            .is_some_and(|field| matches!(field.state, FieldState::Area(_)) != area.is_some());
+        if kind_changed {
+            self.fields.remove(id);
+        }
         let created = !self.fields.contains_key(id);
         if created {
-            let state = cx.new(|cx| {
-                let state = InputState::new(window, cx);
-                match placeholder {
-                    Some(placeholder) => state.placeholder(placeholder.clone()),
-                    None => state,
-                }
-            });
             let field_id = id.to_owned();
-            let subscription = cx.subscribe_in(
-                &state,
-                window,
-                move |this, state, event: &InputEvent, window, cx| {
-                    let text = state.read(cx).value().to_string();
-                    match event {
-                        InputEvent::Change => {
-                            this.event(&field_id, "change", Some(json!(text)), cx)
+            let on_event = move |this: &mut Self,
+                                 text: String,
+                                 event: &InputEvent,
+                                 window: &mut Window,
+                                 cx: &mut Context<Self>| {
+                match event {
+                    InputEvent::Change => this.event(&field_id, "change", Some(json!(text)), cx),
+                    InputEvent::PressEnter { .. } => {
+                        this.event(&field_id, "submit", Some(json!(text)), cx);
+                        if let Some(field) = this
+                            .fields
+                            .get(&field_id)
+                            .filter(|field| field.clear_on_submit)
+                        {
+                            field.state.clone().set_text(String::new(), window, cx);
                         }
-                        InputEvent::PressEnter { .. } => {
-                            this.event(&field_id, "submit", Some(json!(text)), cx);
-                            if this
-                                .fields
-                                .get(&field_id)
-                                .is_some_and(|field| field.clear_on_submit)
-                            {
-                                state.update(cx, |state, cx| state.set_value("", window, cx));
-                            }
-                        }
-                        _ => {}
                     }
-                },
-            );
+                    _ => {}
+                }
+            };
+            let (state, subscription) = match area {
+                None => {
+                    let state = cx.new(|cx| {
+                        let state = InputState::new(window, cx);
+                        match placeholder {
+                            Some(placeholder) => state.placeholder(placeholder.clone()),
+                            None => state,
+                        }
+                    });
+                    let subscription = cx.subscribe_in(
+                        &state,
+                        window,
+                        move |this, state, event: &InputEvent, window, cx| {
+                            let text = state.read(cx).value().to_string();
+                            on_event(this, text, event, window, cx)
+                        },
+                    );
+                    (FieldState::Line(state), subscription)
+                }
+                Some((least, most)) => {
+                    let state = cx.new(|cx| {
+                        let state = TextareaState::new(window, cx).auto_grow(least, most);
+                        match placeholder {
+                            Some(placeholder) => state.placeholder(placeholder.clone()),
+                            None => state,
+                        }
+                    });
+                    let subscription = cx.subscribe_in(
+                        &state,
+                        window,
+                        move |this, state, event: &InputEvent, window, cx| {
+                            let text = state.read(cx).value().to_string();
+                            on_event(this, text, event, window, cx)
+                        },
+                    );
+                    (FieldState::Area(state), subscription)
+                }
+            };
             self.fields.insert(
                 id.to_owned(),
                 Field {
@@ -1287,14 +1324,13 @@ impl Render for ExternalView {
             let mut seen = HashSet::new();
             for input in draw::inputs(&tree) {
                 seen.insert(input.id.to_owned());
-                let (field, created) = self.field(input.id, input.placeholder, window, cx);
+                let (field, created) =
+                    self.field(input.id, input.placeholder, input.area, window, cx);
                 field.clear_on_submit = input.clear_on_submit;
                 if created || field.version != input.version {
                     field.version = input.version;
                     let text = input.value.cloned().unwrap_or_default();
-                    field
-                        .state
-                        .update(cx, |state, cx| state.set_value(text, window, cx));
+                    field.state.clone().set_text(text, window, cx);
                 }
             }
             // Fields the tree no longer has start empty if they return.
@@ -1305,7 +1341,7 @@ impl Render for ExternalView {
                 .iter()
                 .map(|(id, (_, view))| (id.clone(), view.clone()))
                 .collect();
-            let fields: HashMap<String, Entity<InputState>> = self
+            let fields: HashMap<String, FieldState> = self
                 .fields
                 .iter()
                 .map(|(id, field)| (id.clone(), field.state.clone()))

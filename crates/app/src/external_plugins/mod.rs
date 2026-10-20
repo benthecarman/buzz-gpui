@@ -27,6 +27,7 @@ mod dialogs;
 pub use dialogs::dialog;
 mod draw;
 mod events;
+mod feedback;
 pub mod git;
 mod message_view;
 mod naming;
@@ -1993,6 +1994,7 @@ impl ExternalPlugins {
             "activity/watch" => "activity/changed",
             "agents/watch" => "agents/changed",
             "session/watch" => "session/changed",
+            "feedback/watch" => "feedback/changed",
             _ => "channel/changed",
         };
         let notify = move |mut value: Value, cx: &mut App| {
@@ -2014,6 +2016,7 @@ impl ExternalPlugins {
             "activity/watch" => observed::watch(params, notify, cx),
             "agents/watch" => agents::watch(params, notify, cx),
             "session/watch" => capabilities::watch_session(params, notify, cx),
+            "feedback/watch" => feedback::watch(params, notify, cx),
             _ => capabilities::watch(params, notify, cx),
         };
         Reply::Now(started.map(|(watch, mut value)| {
@@ -2429,6 +2432,7 @@ impl ExternalPlugins {
             "events/watch" => Self::watch(path, generation, "events/watch", params, cx),
             "unread/watch" => Self::watch(path, generation, "unread/watch", params, cx),
             "session/watch" => Self::watch(path, generation, "session/watch", params, cx),
+            "feedback/watch" => Self::watch(path, generation, "feedback/watch", params, cx),
             "unread/get" => Reply::Now(reading::get(cx)),
             "unread/sync" => Reply::Now(reading::sync(false, cx)),
             "unread/retrySync" => Reply::Now(reading::sync(true, cx)),
@@ -2494,7 +2498,7 @@ impl ExternalPlugins {
             "channel/unwatch" | "thread/unwatch" | "events/unwatch" | "unread/unwatch"
             | "reminders/unwatch" | "agents/unwatch" | "session/unwatch" | "outbox/unwatch"
             | "navigation/unwatch" | "presence/unwatch" | "activity/unwatch" | "names/unwatch"
-            | "inbox/unwatch" => {
+            | "inbox/unwatch" | "feedback/unwatch" => {
                 let id = params.get("watch").and_then(Value::as_u64);
                 if let (Some(id), Some(plugin)) =
                     (id, cx.global_mut::<Self>().current(path, generation))
@@ -2557,6 +2561,10 @@ impl ExternalPlugins {
             | "me/retryMove"
             | "me/removeGroup"
             | "me/place"
+            | "feedback/upload"
+            | "feedback/send"
+            | "feedback/retry"
+            | "feedback/dismiss"
             | "archives/request" => {
                 let permission = match method {
                     "events/publish"
@@ -2676,6 +2684,10 @@ impl ExternalPlugins {
                         channels::change_me(method, params, cx)
                     }
                     "me/place" => channels::place_me(params, cx),
+                    "feedback/upload" => feedback::upload(params, cx),
+                    "feedback/send" => feedback::send(params, cx),
+                    "feedback/retry" => feedback::retry(params, cx),
+                    "feedback/dismiss" => feedback::dismiss(params, cx),
                     "workflows/save" | "workflows/delete" | "workflows/trigger" => {
                         workflows::command(method, params, cx)
                     }
@@ -2686,6 +2698,7 @@ impl ExternalPlugins {
             "canvas/read" => later(content::canvas_read(params, cx)),
             "canvas/available" => later(content::canvas_available(cx)),
             "ui/confirm" => later(dialogs::confirm(params, cx)),
+            "ui/pickFiles" => later(dialogs::pick_files(params, cx)),
             "canvas/history" => later(content::canvas_history(params, cx)),
             "channels/details" => later(content::details(params, cx)),
             "channels/list" => Reply::Now(capabilities::channel_list(cx)),
