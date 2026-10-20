@@ -84,6 +84,7 @@ impl ExternalView {
         plugin: &str,
         contribution: &str,
         opening: Opening,
+        edge_to_edge: bool,
         _window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
@@ -91,7 +92,10 @@ impl ExternalView {
             plugin,
             contribution,
             "panel",
-            |view| view.opening = Some(opening),
+            |view| {
+                view.opening = Some(opening);
+                view.edge_to_edge = edge_to_edge;
+            },
             cx,
         )
         .into()
@@ -1317,6 +1321,7 @@ impl Render for ExternalView {
                 embeds: &embeds,
                 community: self.community(cx),
                 place: &self.contribution,
+                window: Some(window),
             };
             body = body.child(draw::node(&tree, &self.id, &draw, cx));
         }

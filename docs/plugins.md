@@ -132,6 +132,8 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   channel's id by default). `appLauncher` (`{"label","target"}`) adds a
   button to the app's header instead, which opens the panel at `target`
   beside any page and keeps it there while you move between pages.
+  A panel's `layout` is `document` (the default, padded) or `workspace`
+  (edge to edge, for a panel that draws its own `header`).
   Outside a conversation, `ui/openPanel`, `panel/open` and a matching
   link open the panel there too. `menu` (`{"label"}`) adds an entry to the channel's
   menu, which opens the panel as one of the channel's tabs; `kinds` (such as `["stream", "forum"]`) and `private` (`true` or
@@ -428,7 +430,7 @@ Clicks, toggles and typing come back as events:
 | --- | --- | --- |
 | `button` | `click` | none |
 | `switch`, `checkbox` | `toggle` | `true` or `false` |
-| `choice` | `change` | the chosen option's `value` |
+| `choice`, `menu` | `change` | the chosen option's `value` |
 | `input` | `change` | the field's text |
 | `input` | `submit` (Enter) | the field's text |
 | `composer` | `sent` | `{"id"}` of the message it sent |
@@ -466,15 +468,15 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | --- | --- |
 | `column` | `children`, `gap` (`none`, `sm` (default), `md`, `lg`), `align` (`start`, `center`, `end` or `stretch` (default): across the column), `justify` (as a row's, down the column), `grow` (takes the height left in its parent, such as to centre something on a page), `padding` (`none` (default), `sm`, `md`, `lg`), `background` (`inset`, as a card's header, or `panel`) |
 | `row` | `children`, `gap`, `justify` (`start`, `center`, `end`, `between`), `wrap`, `grow` (takes the width left), `padding`, `background` |
-| `header` | `title`, `icon`, `children` (its actions, such as buttons): a page or panel's title bar, as Buzz's own pages have. Put it first in a `workspace` page. |
+| `header` | `title`, `icon`, `subtitle` (a caption after the title, such as the channel's name), `children` (its actions, such as buttons): a page or panel's title bar, as Buzz's own pages have. Put it first in a `workspace` page or panel. |
 | `card` | `title` (optional), `children`, `padding` (default `md`), `gap` (default `sm`) |
-| `text` | `text`, `style` (`body`, `small`, `label`, `title`, `heading`, `code`), `tone` (`default`, `subtle`, `accent`, `success`, `warning`, `danger`), `truncate` (one line, cut with an ellipsis) |
+| `text` | `text`, `style` (`body`, `small`, `label`, `title`, `heading`, `code`), `tone` (`default`, `subtle`, `accent`, `success`, `warning`, `danger`, and `complete` or `progress` for a task's status), `truncate` (one line, cut with an ellipsis) |
 | `markdown` | `text`, rendered as a Buzz message is |
-| `button` | `id`, `label`, `variant` (`prominent`, `subtle`, `ghost`, `outline`, `destructive`), `icon`, `disabled`, `loading`, `size` (`sm` for a small one). With an empty `label` and an `icon`, an icon button. |
+| `button` | `id`, `label`, `variant` (`prominent`, `subtle`, `ghost`, `outline`, `destructive`), `icon`, `disabled`, `loading`, `size` (`sm` for a small one), `tooltip`. With an empty `label` and an `icon`, an icon button. |
 | `link` | `label`, `url`. Opens like a link in a message: a panel that matches it opens; otherwise the browser does. |
-| `input` | `id`, `value`, `placeholder`, `version`, `clearOnSubmit` |
+| `input` | `id`, `value`, `placeholder`, `version`, `clearOnSubmit`, `disabled`, `grow` (takes the width left in its row) |
 | `switch` | `id`, `checked`, `label` |
-| `checkbox` | `id`, `checked`, `label`; sends `toggle` like a switch |
+| `checkbox` | `id`, `checked`, `label`, `indeterminate` (drawn part-way, as a task in progress), `completed` (the label struck through and muted), `disabled`; sends `toggle` like a switch |
 | `choice` | `id`, `value`, `options` (`[{"value","label"}]`, up to 50), drawn as radio buttons; sends `change` with the chosen `value` |
 | `progress` | `value`, from 0 to 1 |
 | `image` | `url` (https, or the community's media), `width` and `height` (pixels, up to 1200), `alt` |
@@ -484,7 +486,10 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `thread` | `id`, `channel`, `root`, `height` (pixels, default 480): Buzz's own thread view; closing it sends `close` (only in views) |
 | `avatar` | `pubkey`, `size` (`small`, `default` or `large`): their profile picture, or their initial |
 | `badge` | `text`, `tone` |
-| `icon` | `name`, `size` (pixels, 8 to 128, default 16) |
+| `icon` | `name`, `size` (pixels, 8 to 128, default 16), `tone` |
+| `menu` | `id`, `options` (`[{"value","label","icon","iconTone","avatar","disabled"}]`, up to 200; `avatar` is a pubkey whose picture leads the row), `value` (the option shown chosen), `title` (the menu's heading), `icon` and `iconTone`, or `avatar`, for its small button, `tooltip`, `disabled`: a button that opens a menu; choosing sends `change` with the option's `value`. It opens only in views. |
+| `popover` | `id`, `icon` (default `Info`), `tooltip`, `title`, `description`: a small button that shows a note under it (only in views) |
+| `empty` | `title`, `icon`, `description`: an empty list's placeholder, as Buzz's own (`EmptyState`) |
 | `divider` | none |
 | `spinner` | none |
 | `code` | `lines`, each `{"text","tone"}` or `{"cells"}`, a row of `{"text","tone","kind"}`: `kind` `text` (the default, taking the width left), `number` (a line number in a gutter) or `omitted` (a gutter with no line, as a split diff's empty side). `tone` is `context` (the default), `added`, `removed`, `hunk` or `meta`. `wrap` (default `true`: long lines wrap; `false` scrolls sideways), `minWidth` (pixels, up to 2400: narrower, it scrolls sideways). Monospace, as Buzz draws a diff. |
@@ -636,6 +641,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `channels/changeMember` | `channel`, `pubkey`, `change` (`admin`, `member`, `guest` or `remove`), `expected` (their role now: `owner`, `admin`, `member`, `guest` or `bot`) | `null` once done. Needs `manage-channels`. |
 | `channels/details` | `channel` | `{"channel","version","details","canEdit","attempt"}`: `details` is `{"name","description","private","ttlSeconds","labels"}`; `attempt` is a save still `saving` or `unconfirmed`, with its `details`, or `null` |
 | `channels/saveDetails` | `channel`, `version` (from `channels/details`), `details` (the whole draft: `name` (as given, not trimmed), `description` (empty clears it), `private`, and optionally `ttlSeconds` (a whole number of seconds, 1 to 2147483647) and `labels` (text)); or `channel` and `check: true` to check an unconfirmed save | `null` once saved. A save that may have landed stays `unconfirmed` until checked. Needs `manage-channels`. |
+| `canvas/available` | none | Whether this connection can save a Canvas (`canvas.available`) |
 | `canvas/read` | `channel`, `strong` (default `true`: past relay replicas, as before an edit) | The channel's Canvas `{"id","author","createdAt","content"}`, or `null` |
 | `canvas/history` | `channel`, `cursor` (the `next` of the page before) | `{"revisions","next"}`: 25 revisions, newest first |
 | `canvas/save` | `channel`, `content`, `expected` (the `id` it was read as, or `null` for none) | The saved revision. If the Canvas changed since, it fails with code 5 and nothing is written. Needs `send-messages`. |
@@ -671,6 +677,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agents/portable` | none | `{"agents","warnings"}`: identities earlier agent systems saved on this device, `{"pubkey","name","picture","relay","source"}`, that are not agents yet |
 | `agents/port` | `pubkey` (from `agents/portable`), `type` | The new agent, keeping the identity's key, name and picture, in the selected community. Needs `manage-agents`. |
 | `agent/createConfig` | `view` (an open `agentCreate`), `config` (an object) | `null`. The new agent will start with this config. |
+| `ui/confirm` | `title`, `description`, `confirm` (default "Confirm"), `cancel` (default "Cancel"), `destructive` | `true` once the user confirms, `false` if they cancel or close it (`AlertDialog`). A second question answers the first `false`. |
 | `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB), `size` (`default`, `wide`, or `expanded`: the window less 24px a side, with the body scrolling, closed only by Escape and its close button) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
 | `ui/closeView` | `view` (an open `dialog`, panel or provider dialog) | `null`, once it has closed |
 | `reaction/select` | `view` (an open `reactionPicker`), `emoji` (a unicode emoji, or `:shortcode:` for one of the community's custom emoji) | `null`. Buzz reacts with it, or takes the reaction back if it is already yours, and closes the picker. Nothing is sent when the picker has closed, its message is gone or a reaction to it is still on its way; the answer is `null` either way, where buzz-app's `select` answers `false`. |
@@ -833,7 +840,7 @@ you added from running for that launch. Their switches stay as they were.
 ## Buzz's own plugins
 
 Some of Buzz's own plugins are programs on this API too, written in
-TypeScript in [`plugins/`](../plugins): Bestie and Diffs so far. They ship with Buzz
+TypeScript in [`plugins/`](../plugins): Bestie, Diffs and Todos so far. They ship with Buzz
 and the Node that runs them, and Settings → Plugins lists them under Built
 in with the rest of Buzz's own. They are trusted: they may use `buzz.` ids,
 are allowed the permissions they ask for, and run in safe mode.

@@ -6,7 +6,8 @@
   "workspaces": [
     "sdk",
     "bestie",
-    "diffs"
+    "diffs",
+    "todos"
   ],
   "scripts": {
     "build": "node build.mjs",

@@ -3,7 +3,7 @@
 // `false` are left out, so `cond && text("…")` works in a list.
 
 export type Gap = "none" | "sm" | "md" | "lg";
-export type Tone = "default" | "subtle" | "accent" | "success" | "warning" | "danger";
+export type Tone = "default" | "subtle" | "accent" | "success" | "warning" | "danger" | "complete" | "progress";
 export type Justify = "start" | "center" | "end" | "between";
 export type Align = "start" | "center" | "end" | "stretch";
 export type TextStyle = "body" | "small" | "label" | "title" | "heading" | "code";
@@ -62,8 +62,8 @@ export function card(children: Child[], props: { title?: string; padding?: Gap; 
 }
 
 /** A page or panel's title bar; `actions` sit at its end. */
-export function header(title: string, props: { icon?: string; actions?: Child[] } = {}): Element {
-  return element("header", { title, icon: props.icon, children: kids(props.actions ?? []) });
+export function header(title: string, props: { icon?: string; subtitle?: string; actions?: Child[] } = {}): Element {
+  return element("header", { title, icon: props.icon, subtitle: props.subtitle, children: kids(props.actions ?? []) });
 }
 
 export function text(value: string, props: { style?: TextStyle; tone?: Tone; truncate?: boolean } = {}): Element {
@@ -81,6 +81,7 @@ export interface ButtonProps {
   loading?: boolean;
   /** `sm` for a small one. With an empty label and an icon, an icon button. */
   size?: "sm";
+  tooltip?: string;
 }
 
 export function button(id: string, label: string, props: ButtonProps = {}): Element {
@@ -97,6 +98,9 @@ export interface InputProps {
   /** Raise it to put `value` into the field again. */
   version?: number;
   clearOnSubmit?: boolean;
+  disabled?: boolean;
+  /** Takes the width left in its row. */
+  grow?: boolean;
 }
 
 export function input(id: string, props: InputProps = {}): Element {
@@ -107,7 +111,11 @@ export function toggle(id: string, checked: boolean, props: { label?: string } =
   return element("switch", { id, checked, ...props });
 }
 
-export function checkbox(id: string, checked: boolean, props: { label?: string } = {}): Element {
+export function checkbox(
+  id: string,
+  checked: boolean,
+  props: { label?: string; indeterminate?: boolean; completed?: boolean; disabled?: boolean } = {},
+): Element {
   return element("checkbox", { id, checked, ...props });
 }
 
@@ -131,8 +139,47 @@ export function badge(value: string, props: { tone?: Tone } = {}): Element {
   return element("badge", { text: value, ...props });
 }
 
-export function icon(name: string, props: { size?: number } = {}): Element {
+export function icon(name: string, props: { size?: number; tone?: Tone } = {}): Element {
   return element("icon", { name, ...props });
+}
+
+export interface MenuOption {
+  value: string;
+  label: string;
+  icon?: string;
+  iconTone?: Tone;
+  /** A person's picture before the label. */
+  avatar?: string;
+  disabled?: boolean;
+}
+
+export interface MenuProps {
+  icon?: string;
+  iconTone?: Tone;
+  /** Shows this person's picture as the button. */
+  avatar?: string;
+  tooltip?: string;
+  title?: string;
+  value?: string;
+  disabled?: boolean;
+}
+
+/** A small button opening a menu; choosing sends `change` with the option's value. */
+export function menu(id: string, options: MenuOption[], props: MenuProps = {}): Element {
+  return element("menu", { id, options, ...props });
+}
+
+/** A small button that shows a note under it. */
+export function popover(
+  id: string,
+  props: { icon?: string; tooltip?: string; title?: string; description?: string },
+): Element {
+  return element("popover", { id, ...props });
+}
+
+/** An empty list's placeholder. */
+export function empty(title: string, props: { icon?: string; description?: string } = {}): Element {
+  return element("empty", { title, ...props });
 }
 
 export type CodeTone = "added" | "removed" | "context" | "hunk" | "meta";

@@ -884,6 +884,7 @@ fn drawn_with(
         embeds: &embeds,
         community: AppState::current(cx),
         place: key,
+        window: None,
     };
     draw::node(tree, &hashed(target), &draw, cx)
 }

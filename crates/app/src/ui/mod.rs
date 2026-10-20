@@ -79,7 +79,6 @@ pub mod terminal;
 pub mod thread;
 pub(crate) mod time;
 pub mod toasts;
-pub mod todos;
 mod typing;
 mod unread_badge;
 pub(crate) mod window_controls;

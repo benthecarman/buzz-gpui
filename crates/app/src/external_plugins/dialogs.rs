@@ -16,8 +16,82 @@ struct OpenDialog(Option<(String, AnyView)>);
 
 impl Global for OpenDialog {}
 
+/// A question a plugin asked (`ui/confirm`), and where its answer goes.
+struct Question {
+    title: SharedString,
+    description: Option<SharedString>,
+    confirm: SharedString,
+    cancel: SharedString,
+    destructive: bool,
+    answer: futures::channel::oneshot::Sender<bool>,
+}
+
+#[derive(Default)]
+struct Asking(Option<Question>);
+
+impl Global for Asking {}
+
+fn answer(confirmed: bool, cx: &mut App) {
+    if let Some(question) = cx.default_global::<Asking>().0.take() {
+        let _ = question.answer.send(confirmed);
+    }
+    cx.refresh_windows();
+}
+
+/// `ui/confirm`: asks the user to confirm, as buzz-app's `AlertDialog`,
+/// and answers `true` or `false`. A second question replaces the first,
+/// which answers `false`.
+pub fn confirm(params: &Value, cx: &mut App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| SharedString::from(text.chars().take(300).collect::<String>()))
+    };
+    let title = text("title").ok_or((INVALID_PARAMS, "title is required".to_owned()))?;
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    answer(false, cx);
+    cx.default_global::<Asking>().0 = Some(Question {
+        title,
+        description: text("description"),
+        confirm: text("confirm").unwrap_or_else(|| "Confirm".into()),
+        cancel: text("cancel").unwrap_or_else(|| "Cancel".into()),
+        destructive: params.get("destructive").and_then(Value::as_bool) == Some(true),
+        answer: sender,
+    });
+    cx.refresh_windows();
+    Ok(cx.spawn(async move |_| Ok(Value::Bool(receiver.await.unwrap_or(false)))))
+}
+
 /// The open plugin dialog over the workspace, if any.
 pub fn dialog(window: &Window, cx: &App) -> Option<AnyElement> {
+    if let Some(question) = cx
+        .try_global::<Asking>()
+        .and_then(|asking| asking.0.as_ref())
+    {
+        use buzz_ui::{AlertDialog, Button, Surface};
+        let mut confirm = Button::new("plugin-confirm", question.confirm.clone())
+            .on_click(|_, _, cx| answer(true, cx));
+        if question.destructive {
+            confirm = confirm.destructive();
+        } else {
+            confirm = confirm.variant(buzz_ui::ButtonVariant::Prominent);
+        }
+        let mut alert = AlertDialog::new(question.title.clone())
+            .action(
+                Button::new("plugin-confirm-cancel", question.cancel.clone())
+                    .surface(Surface::Floating)
+                    .on_click(|_, _, cx| answer(false, cx)),
+            )
+            .action(confirm);
+        if let Some(description) = &question.description {
+            alert = alert.description(description.clone());
+        }
+        let dismiss: overlay::Dismiss = Rc::new(|_, cx| answer(false, cx));
+        return Some(overlay::modal(window, alert, Some(dismiss)).into_any_element());
+    }
     let (plugin, view) = cx.try_global::<OpenDialog>()?.0.clone()?;
     // A plugin switched off takes its dialog with it.
     if ExternalPlugins::status(&plugin, cx) == Status::Off {

@@ -131,7 +131,6 @@ fn main() {
         ui::agent_activity::init(cx);
         ui::profile_panel::init(cx);
         ui::channel_usage::init(cx);
-        ui::todos::init(cx);
         ui::github::init(cx);
         ui::projects::init(cx);
         ui::moderation::init(cx);

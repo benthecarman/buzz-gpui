@@ -114,6 +114,15 @@ pub fn canvas_read(params: &Value, cx: &App) -> Result<Task<Result<Value, Failur
     }))
 }
 
+/// `canvas/available`: whether this connection can save a Canvas
+/// (`canvas.available`).
+pub fn canvas_available(cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {
+    let session = community(cx)?.read(cx).session.clone();
+    Ok(on_tokio(cx, async move {
+        Ok(Value::Bool(session.canvas_available().await))
+    }))
+}
+
 /// `canvas/history`: a channel's Canvas revisions, newest first, 25 at a
 /// time; `cursor` is the `next` of the page before.
 pub fn canvas_history(params: &Value, cx: &App) -> Result<Task<Result<Value, Failure>>, Failure> {

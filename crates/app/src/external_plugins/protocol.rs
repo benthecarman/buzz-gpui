@@ -480,6 +480,10 @@ pub struct PanelDecl {
     /// An entry in the channel's menu that opens the panel as a tab.
     #[serde(default)]
     pub menu: Option<MenuDecl>,
+    /// `workspace` draws the panel edge to edge, as one with its own
+    /// header; `document` (the default) pads it.
+    #[serde(default)]
+    pub layout: PageLayout,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -1120,6 +1124,9 @@ pub enum Node {
         title: String,
         #[serde(default)]
         icon: Option<String>,
+        /// A caption after the title, such as the channel's name.
+        #[serde(default)]
+        subtitle: Option<String>,
         #[serde(default)]
         children: Vec<Node>,
     },
@@ -1161,6 +1168,9 @@ pub enum Node {
         /// `sm` for a small button; without a label, an icon button.
         #[serde(default)]
         size: Option<String>,
+        /// Shown on hover, such as an icon button's name.
+        #[serde(default)]
+        tooltip: Option<String>,
     },
     Link {
         label: String,
@@ -1182,6 +1192,11 @@ pub enum Node {
         /// plugin.
         #[serde(default)]
         clear_on_submit: bool,
+        #[serde(default)]
+        disabled: bool,
+        /// Takes the width left in its row.
+        #[serde(default)]
+        grow: bool,
     },
     Switch {
         id: String,
@@ -1195,6 +1210,14 @@ pub enum Node {
         checked: bool,
         #[serde(default)]
         label: Option<String>,
+        /// Drawn part-way, as a task in progress.
+        #[serde(default)]
+        indeterminate: bool,
+        /// The label struck through and muted, as a finished task.
+        #[serde(default)]
+        completed: bool,
+        #[serde(default)]
+        disabled: bool,
     },
     /// One of `options`, as radio buttons; sends `change` with the chosen
     /// option's `value`.
@@ -1317,6 +1340,52 @@ pub enum Node {
         /// Pixels, 8 to 128 (default 16).
         #[serde(default)]
         size: Option<u32>,
+        #[serde(default)]
+        tone: Tone,
+    },
+    /// A small button that opens a menu of `options`; choosing one sends
+    /// `change` with its `value`.
+    Menu {
+        id: String,
+        /// The button's icon, or `avatar`'s picture.
+        #[serde(default)]
+        icon: Option<String>,
+        #[serde(default)]
+        icon_tone: Tone,
+        #[serde(default)]
+        avatar: Option<String>,
+        #[serde(default)]
+        tooltip: Option<String>,
+        /// The menu's heading.
+        #[serde(default)]
+        title: Option<String>,
+        /// The option shown chosen.
+        #[serde(default)]
+        value: Option<String>,
+        options: Vec<MenuOption>,
+        #[serde(default)]
+        disabled: bool,
+    },
+    /// A small button that shows a note under it.
+    Popover {
+        id: String,
+        #[serde(default)]
+        icon: Option<String>,
+        #[serde(default)]
+        tooltip: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    /// An empty list's placeholder: a bordered card with an icon, title
+    /// and description (`EmptyState`).
+    Empty {
+        #[serde(default)]
+        icon: Option<String>,
+        title: String,
+        #[serde(default)]
+        description: Option<String>,
     },
     Divider,
     Spinner,
@@ -1462,6 +1531,10 @@ pub enum Tone {
     Success,
     Warning,
     Danger,
+    /// A finished task's.
+    Complete,
+    /// A task in progress's.
+    Progress,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -1473,6 +1546,22 @@ pub enum ButtonStyle {
     Ghost,
     Outline,
     Destructive,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuOption {
+    pub value: String,
+    pub label: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub icon_tone: Tone,
+    /// A person's picture before the label.
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]

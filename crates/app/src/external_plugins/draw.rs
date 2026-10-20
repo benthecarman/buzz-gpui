@@ -10,10 +10,12 @@ use super::protocol::{
 use crate::community::Community;
 use crate::ui::markdown;
 use crate::ui::navigation;
+use crate::ui::overlay;
 use buzz_ui::{
-    ActiveTheme, Avatar, Badge, BadgeTone, Button, ButtonSize, ButtonVariant, Checkbox, Colors,
-    Divider, Icon, IconButton, IconButtonSize, PanelHeader, Radio, Spinner, Switch, TextField,
-    TypeStyled, tokens::space,
+    ActiveTheme, Avatar, Badge, BadgeTone, Button, ButtonSize, ButtonVariant, Checkbox,
+    CheckboxState, Colors, Divider, Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem,
+    MenuLabel, PanelHeader, Popover, Radio, Spinner, Switch, TextField, TypeStyled,
+    tokens::{radius, space},
 };
 use gpui_kit::component::input::InputState;
 use gpui_kit::*;
@@ -35,6 +37,9 @@ pub struct Draw<'a> {
     /// Buzz's own views the tree embeds, by element id; an embed without
     /// one draws nothing.
     pub embeds: &'a HashMap<String, AnyView>,
+    /// For menus and popovers, which open over the window; without one
+    /// (inside a message) they do not open.
+    pub window: Option<&'a Window>,
 }
 
 /// A composer or thread in the tree, for the caller to make its view.
@@ -161,6 +166,7 @@ pub fn inputs(node: &Node) -> Vec<InputNode<'_>> {
                 placeholder,
                 version,
                 clear_on_submit,
+                ..
             } => found.push(InputNode {
                 id,
                 value: value.as_ref(),
@@ -273,6 +279,52 @@ fn code(lines: &[CodeLine], wrap: bool, c: &Colors) -> Div {
 }
 
 thread_local! {
+    /// The menu or popover open now, by element id: one at a time.
+    static OPEN: std::cell::RefCell<Option<SharedString>> = const { std::cell::RefCell::new(None) };
+}
+
+fn is_open(id: &SharedString) -> bool {
+    OPEN.with_borrow(|open| open.as_ref() == Some(id))
+}
+
+fn set_open(id: Option<SharedString>, cx: &mut App) {
+    OPEN.with_borrow_mut(|open| *open = id);
+    cx.refresh_windows();
+}
+
+/// Someone's picture, or their initial, from the community's profiles.
+fn avatar_of(pubkey: &str, size: buzz_ui::AvatarSize, draw: &Draw, cx: &App) -> Avatar {
+    let profile = draw.community.as_ref().and_then(|community| {
+        community
+            .read(cx)
+            .snapshot
+            .profiles
+            .get(&pubkey.to_ascii_lowercase())
+            .cloned()
+    });
+    let name = profile
+        .as_ref()
+        .map(|profile| profile.name.clone())
+        .unwrap_or_else(|| pubkey.chars().take(2).collect());
+    let mut avatar = Avatar::new(name).size(size);
+    if let Some(picture) = profile.and_then(|profile| profile.picture.clone())
+        && picture.starts_with("https://")
+    {
+        avatar = avatar.image(crate::ui::media::any_avatar(&picture));
+    }
+    avatar
+}
+
+/// An icon in a tone, for menus and their triggers.
+fn toned_icon(name: &str, tone: Tone, c: &Colors) -> Icon {
+    let icon = Icon::new(super::icon(Some(name))).size(16.);
+    match tone_color(tone, c) {
+        Some(color) => icon.color(color),
+        None => icon,
+    }
+}
+
+thread_local! {
     /// Scroll areas' handles by element id, so a wheel they cannot use
     /// passes to the page.
     static SCROLLS: std::cell::RefCell<HashMap<SharedString, ScrollHandle>> = Default::default();
@@ -318,6 +370,8 @@ fn tone_color(tone: Tone, c: &Colors) -> Option<Hsla> {
         Tone::Success => Some(c.text_success),
         Tone::Warning => Some(c.text_warning),
         Tone::Danger => Some(c.text_danger),
+        Tone::Complete => Some(c.icon_status_complete),
+        Tone::Progress => Some(c.icon_status_progress),
     }
 }
 
@@ -378,12 +432,23 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
         Node::Header {
             title,
             icon,
+            subtitle,
             children: nodes,
         } => {
             let mut header = PanelHeader::new().joined(true).label(
                 icon.as_deref().map(|name| super::icon(Some(name))),
                 title.clone(),
             );
+            if let Some(subtitle) = subtitle {
+                header = header.leading(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_caption()
+                        .text_color(c.text_subtle)
+                        .child(subtitle.clone()),
+                );
+            }
             for action in children(nodes, path, draw, cx) {
                 header = header.action(action);
             }
@@ -444,6 +509,7 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
             disabled,
             loading,
             size,
+            tooltip,
         } => {
             let small = size.as_deref() == Some("sm");
             if label.is_empty()
@@ -451,13 +517,24 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
             {
                 let send = draw.send.clone();
                 let id = id.clone();
-                return IconButton::new(element_id("button"), super::icon(Some(icon)))
+                let mut button = IconButton::new(element_id("button"), super::icon(Some(icon)))
                     .size(if small {
                         IconButtonSize::Sm
                     } else {
                         IconButtonSize::Md
                     })
-                    .disabled(*disabled)
+                    .variant(match variant {
+                        ButtonStyle::Ghost => ButtonVariant::Ghost,
+                        _ => ButtonVariant::Subtle,
+                    })
+                    .disabled(*disabled || *loading);
+                if *loading {
+                    button = button.child(Spinner::new().size(16.));
+                }
+                if let Some(tooltip) = tooltip {
+                    button = button.tooltip(tooltip.clone());
+                }
+                return button
                     .on_click(move |_, _, cx| send(&id, "click", None, cx))
                     .into_any_element();
             }
@@ -479,6 +556,9 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 .loading(*loading);
             if destructive {
                 button = button.destructive();
+            }
+            if let Some(tooltip) = tooltip {
+                button = button.tooltip(tooltip.clone());
             }
             if let Some(icon) = icon.as_deref().map(|name| super::icon(Some(name))) {
                 button = button.icon(icon);
@@ -509,16 +589,47 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 })
                 .into_any_element()
         }
-        Node::Input { id, .. } => match draw.fields.get(id) {
-            Some(state) => TextField::new(state).into_any_element(),
+        Node::Input {
+            id, disabled, grow, ..
+        } => match draw.fields.get(id) {
+            Some(state) => {
+                let field = TextField::new(state).disabled(*disabled);
+                if *grow {
+                    div().flex_1().min_w_0().child(field).into_any_element()
+                } else {
+                    field.into_any_element()
+                }
+            }
             None => div().into_any_element(),
         },
-        Node::Checkbox { id, checked, label } => {
+        Node::Checkbox {
+            id,
+            checked,
+            label,
+            indeterminate,
+            completed,
+            disabled,
+        } => {
             let send = draw.send.clone();
             let id = id.clone();
-            let mut checkbox = Checkbox::new(element_id("checkbox"), *checked);
+            let state = match (*checked, *indeterminate) {
+                (true, _) => CheckboxState::Checked,
+                (false, true) => CheckboxState::Indeterminate,
+                (false, false) => CheckboxState::Unchecked,
+            };
+            let mut checkbox = Checkbox::new(element_id("checkbox"), state).disabled(*disabled);
             if let Some(label) = label {
-                checkbox = checkbox.label(label.clone());
+                checkbox = if *completed {
+                    checkbox.label_element(
+                        div()
+                            .min_w_0()
+                            .text_color(c.text_subtle)
+                            .line_through()
+                            .child(label.clone()),
+                    )
+                } else {
+                    checkbox.label(label.clone())
+                };
             }
             checkbox
                 .on_change(move |on, _, cx| send(&id, "toggle", Some(json!(on)), cx))
@@ -650,31 +761,17 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 .into_any_element(),
             None => div().into_any_element(),
         },
-        Node::Avatar { pubkey, size } => {
-            let profile = draw.community.as_ref().and_then(|community| {
-                community
-                    .read(cx)
-                    .snapshot
-                    .profiles
-                    .get(&pubkey.to_ascii_lowercase())
-                    .cloned()
-            });
-            let name = profile
-                .as_ref()
-                .map(|profile| profile.name.clone())
-                .unwrap_or_else(|| pubkey.chars().take(2).collect());
-            let mut avatar = Avatar::new(name).size(match size {
+        Node::Avatar { pubkey, size } => avatar_of(
+            pubkey,
+            match size {
                 AvatarSize::Small => buzz_ui::AvatarSize::Small,
                 AvatarSize::Default => buzz_ui::AvatarSize::Default,
                 AvatarSize::Large => buzz_ui::AvatarSize::Large,
-            });
-            if let Some(picture) = profile.and_then(|profile| profile.picture.clone())
-                && picture.starts_with("https://")
-            {
-                avatar = avatar.image(crate::ui::media::any_avatar(&picture));
-            }
-            avatar.into_any_element()
-        }
+            },
+            draw,
+            cx,
+        )
+        .into_any_element(),
         Node::Switch { id, checked, label } => {
             let send = draw.send.clone();
             let id = id.clone();
@@ -693,10 +790,174 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 Tone::Success => BadgeTone::Success,
                 Tone::Warning => BadgeTone::Warning,
                 Tone::Danger => BadgeTone::Danger,
+                Tone::Complete => BadgeTone::Success,
+                Tone::Progress => BadgeTone::Accent,
             })
             .into_any_element(),
-        Node::Icon { name, size } => Icon::new(super::icon(Some(name)))
-            .size(size.unwrap_or(16).clamp(8, 128) as f32)
+        Node::Icon { name, size, tone } => {
+            let icon =
+                Icon::new(super::icon(Some(name))).size(size.unwrap_or(16).clamp(8, 128) as f32);
+            match tone_color(*tone, &c) {
+                Some(color) => icon.color(color),
+                None => icon,
+            }
+            .into_any_element()
+        }
+        Node::Menu {
+            id,
+            icon,
+            icon_tone,
+            avatar,
+            tooltip,
+            title,
+            value,
+            options,
+            disabled,
+        } => {
+            let key = element_id("menu");
+            let mut trigger = IconButton::new(key.clone(), IconName::User)
+                .size(IconButtonSize::Sm)
+                .variant(if avatar.is_some() {
+                    ButtonVariant::Avatar
+                } else {
+                    ButtonVariant::Ghost
+                })
+                .disabled(*disabled);
+            trigger = match (avatar, icon) {
+                (Some(pubkey), _) => {
+                    trigger.child(avatar_of(pubkey, buzz_ui::AvatarSize::Small, draw, cx))
+                }
+                (None, Some(icon)) => trigger.child(toned_icon(icon, *icon_tone, &c)),
+                (None, None) => trigger,
+            };
+            if let Some(tooltip) = tooltip {
+                trigger = trigger.tooltip(tooltip.clone());
+            }
+            let toggle = key.clone();
+            let trigger = trigger.on_click(move |_, _, cx| {
+                set_open((!is_open(&toggle)).then(|| toggle.clone()), cx)
+            });
+            let mut place = div().relative().flex_none().child(trigger);
+            if is_open(&key)
+                && !*disabled
+                && let Some(window) = draw.window
+            {
+                let mut menu = Menu::new();
+                if let Some(title) = title {
+                    menu = menu.child(MenuLabel::new(title.clone()));
+                }
+                for (index, option) in options.iter().take(200).enumerate() {
+                    let leading = match (&option.avatar, &option.icon) {
+                        (Some(pubkey), _) => Some(
+                            avatar_of(pubkey, buzz_ui::AvatarSize::Small, draw, cx)
+                                .into_any_element(),
+                        ),
+                        (None, Some(icon)) => {
+                            Some(toned_icon(icon, option.icon_tone, &c).into_any_element())
+                        }
+                        (None, None) => None,
+                    };
+                    let send = draw.send.clone();
+                    let (id, chosen) = (id.clone(), option.value.clone());
+                    let mut item = MenuItem::new(
+                        SharedString::from(format!("{key}-option-{index}")),
+                        option.label.clone(),
+                    )
+                    .checked(value.as_ref() == Some(&option.value))
+                    .disabled(option.disabled)
+                    .on_click(move |_, _, cx| {
+                        set_open(None, cx);
+                        send(&id, "change", Some(json!(chosen)), cx);
+                    });
+                    if let Some(leading) = leading {
+                        item = item.leading(leading);
+                    }
+                    menu = menu.child(item);
+                }
+                place = place.child(overlay::dropdown(
+                    window,
+                    overlay::Align::End,
+                    menu,
+                    Rc::new(|_, cx| set_open(None, cx)),
+                ));
+            }
+            place.into_any_element()
+        }
+        Node::Popover {
+            icon,
+            tooltip,
+            title,
+            description,
+            ..
+        } => {
+            let key = element_id("popover");
+            let mut trigger = IconButton::new(
+                key.clone(),
+                super::icon(Some(icon.as_deref().unwrap_or("Info"))),
+            )
+            .size(IconButtonSize::Sm);
+            if let Some(tooltip) = tooltip {
+                trigger = trigger.tooltip(tooltip.clone());
+            }
+            let toggle = key.clone();
+            let trigger = trigger.on_click(move |_, _, cx| {
+                set_open((!is_open(&toggle)).then(|| toggle.clone()), cx)
+            });
+            let mut place = div().relative().flex_none().child(trigger);
+            if is_open(&key)
+                && let Some(window) = draw.window
+            {
+                let mut popover = Popover::new();
+                if let Some(title) = title {
+                    popover = popover.title(title.clone());
+                }
+                if let Some(description) = description {
+                    popover = popover.description(description.clone());
+                }
+                place = place.child(overlay::dropdown(
+                    window,
+                    overlay::Align::End,
+                    popover,
+                    Rc::new(|_, cx| set_open(None, cx)),
+                ));
+            }
+            place.into_any_element()
+        }
+        Node::Empty {
+            icon,
+            title,
+            description,
+        } => div()
+            .w_full()
+            .border_1()
+            .border_color(c.border_standard)
+            .rounded(radius::CONTAINER)
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(space::S4)
+            .py(space::S8)
+            .px(space::S6)
+            .text_center()
+            .children(icon.as_deref().map(|name| {
+                Icon::new(super::icon(Some(name)))
+                    .size(32.)
+                    .color(c.text_subtle)
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::S2)
+                    .max_w(rems(30.))
+                    .child(div().text_label_sm().child(title.clone()))
+                    .children(description.clone().map(|description| {
+                        div()
+                            .text_body_sm()
+                            .text_color(c.text_subtle)
+                            .child(description)
+                    })),
+            )
             .into_any_element(),
         Node::Divider => Divider::horizontal().into_any_element(),
         Node::Code {

@@ -145,6 +145,8 @@ fn trees_parse_with_defaults_and_unknown_elements() {
             placeholder: None,
             version: 2,
             clear_on_submit: true,
+            disabled: false,
+            grow: false,
         }
     );
 }

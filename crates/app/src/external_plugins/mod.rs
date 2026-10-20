@@ -1526,6 +1526,7 @@ impl ExternalPlugins {
             let prefixes = panel.matches.clone();
             let plugin = id.to_owned();
             let contribution = panel.id.clone();
+            let edge_to_edge = panel.layout == protocol::PageLayout::Workspace;
             channel_panels::register(
                 ChannelPanel {
                     key,
@@ -1568,7 +1569,14 @@ impl ExternalPlugins {
                         target: intern(launcher.target.clone()),
                     }),
                     build: channel_panels::build(move |opening, window, cx| {
-                        ExternalView::panel(&plugin, &contribution, opening, window, cx)
+                        ExternalView::panel(
+                            &plugin,
+                            &contribution,
+                            opening,
+                            edge_to_edge,
+                            window,
+                            cx,
+                        )
                     }),
                 },
                 cx,
@@ -2659,6 +2667,8 @@ impl ExternalPlugins {
             }
             "agents/memories" => later(content::memories(params, cx)),
             "canvas/read" => later(content::canvas_read(params, cx)),
+            "canvas/available" => later(content::canvas_available(cx)),
+            "ui/confirm" => later(dialogs::confirm(params, cx)),
             "canvas/history" => later(content::canvas_history(params, cx)),
             "channels/details" => later(content::details(params, cx)),
             "channels/list" => Reply::Now(capabilities::channel_list(cx)),
