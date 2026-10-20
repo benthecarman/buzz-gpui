@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { profileTarget } from "./profile.ts";
+import { profileTarget } from "@buzz/plugin-sdk/identity";
 import { addTodo, assignTodo, readTodos, setStatus } from "./model.ts";
 
 describe("Canvas todo source edits", () => {

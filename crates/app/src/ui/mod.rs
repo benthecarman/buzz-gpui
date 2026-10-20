@@ -18,7 +18,6 @@ mod channel_settings;
 pub(crate) mod channel_states;
 mod channel_tab_views;
 mod channel_tabs;
-pub mod channel_usage;
 pub mod composer;
 pub mod composer_completions;
 pub mod composer_tools;

@@ -526,6 +526,17 @@ pub struct MenuDecl {
     /// Only private (`true`) or public (`false`) channels.
     #[serde(default)]
     pub private: Option<bool>,
+    /// Only channels you are a member of.
+    #[serde(default)]
+    pub member: bool,
+    /// Only live channels you can write in: not this device's saved
+    /// copy, read-only or archived.
+    #[serde(default)]
+    pub writable: bool,
+    /// Only while this device saves your agents' activity
+    /// (`agentActivity.archive`).
+    #[serde(default)]
+    pub archive: bool,
 }
 
 /// A page (`pages.register`).
@@ -1365,6 +1376,21 @@ pub enum Node {
         options: Vec<MenuOption>,
         #[serde(default)]
         disabled: bool,
+    },
+    /// A field that opens a list of `options`; choosing one sends
+    /// `change` with its `value`.
+    Select {
+        id: String,
+        #[serde(default)]
+        value: Option<String>,
+        #[serde(default)]
+        placeholder: Option<String>,
+        options: Vec<MenuOption>,
+        #[serde(default)]
+        disabled: bool,
+        /// Pixels; it fills its place by default.
+        #[serde(default)]
+        width: Option<u32>,
     },
     /// A small button that shows a note under it.
     Popover {

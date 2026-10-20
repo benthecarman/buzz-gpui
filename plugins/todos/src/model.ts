@@ -1,7 +1,7 @@
 // A channel's todos in its Canvas Markdown (buzz-app `bundled/todos/model.ts`).
 
 import { fromMarkdown } from "mdast-util-from-markdown";
-import { profileKey, profileTarget } from "./profile.ts";
+import { profileKey, profileTarget } from "@buzz/plugin-sdk/identity";
 
 export type Assignee = { pubkey: string; name: string };
 export type Status = "todo" | "doing" | "done";

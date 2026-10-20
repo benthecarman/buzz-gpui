@@ -4,6 +4,10 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./testing": "./src/testing.ts"
+    "./testing": "./src/testing.ts",
+    "./identity": "./src/identity.ts"
+  },
+  "dependencies": {
+    "nostr-tools": "2.25.2"
   }
 }

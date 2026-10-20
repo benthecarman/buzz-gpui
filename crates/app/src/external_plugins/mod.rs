@@ -1549,17 +1549,34 @@ impl ExternalPlugins {
                     }),
                     menu: panel.menu.as_ref().map(|menu| {
                         let (kinds, private) = (menu.kinds.clone(), menu.private);
+                        let (member, writable, archive) =
+                            (menu.member, menu.writable, menu.archive);
                         MenuEntry {
                             label: intern(menu.label.clone()),
-                            eligible: std::rc::Rc::new(move |channel, _| {
+                            eligible: std::rc::Rc::new(move |channel, cx| {
                                 let kind = match channel.channel_type {
                                     Some(ChannelType::Dm) => "dm",
                                     Some(ChannelType::Forum) => "forum",
                                     Some(ChannelType::Session) => "session",
                                     Some(ChannelType::Stream) | None => "stream",
                                 };
+                                let viewer = || {
+                                    AppState::current(cx).map(|community| {
+                                        community.read(cx).session.viewer().to_string()
+                                    })
+                                };
                                 (kinds.is_empty() || kinds.iter().any(|wanted| wanted == kind))
                                     && private.is_none_or(|private| private == channel.private)
+                                    && (!member
+                                        || viewer().is_some_and(|viewer| {
+                                            channel.members.contains(&viewer)
+                                        }))
+                                    && (!writable
+                                        || !(channel.cached
+                                            || channel.read_only
+                                            || channel.archived))
+                                    && (!archive
+                                        || crate::ui::settings::agent_archive(cx).is_some())
                             }),
                         }
                     }),

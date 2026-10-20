@@ -137,7 +137,10 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   Outside a conversation, `ui/openPanel`, `panel/open` and a matching
   link open the panel there too. `menu` (`{"label"}`) adds an entry to the channel's
   menu, which opens the panel as one of the channel's tabs; `kinds` (such as `["stream", "forum"]`) and `private` (`true` or
-  `false`) limit the channels it is offered in.
+  `false`) limit the channels it is offered in, and so do `member`
+  (channels you are in), `writable` (live channels you can write in: not
+  this device's saved copy, read-only or archived) and `archive` (only
+  while this device saves your agents' activity).
 - A page's `placement` is `sidebar` (the default), `topbar` (`toolbar` is the
   same here) or `hidden`; one Buzz does not know is dropped, leaving the
   default. `primary: false` also keeps it out of navigation. `layout` is `document` (the default, padded) or
@@ -430,7 +433,7 @@ Clicks, toggles and typing come back as events:
 | --- | --- | --- |
 | `button` | `click` | none |
 | `switch`, `checkbox` | `toggle` | `true` or `false` |
-| `choice`, `menu` | `change` | the chosen option's `value` |
+| `choice`, `menu`, `select` | `change` | the chosen option's `value` |
 | `input` | `change` | the field's text |
 | `input` | `submit` (Enter) | the field's text |
 | `composer` | `sent` | `{"id"}` of the message it sent |
@@ -488,6 +491,7 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `badge` | `text`, `tone` |
 | `icon` | `name`, `size` (pixels, 8 to 128, default 16), `tone` |
 | `menu` | `id`, `options` (`[{"value","label","icon","iconTone","avatar","disabled"}]`, up to 200; `avatar` is a pubkey whose picture leads the row), `value` (the option shown chosen), `title` (the menu's heading), `icon` and `iconTone`, or `avatar`, for its small button, `tooltip`, `disabled`: a button that opens a menu; choosing sends `change` with the option's `value`. It opens only in views. |
+| `select` | `id`, `options` (as a `menu`'s), `value`, `placeholder`, `disabled`, `width` (pixels; it fills its place by default): a field that opens the list; choosing sends `change` with the option's `value`. It opens only in views. |
 | `popover` | `id`, `icon` (default `Info`), `tooltip`, `title`, `description`: a small button that shows a note under it (only in views) |
 | `empty` | `title`, `icon`, `description`: an empty list's placeholder, as Buzz's own (`EmptyState`) |
 | `divider` | none |
@@ -840,7 +844,8 @@ you added from running for that launch. Their switches stay as they were.
 ## Buzz's own plugins
 
 Some of Buzz's own plugins are programs on this API too, written in
-TypeScript in [`plugins/`](../plugins): Bestie, Diffs and Todos so far. They ship with Buzz
+TypeScript in [`plugins/`](../plugins): Bestie, Diffs, Todos and Channel
+Usage so far. They ship with Buzz
 and the Node that runs them, and Settings → Plugins lists them under Built
 in with the rest of Buzz's own. They are trusted: they may use `buzz.` ids,
 are allowed the permissions they ask for, and run in safe mode.

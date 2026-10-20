@@ -7,7 +7,7 @@
 
 import { type Connection, type Element, el, log, type Params, readJson, RpcError, type ViewOpen, writeJson } from "@buzz/plugin-sdk";
 import { addTodo, assignTodo, readTodos, type Status, setStatus } from "./model.ts";
-import { publicKeyLabels } from "./profile.ts";
+import { publicKeyLabels } from "@buzz/plugin-sdk/identity";
 
 export type Draft = { content: string; original: string; base: string | null; input: string };
 const empty: Draft = { content: "", original: "", base: null, input: "" };

@@ -10,6 +10,7 @@ with a `buzz-plugin.json` is one plugin; `sdk` is the library they share
 | `bestie` | `buzz.bestie`: the companion's home page |
 | `diffs` | `buzz.diffs`: code diff messages (kind 40008) and their expanded view |
 | `todos` | `buzz.todos`: a channel's todo list, kept in its Canvas |
+| `channel-usage` | `buzz.channel-usage`: what agents reported using in a channel |
 
 ## Working on them
 

@@ -14,7 +14,7 @@ use crate::ui::overlay;
 use buzz_ui::{
     ActiveTheme, Avatar, Badge, BadgeTone, Button, ButtonSize, ButtonVariant, Checkbox,
     CheckboxState, Colors, Divider, Icon, IconButton, IconButtonSize, IconName, Menu, MenuItem,
-    MenuLabel, PanelHeader, Popover, Radio, Spinner, Switch, TextField, TypeStyled,
+    MenuLabel, PanelHeader, Popover, Radio, Select, Spinner, Switch, TextField, TypeStyled,
     tokens::{radius, space},
 };
 use gpui_kit::component::input::InputState;
@@ -882,6 +882,78 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 ));
             }
             place.into_any_element()
+        }
+        Node::Select {
+            id,
+            value,
+            placeholder,
+            options,
+            disabled,
+            width,
+        } => {
+            let key = element_id("select");
+            let shown = options
+                .iter()
+                .find(|option| Some(&option.value) == value.as_ref())
+                .map(|option| option.label.clone());
+            let mut select = Select::new(key.clone())
+                .surface(buzz_ui::Surface::Floating)
+                .disabled(*disabled);
+            if let Some(shown) = shown {
+                select = select.value(shown);
+            }
+            if let Some(placeholder) = placeholder {
+                select = select.placeholder(placeholder.clone());
+            }
+            let toggle = key.clone();
+            let select = select.on_click(move |_, _, cx| {
+                set_open((!is_open(&toggle)).then(|| toggle.clone()), cx)
+            });
+            let open = is_open(&key) && !*disabled;
+            let place = match draw.window {
+                Some(window) => {
+                    let send = draw.send.clone();
+                    let (id, value, options) = (id.clone(), value.clone(), options.clone());
+                    let key = key.clone();
+                    overlay::select_menu(
+                        select,
+                        open,
+                        overlay::Align::Start,
+                        Some(rems(16.)),
+                        move || {
+                            let mut menu = Menu::new();
+                            for (index, option) in options.into_iter().take(200).enumerate() {
+                                let send = send.clone();
+                                let id = id.clone();
+                                let chosen = option.value.clone();
+                                menu = menu.child(
+                                    MenuItem::new(
+                                        SharedString::from(format!("{key}-option-{index}")),
+                                        option.label.clone(),
+                                    )
+                                    .checked(value.as_ref() == Some(&option.value))
+                                    .disabled(option.disabled)
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            set_open(None, cx);
+                                            send(&id, "change", Some(json!(chosen)), cx);
+                                        },
+                                    ),
+                                );
+                            }
+                            menu.into_any_element()
+                        },
+                        Rc::new(|_, cx| set_open(None, cx)),
+                        window,
+                    )
+                }
+                None => div().child(select),
+            };
+            match width {
+                Some(width) => place.w(px((*width).clamp(80, 1200) as f32)),
+                None => place,
+            }
+            .into_any_element()
         }
         Node::Popover {
             icon,

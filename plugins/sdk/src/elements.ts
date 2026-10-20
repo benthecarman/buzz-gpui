@@ -169,6 +169,15 @@ export function menu(id: string, options: MenuOption[], props: MenuProps = {}): 
   return element("menu", { id, options, ...props });
 }
 
+/** A field that opens a list of options; choosing sends `change` with the option's value. */
+export function select(
+  id: string,
+  options: MenuOption[],
+  props: { value?: string; placeholder?: string; disabled?: boolean; width?: number } = {},
+): Element {
+  return element("select", { id, options, ...props });
+}
+
 /** A small button that shows a note under it. */
 export function popover(
   id: string,

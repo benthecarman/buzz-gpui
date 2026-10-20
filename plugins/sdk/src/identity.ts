@@ -28,6 +28,14 @@ export function canonicalPublicKey(pubkey: string): string | undefined {
   return /^[0-9a-f]{64}$/i.test(pubkey) ? npubEncode(pubkey.toLowerCase()) : undefined;
 }
 
+/** Display only: never use this abbreviation for copying, storage or routing. */
+export function formatPublicKey(pubkey: string, suffixLength = 3): string | undefined {
+  const npub = canonicalPublicKey(pubkey);
+  if (!npub) return undefined;
+  const length = Number.isInteger(suffixLength) ? Math.max(3, Math.min(suffixLength, npub.length - 5)) : 3;
+  return `npub…${npub.slice(-length)}`;
+}
+
 /** Distinct public identities share the shortest unambiguous suffix, starting at three. */
 export function publicKeyLabels(pubkeys: Iterable<string>): ReadonlyMap<string, string> {
   const encoded = new Map<string, string>();
