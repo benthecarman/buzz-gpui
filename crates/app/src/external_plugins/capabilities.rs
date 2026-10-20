@@ -2558,11 +2558,6 @@ pub fn contributions(cx: &App) -> Value {
             "key": action.key,
             "title": action.title.to_string(),
         }))
-        // Buzz's own Send feedback is the Feedback plugin's action.
-        .chain(crate::plugins::enabled("buzz.feedback").then(|| json!({
-            "key": "buzz.feedback/send",
-            "title": "Send feedback",
-        })))
         .collect::<Vec<_>>(),
         "shortcuts": crate::shortcuts::external_list(cx).iter().map(|shortcut| json!({
             "key": shortcut.key,
