@@ -2667,10 +2667,9 @@ fn bundled_page(key: &str, cx: &App) -> Option<(bool, bool, bool)> {
         "buzz.me/me" => (true, true, false),
         "buzz.channels/channels" => (true, true, true),
         "buzz.projects/projects" => (true, false, true),
-        "buzz.inbox/inbox"
-        | "buzz.reminders/reminders"
-        | "buzz.agents/agents"
-        | "buzz.workflows/workflows" => (true, false, false),
+        "buzz.inbox/inbox" | "buzz.agents/agents" | "buzz.workflows/workflows" => {
+            (true, false, false)
+        }
         key if key.starts_with("buzz.") => (false, false, false),
         _ => return None,
     })

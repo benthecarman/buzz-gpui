@@ -555,6 +555,7 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
             loading,
             size,
             tooltip,
+            fill,
         } => {
             let small = size.as_deref() == Some("sm");
             if label.is_empty()
@@ -608,11 +609,15 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
             if let Some(icon) = icon.as_deref().map(|name| super::icon(Some(name))) {
                 button = button.icon(icon);
             }
+            if *fill {
+                button = button.full_width();
+            }
             let send = draw.send.clone();
             let id = id.clone();
-            // Sized to its label, even in a column.
-            div()
-                .flex()
+            // Sized to its label, even in a column, unless it fills it.
+            let place = div().flex();
+            let place = if *fill { place.w_full() } else { place };
+            place
                 .child(button.on_click(move |_, _, cx| send(&id, "click", None, cx)))
                 .into_any_element()
         }
@@ -856,6 +861,7 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
         }
         Node::Menu {
             id,
+            label,
             icon,
             icon_tone,
             avatar,
@@ -885,9 +891,20 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 trigger = trigger.tooltip(tooltip.clone());
             }
             let toggle = key.clone();
-            let trigger = trigger.on_click(move |_, _, cx| {
-                set_open((!is_open(&toggle)).then(|| toggle.clone()), cx)
-            });
+            let trigger = match label {
+                // A labelled menu opens from an ordinary button.
+                Some(label) => Button::new(key.clone(), label.clone())
+                    .disabled(*disabled)
+                    .on_click(move |_, _, cx| {
+                        set_open((!is_open(&toggle)).then(|| toggle.clone()), cx)
+                    })
+                    .into_any_element(),
+                None => trigger
+                    .on_click(move |_, _, cx| {
+                        set_open((!is_open(&toggle)).then(|| toggle.clone()), cx)
+                    })
+                    .into_any_element(),
+            };
             let mut place = div().relative().flex_none().child(trigger);
             if is_open(&key)
                 && !*disabled

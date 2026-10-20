@@ -103,6 +103,17 @@ fn contributions_are_checked() {
 }
 
 #[test]
+fn a_notification_category_may_share_its_pages_id() {
+    // As Reminders' page and category are both `buzz.reminders/reminders`.
+    let contributions = Contributions::parse(json!({
+        "pages": [{ "id": "reminders", "title": "Reminders" }],
+        "notifications": [{ "id": "reminders", "label": "Reminders" }],
+    }))
+    .unwrap();
+    assert_eq!(contributions.notifications.len(), 1);
+}
+
+#[test]
 fn trees_parse_with_defaults_and_unknown_elements() {
     let tree = Node::parse(json!({
         "type": "column",
@@ -287,7 +298,7 @@ fn every_kind_of_contribution_is_checked() {
             "not valid",
         ),
         (
-            json!({ "notifications": [{ "id": "x", "label": "X" }], "composerTools": [{ "id": "x", "title": "X" }] }),
+            json!({ "notifications": [{ "id": "x", "label": "X" }, { "id": "x", "label": "Y" }] }),
             "twice",
         ),
     ] {

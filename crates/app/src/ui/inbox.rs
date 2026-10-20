@@ -276,7 +276,7 @@ impl InboxPage {
         }
         self.failed = None;
         self.menu = None;
-        let at = at.unwrap_or_else(super::reminders::now_seconds);
+        let at = at.unwrap_or_else(now_seconds);
         let same = |row: &InboxItem| {
             row.channel_id == item.channel_id && row.message_ids.contains(&item.message_id)
         };
@@ -1142,7 +1142,7 @@ impl Render for InboxPage {
             }
         }
         let media = community.read(cx).session.media().clone();
-        let now = super::reminders::now_seconds();
+        let now = now_seconds();
         let rows: Vec<AnyElement> = visible
             .iter()
             .map(|item| {
@@ -1323,4 +1323,11 @@ impl Render for InboxPage {
                 .children(menu),
         )
     }
+}
+
+/// The time now, in whole unix seconds.
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }

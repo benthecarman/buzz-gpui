@@ -897,8 +897,19 @@ impl Contributions {
             check_title(&card.id, &card.title)?;
             check_title(&card.id, &card.placement)?;
         }
+        // A notification category is keyed apart from what draws, so it
+        // may share an id with one, as a page and its category do.
+        let mut categories = std::collections::HashSet::new();
         for category in &self.notifications {
-            id(&category.id)?;
+            if !valid_contribution_id(&category.id) {
+                return Err(format!(
+                    "“{}” is not a contribution id. Use lowercase letters, digits, “-” and “_”.",
+                    category.id
+                ));
+            }
+            if !categories.insert(category.id.as_str()) {
+                return Err(format!("The plugin adds “{}” twice.", category.id));
+            }
             // Labels may run to 128 characters, as buzz-app's.
             if category.label.trim().is_empty() || category.label.encode_utf16().count() > 128 {
                 return Err(format!(
@@ -1182,6 +1193,9 @@ pub enum Node {
         /// Shown on hover, such as an icon button's name.
         #[serde(default)]
         tooltip: Option<String>,
+        /// Takes the full width of its column.
+        #[serde(default)]
+        fill: bool,
     },
     Link {
         label: String,
@@ -1376,6 +1390,9 @@ pub enum Node {
     /// `change` with its `value`.
     Menu {
         id: String,
+        /// A button with this label, in place of a small icon button.
+        #[serde(default)]
+        label: Option<String>,
         /// The button's icon, or `avatar`'s picture.
         #[serde(default)]
         icon: Option<String>,

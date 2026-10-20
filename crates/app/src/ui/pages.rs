@@ -238,7 +238,6 @@ pub fn init(cx: &mut App) {
     );
     super::me::register(cx);
     super::inbox::register(cx);
-    super::reminders::register(cx);
     super::workflows::register(cx);
     super::agents2::register(cx);
     super::mission_control::register(cx);

@@ -12,6 +12,7 @@ with a `buzz-plugin.json` is one plugin; `sdk` is the library they share
 | `todos` | `buzz.todos`: a channel's todo list, kept in its Canvas |
 | `channel-usage` | `buzz.channel-usage`: what agents reported using in a channel |
 | `feedback` | `buzz.feedback`: Send feedback, in the account menu |
+| `reminders` | `buzz.reminders`: Remind me, the Reminders page and due notifications |
 
 ## Working on them
 

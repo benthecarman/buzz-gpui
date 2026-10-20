@@ -165,7 +165,9 @@ Answer with what the plugin adds. The answer is due within 10 seconds.
   `null`), the new `entry` and its `focus`, and waits for `page/settle`
   again.
 - A plugin can add at most 16 panels and 8 pages, and at most 16 of each kind
-  below. Ids are unique across all of them.
+  below. Ids are unique across all of them, except that a notification
+  category may share its id with another contribution, as a page and the
+  category for its notifications do.
 
 The rest of the result can list:
 
@@ -476,7 +478,7 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `card` | `title` (optional), `children`, `padding` (default `md`), `gap` (default `sm`) |
 | `text` | `text`, `style` (`body`, `small`, `label`, `title`, `heading`, `code`), `tone` (`default`, `subtle`, `accent`, `success`, `warning`, `danger`, and `complete` or `progress` for a task's status), `truncate` (one line, cut with an ellipsis) |
 | `markdown` | `text`, rendered as a Buzz message is |
-| `button` | `id`, `label`, `variant` (`prominent`, `subtle`, `ghost`, `outline`, `destructive`), `icon`, `disabled`, `loading`, `size` (`sm` for a small one), `tooltip`. With an empty `label` and an `icon`, an icon button. |
+| `button` | `id`, `label`, `variant` (`prominent`, `subtle`, `ghost`, `outline`, `destructive`), `icon`, `disabled`, `loading`, `size` (`sm` for a small one), `tooltip`, `fill` (takes the full width of its column). With an empty `label` and an `icon`, an icon button. |
 | `link` | `label`, `url`. Opens like a link in a message: a panel that matches it opens; otherwise the browser does. |
 | `input` | `id`, `value`, `placeholder`, `version`, `clearOnSubmit`, `disabled`, `grow` (takes the width left in its row) |
 | `textarea` | `id`, `value`, `placeholder`, `version`, `rows` (lines it shows at least, default 3), `maxRows` (lines it grows to, default 8), `disabled`: text of several lines, kept as an `input`'s is |
@@ -492,7 +494,7 @@ can hold at most 5,000 elements, nested at most 32 deep.
 | `avatar` | `pubkey`, `size` (`small`, `default` or `large`): their profile picture, or their initial |
 | `badge` | `text`, `tone` |
 | `icon` | `name`, `size` (pixels, 8 to 128, default 16), `tone` |
-| `menu` | `id`, `options` (`[{"value","label","icon","iconTone","avatar","disabled"}]`, up to 200; `avatar` is a pubkey whose picture leads the row), `value` (the option shown chosen), `title` (the menu's heading), `icon` and `iconTone`, or `avatar`, for its small button, `tooltip`, `disabled`: a button that opens a menu; choosing sends `change` with the option's `value`. It opens only in views. |
+| `menu` | `id`, `options` (`[{"value","label","icon","iconTone","avatar","disabled"}]`, up to 200; `avatar` is a pubkey whose picture leads the row), `value` (the option shown chosen), `title` (the menu's heading), `label` for a button that says so, or `icon` and `iconTone`, or `avatar`, for a small one, `tooltip`, `disabled`: a button that opens a menu; choosing sends `change` with the option's `value`. It opens only in views. |
 | `select` | `id`, `options` (as a `menu`'s), `value`, `placeholder`, `disabled`, `width` (pixels; it fills its place by default): a field that opens the list; choosing sends `change` with the option's `value`. It opens only in views. |
 | `popover` | `id`, `icon` (default `Info`), `tooltip`, `title`, `description`: a small button that shows a note under it (only in views) |
 | `empty` | `title`, `icon`, `description`: an empty list's placeholder, as Buzz's own (`EmptyState`) |
@@ -687,6 +689,7 @@ A plugin can send requests to Buzz. Use your own ids; Buzz answers each one.
 | `agents/portable` | none | `{"agents","warnings"}`: identities earlier agent systems saved on this device, `{"pubkey","name","picture","relay","source"}`, that are not agents yet |
 | `agents/port` | `pubkey` (from `agents/portable`), `type` | The new agent, keeping the identity's key, name and picture, in the selected community. Needs `manage-agents`. |
 | `agent/createConfig` | `view` (an open `agentCreate`), `config` (an object) | `null`. The new agent will start with this config. |
+| `text/plain` | `text` | The text as a notification shows it: Markdown flattened to at most 200 characters (`plainText`), or `""` |
 | `ui/pickFiles` | `multiple`, `prompt`, `images` (a hint; check what you get) | The paths of the files chosen in the system's file dialog, or `[]` when cancelled |
 | `ui/confirm` | `title`, `description`, `confirm` (default "Confirm"), `cancel` (default "Cancel"), `destructive` | `true` once the user confirms, `false` if they cancel or close it (`AlertDialog`). A second question answers the first `false`. |
 | `ui/openDialog` | `title`, `id` (default `dialog`), `context` (any JSON, up to 16 KiB), `size` (`default`, `wide`, or `expanded`: the window less 24px a side, with the body scrolling, closed only by Escape and its close button) | `{"view"}`. Buzz opens a dialog whose body is a view of `kind` `dialog`; its `view/open` carries `contribution` (the `id`) and `context`. Use it for what a message action or button shows next. One plugin dialog shows at a time. |
@@ -852,7 +855,7 @@ you added from running for that launch. Their switches stay as they were.
 
 Some of Buzz's own plugins are programs on this API too, written in
 TypeScript in [`plugins/`](../plugins): Bestie, Diffs, Todos, Channel
-Usage and Feedback so far. They ship with Buzz
+Usage, Feedback and Reminders so far. They ship with Buzz
 and the Node that runs them, and Settings → Plugins lists them under Built
 in with the rest of Buzz's own. They are trusted: they may use `buzz.` ids,
 are allowed the permissions they ask for, and run in safe mode.

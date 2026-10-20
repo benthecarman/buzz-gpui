@@ -82,6 +82,8 @@ export interface ButtonProps {
   /** `sm` for a small one. With an empty label and an icon, an icon button. */
   size?: "sm";
   tooltip?: string;
+  /** Takes the full width of its column. */
+  fill?: boolean;
 }
 
 export function button(id: string, label: string, props: ButtonProps = {}): Element {
@@ -162,6 +164,8 @@ export interface MenuOption {
 }
 
 export interface MenuProps {
+  /** A button with this label opens it, in place of a small icon button. */
+  label?: string;
   icon?: string;
   iconTone?: Tone;
   /** Shows this person's picture as the button. */

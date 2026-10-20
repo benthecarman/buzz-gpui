@@ -2699,6 +2699,11 @@ impl ExternalPlugins {
             "canvas/available" => later(content::canvas_available(cx)),
             "ui/confirm" => later(dialogs::confirm(params, cx)),
             "ui/pickFiles" => later(dialogs::pick_files(params, cx)),
+            // A message's text as a notification shows it (`plainText`).
+            "text/plain" => Reply::Now(match params.get("text").and_then(Value::as_str) {
+                Some(text) => Ok(json!(crate::notifications::plain_text(text))),
+                None => Err((INVALID_PARAMS, "text is required".to_owned())),
+            }),
             "canvas/history" => later(content::canvas_history(params, cx)),
             "channels/details" => later(content::details(params, cx)),
             "channels/list" => Reply::Now(capabilities::channel_list(cx)),

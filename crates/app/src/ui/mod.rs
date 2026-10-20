@@ -61,7 +61,6 @@ pub mod profile_panel;
 pub mod projects;
 mod rail_menu;
 mod reading;
-mod reminders;
 pub mod renderers;
 mod report;
 mod resize_handle;
