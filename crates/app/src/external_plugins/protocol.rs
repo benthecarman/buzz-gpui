@@ -467,6 +467,10 @@ pub struct PanelDecl {
     /// matching link clicked in a message opens the panel.
     #[serde(default)]
     pub matches: Vec<String>,
+    /// A regular expression a link must also match, for panels that show
+    /// only some links under a prefix.
+    #[serde(default)]
+    pub pattern: Option<String>,
     /// Which panel shows a link several match: the lowest wins.
     #[serde(default, deserialize_with = "order")]
     pub order: i32,
@@ -881,6 +885,14 @@ impl Contributions {
             if !panel.matches.is_empty() {
                 check_prefixes(&panel.id, &panel.matches)?;
             }
+            if let Some(pattern) = &panel.pattern
+                && (pattern.chars().count() > 500 || regex::Regex::new(pattern).is_err())
+            {
+                return Err(format!(
+                    "“{}” needs a pattern of at most 500 characters that compiles.",
+                    panel.id
+                ));
+            }
             if let Some(menu) = &panel.menu {
                 check_title(&panel.id, &menu.label)?;
             }
@@ -1172,6 +1184,9 @@ pub enum Node {
         /// One line, cut with an ellipsis.
         #[serde(default)]
         truncate: bool,
+        /// Shown on hover, such as a time's full date.
+        #[serde(default)]
+        tooltip: Option<String>,
     },
     Markdown {
         text: String,
@@ -1200,6 +1215,9 @@ pub enum Node {
     Link {
         label: String,
         url: String,
+        /// Opens in the browser even when a panel shows the link.
+        #[serde(default)]
+        external: bool,
     },
     /// A text field. The app keeps what is typed, so typing never waits
     /// on the plugin; each change and Enter is sent as an event.
@@ -1367,9 +1385,15 @@ pub enum Node {
         #[serde(default)]
         height: Option<u32>,
     },
-    /// Someone's profile picture, or their initial.
+    /// Someone's profile picture, or their initial; or, with `url`, a
+    /// picture from the web with `name`'s initial behind it.
     Avatar {
+        #[serde(default)]
         pubkey: String,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
         #[serde(default)]
         size: AvatarSize,
     },
@@ -1467,6 +1491,71 @@ pub enum Node {
         max_height: u32,
         #[serde(default = "no_gap")]
         padding: Gap,
+    },
+    /// GitHub-flavoured Markdown, as GitHub shows an issue, pull request or
+    /// comment body: `html` is the HTML GitHub rendered for it, which tells
+    /// its media apart, and links resolve against `base`.
+    Document {
+        text: String,
+        #[serde(default)]
+        html: Option<String>,
+        #[serde(default)]
+        base: Option<String>,
+    },
+    /// A message that opens to show its body: a `marker` in the gutter, a
+    /// `header`, a one-line `preview` while closed and `children` while
+    /// open. With `fit`, it does not open when that text fits the header on
+    /// one line, and shows `children` in place of the preview.
+    Collapsible {
+        id: String,
+        #[serde(default)]
+        open: bool,
+        #[serde(default)]
+        marker: Vec<Node>,
+        #[serde(default)]
+        marker_tooltip: Option<String>,
+        #[serde(default)]
+        header: Vec<Node>,
+        #[serde(default)]
+        preview: Option<String>,
+        #[serde(default)]
+        fit: Option<String>,
+        #[serde(default = "yes")]
+        expandable: bool,
+        #[serde(default)]
+        children: Vec<Node>,
+        /// Under the header while closed, such as image thumbnails.
+        #[serde(default)]
+        below: Vec<Node>,
+        /// At the header's end, shown on hover.
+        #[serde(default)]
+        actions: Vec<Node>,
+        /// Under the body while open.
+        #[serde(default)]
+        footer: Vec<Node>,
+    },
+    /// Square image thumbnails, as many as fit the width, the last
+    /// counting the rest; each opens the media viewer.
+    Thumbnails {
+        images: Vec<String>,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// Tabs over a panel's content; choosing one sends `change` with its
+    /// `value`.
+    Tabs {
+        id: String,
+        #[serde(default)]
+        value: Option<String>,
+        options: Vec<ChoiceOption>,
+    },
+    /// A ring of coloured arcs, one per segment, from the top: a summary
+    /// such as checks by outcome.
+    Ring {
+        segments: Vec<RingSegment>,
+        /// Pixels, 16 to 128 (default 32).
+        #[serde(default)]
+        size: Option<u32>,
     },
     /// An element this app does not know; it draws nothing.
     #[serde(other)]
@@ -1576,6 +1665,8 @@ pub enum TextStyle {
     #[default]
     Body,
     Small,
+    /// Body text a size up, as a GitHub title.
+    Large,
     Label,
     Title,
     Heading,
@@ -1607,6 +1698,13 @@ pub enum ButtonStyle {
     Ghost,
     Outline,
     Destructive,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct RingSegment {
+    pub value: f32,
+    #[serde(default)]
+    pub tone: Tone,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -1650,14 +1748,27 @@ impl Node {
         Ok(node)
     }
 
-    fn children(&self) -> &[Node] {
+    /// Every element directly inside this one.
+    pub fn children(&self) -> Vec<&Node> {
         match self {
             Node::Column { children, .. }
             | Node::Row { children, .. }
             | Node::Card { children, .. }
             | Node::Header { children, .. }
-            | Node::Scroll { children, .. } => children,
-            _ => &[],
+            | Node::Scroll { children, .. } => children.iter().collect(),
+            Node::Collapsible {
+                marker,
+                header,
+                children,
+                below,
+                actions,
+                footer,
+                ..
+            } => [marker, header, children, below, actions, footer]
+                .into_iter()
+                .flatten()
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -1674,7 +1785,7 @@ impl Node {
             ));
         }
         self.children()
-            .iter()
+            .into_iter()
             .try_for_each(|child| child.check(depth + 1, count))
     }
 }

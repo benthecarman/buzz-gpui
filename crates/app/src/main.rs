@@ -130,7 +130,6 @@ fn main() {
         ui::pages::init(cx);
         ui::agent_activity::init(cx);
         ui::profile_panel::init(cx);
-        ui::github::init(cx);
         ui::projects::init(cx);
         ui::moderation::init(cx);
         ui::settings::messages::init(cx);

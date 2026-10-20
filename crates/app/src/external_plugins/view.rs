@@ -57,6 +57,8 @@ pub struct ExternalView {
     /// A `workspace` page: no padding around the plugin's tree.
     edge_to_edge: bool,
     tree: Option<Node>,
+    /// The cached content of a framed view.
+    cached: Option<Entity<Cached>>,
     /// The last tree the plugin sent could not be drawn.
     error: Option<String>,
     fields: HashMap<String, Field>,
@@ -595,6 +597,7 @@ impl ExternalView {
                 back: Vec::new(),
                 edge_to_edge: false,
                 tree: None,
+                cached: None,
                 error: None,
                 fields: HashMap::new(),
                 embeds: HashMap::new(),
@@ -1287,6 +1290,47 @@ impl ExternalView {
 
 impl Render for ExternalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A page, panel or Settings section fills its place, so it can be
+        // drawn from the last frame until it changes: a long plugin view is
+        // not laid out again for every caret blink elsewhere.
+        if matches!(self.kind, "panel" | "page" | "settings") {
+            let weak = cx.entity().downgrade();
+            let cached = self
+                .cached
+                .get_or_insert_with(|| {
+                    let view = cx.entity();
+                    cx.new(|cx| {
+                        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+                        Cached { view: weak }
+                    })
+                })
+                .clone();
+            return div()
+                .size_full()
+                .child(cached.cached(StyleRefinement::default().size_full()))
+                .into_any_element();
+        }
+        self.content(window, cx)
+    }
+}
+
+/// A framed view's content, drawn from the last frame until the view
+/// changes.
+struct Cached {
+    view: WeakEntity<ExternalView>,
+}
+
+impl Render for Cached {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.view.upgrade() {
+            Some(view) => view.update(cx, |view, cx| view.content(window, cx)),
+            None => div().into_any_element(),
+        }
+    }
+}
+
+impl ExternalView {
+    fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let c = *cx.colors();
         let status = ExternalPlugins::status(&self.plugin, cx);
         // Panels, pages and Settings sections fill their place; agent tabs,
@@ -1380,6 +1424,7 @@ impl Render for ExternalView {
             })
             .text_color(c.text_standard)
             .child(body)
+            .into_any_element()
     }
 }
 

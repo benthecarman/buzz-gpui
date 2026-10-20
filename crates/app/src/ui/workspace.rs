@@ -555,7 +555,7 @@ impl Workspace {
         if let Some(root) = thread::dev_open_thread() {
             self.open_thread(root, root, false, window, cx);
         }
-        if let Some(link) = crate::ui::github::dev_open_link() {
+        if let Some(link) = dev_open_link() {
             self.route_link_to_tab(&link, window, cx);
         }
         cx.notify();
@@ -2075,4 +2075,15 @@ impl Workspace {
             self.open_profile(pubkey, window, cx);
         }
     }
+}
+
+/// Development only: `BUZZ_DEV_OPEN_LINK=<url>` opens that link's panel
+/// beside the first channel the app selects, so headless runs can
+/// screenshot it.
+fn dev_open_link() -> Option<String> {
+    static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if TAKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    std::env::var("BUZZ_DEV_OPEN_LINK").ok()
 }

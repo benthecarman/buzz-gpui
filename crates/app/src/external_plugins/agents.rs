@@ -508,6 +508,7 @@ fn summary_of(value: Value) -> Option<super::protocol::Node> {
         style: Default::default(),
         tone: Default::default(),
         truncate: false,
+        tooltip: None,
     })
 }
 

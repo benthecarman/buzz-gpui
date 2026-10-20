@@ -10,7 +10,8 @@
     "todos",
     "channel-usage",
     "feedback",
-    "reminders"
+    "reminders",
+    "github"
   ],
   "scripts": {
     "build": "node build.mjs",

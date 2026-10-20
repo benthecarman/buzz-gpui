@@ -25,8 +25,8 @@ pub mod composer_tools;
 pub(crate) mod emoji_picker;
 mod form_fields;
 
+pub mod document;
 mod gif_picker;
-pub mod github;
 pub mod identity;
 mod inbox;
 mod jump;

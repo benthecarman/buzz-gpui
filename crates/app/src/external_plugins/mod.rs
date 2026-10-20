@@ -1525,6 +1525,10 @@ impl ExternalPlugins {
             let key = intern(format!("{id}/{}", panel.id));
             let title = intern(panel.title.clone());
             let prefixes = panel.matches.clone();
+            let pattern = panel
+                .pattern
+                .as_deref()
+                .and_then(|pattern| regex::Regex::new(pattern).ok());
             let plugin = id.to_owned();
             let contribution = panel.id.clone();
             let edge_to_edge = panel.layout == protocol::PageLayout::Workspace;
@@ -1534,10 +1538,19 @@ impl ExternalPlugins {
                     order: panel.order,
                     title,
                     icon: icon(panel.icon.as_deref()),
+                    // Prefixes, a pattern, or both.
                     matches: channel_panels::matches(move |target| {
-                        prefixes
-                            .iter()
-                            .any(|prefix| target.starts_with(prefix.as_str()))
+                        let prefixed = if prefixes.is_empty() {
+                            pattern.is_some()
+                        } else {
+                            prefixes
+                                .iter()
+                                .any(|prefix| target.starts_with(prefix.as_str()))
+                        };
+                        prefixed
+                            && pattern
+                                .as_ref()
+                                .is_none_or(|pattern| pattern.is_match(target))
                     }),
                     launcher: panel.launcher.as_ref().map(|launcher| Launcher {
                         icon: icon(panel.icon.as_deref()),
@@ -2699,6 +2712,43 @@ impl ExternalPlugins {
             "canvas/available" => later(content::canvas_available(cx)),
             "ui/confirm" => later(dialogs::confirm(params, cx)),
             "ui/pickFiles" => later(dialogs::pick_files(params, cx)),
+            // A one-line summary of a `document` (`bodyPreview`,
+            // `isTextBody`), by the rules it is drawn with.
+            "document/preview" => Reply::Now(match params.get("text").and_then(Value::as_str) {
+                Some(text) => {
+                    let html = params.get("html").and_then(Value::as_str);
+                    let base = params
+                        .get("base")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    use crate::ui::document::body::{self, Block, Body};
+                    let preview = crate::ui::document::preview::preview(text, html, base);
+                    // The body as one line of text, when it is a single
+                    // short block, to measure.
+                    let line = match body::prepare(text, html, base) {
+                        Body::Rich { blocks, .. } => match blocks.as_slice() {
+                            [Block::Paragraph(inlines)] => Some(body::plain_text(inlines)),
+                            _ => None,
+                        },
+                        Body::Plain(_) => None,
+                    }
+                    .filter(|line| !line.contains('\n'));
+                    Ok(json!({
+                        "text": preview.text,
+                        "images": preview.images,
+                        "textOnly": crate::ui::document::preview::is_text_body(text, html, base),
+                        "line": line,
+                    }))
+                }
+                None => Err((INVALID_PARAMS, "text is required".to_owned())),
+            }),
+            "clipboard/write" => Reply::Now(match params.get("text").and_then(Value::as_str) {
+                Some(text) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+                    Ok(Value::Null)
+                }
+                None => Err((INVALID_PARAMS, "text is required".to_owned())),
+            }),
             // A message's text as a notification shows it (`plainText`).
             "text/plain" => Reply::Now(match params.get("text").and_then(Value::as_str) {
                 Some(text) => Ok(json!(crate::notifications::plain_text(text))),

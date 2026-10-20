@@ -18,6 +18,7 @@ use buzz_ui::{
     tokens::{radius, space},
 };
 use gpui_kit::component::input::{InputState, TextareaState};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -78,11 +79,9 @@ pub fn embeds(node: &Node) -> Vec<EmbedNode<'_>> {
     let mut stack = vec![node];
     while let Some(node) = stack.pop() {
         match node {
-            Node::Column { children, .. }
-            | Node::Row { children, .. }
-            | Node::Card { children, .. }
-            | Node::Header { children, .. }
-            | Node::Scroll { children, .. } => stack.extend(children.iter().rev()),
+            container if !container.children().is_empty() => {
+                stack.extend(container.children().into_iter().rev())
+            }
             Node::Composer {
                 id,
                 channel,
@@ -177,11 +176,9 @@ pub fn inputs(node: &Node) -> Vec<InputNode<'_>> {
     let mut stack = vec![node];
     while let Some(node) = stack.pop() {
         match node {
-            Node::Column { children, .. }
-            | Node::Row { children, .. }
-            | Node::Card { children, .. }
-            | Node::Header { children, .. }
-            | Node::Scroll { children, .. } => stack.extend(children.iter().rev()),
+            container if !container.children().is_empty() => {
+                stack.extend(container.children().into_iter().rev())
+            }
             Node::Input {
                 id,
                 value,
@@ -335,6 +332,80 @@ fn is_open(id: &SharedString) -> bool {
 fn set_open(id: Option<SharedString>, cx: &mut App) {
     OPEN.with_borrow_mut(|open| *open = id);
     cx.refresh_windows();
+}
+
+/// The community's media, for drawing pictures from the web.
+fn media_of(draw: &Draw, cx: &App) -> Option<buzz_relay_client::Media> {
+    draw.community
+        .clone()
+        .or_else(|| crate::community::AppState::current(cx))
+        .map(|community| community.read(cx).session.media().clone())
+}
+
+thread_local! {
+    /// Prepared documents by their text, so a redraw does not parse again.
+    static DOCUMENTS: std::cell::RefCell<HashMap<u64, Rc<crate::ui::document::body::Body>>> =
+        Default::default();
+    /// Measured widths of collapsibles and thumbnail rows, by element id.
+    static WIDTHS: std::cell::RefCell<HashMap<SharedString, f32>> = Default::default();
+}
+
+fn document(text: &str, html: Option<&str>, base: &str) -> Rc<crate::ui::document::body::Body> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    (text, html, base).hash(&mut hasher);
+    let key = hasher.finish();
+    DOCUMENTS.with_borrow_mut(|documents| {
+        if documents.len() > 512 && !documents.contains_key(&key) {
+            documents.clear();
+        }
+        documents
+            .entry(key)
+            .or_insert_with(|| Rc::new(crate::ui::document::body::prepare(text, html, base)))
+            .clone()
+    })
+}
+
+fn width_of(key: &SharedString) -> f32 {
+    WIDTHS.with_borrow(|widths| widths.get(key).copied().unwrap_or(0.))
+}
+
+/// Keeps `key`'s laid-out width, drawing again when it changed.
+fn remember_width(key: &SharedString, width: Pixels, cx: &mut App) {
+    let width = f32::from(width);
+    let changed = WIDTHS.with_borrow_mut(|widths| {
+        if widths.len() > 2048 && !widths.contains_key(key) {
+            widths.clear();
+        }
+        let old = widths.insert(key.clone(), width);
+        old.is_none_or(|old| (old - width).abs() > 0.5)
+    });
+    if changed {
+        cx.refresh_windows();
+    }
+}
+
+/// Whether `text` fits `available` pixels on one line in the small body
+/// face.
+fn fits_one_line(text: &str, available: f32, window: &Window) -> bool {
+    if available <= 0. || text.contains('\n') {
+        return false;
+    }
+    let size = rems(0.875).to_pixels(window.rem_size());
+    let mut font = gpui_kit::font(buzz_ui::tokens::font::SANS);
+    font.fallbacks = Some(buzz_ui::fonts::fallbacks());
+    let run = TextRun {
+        len: text.len(),
+        font,
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window
+        .text_system()
+        .shape_line(text.to_string().into(), size, &[run], None);
+    f32::from(line.width) <= available
 }
 
 /// Someone's picture, or their initial, from the community's profiles.
@@ -521,6 +592,7 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
             style,
             tone,
             truncate,
+            tooltip,
         } => {
             let text = div().child(text.clone());
             let text = if *truncate {
@@ -531,16 +603,23 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
             let text = match style {
                 TextStyle::Body => text.text_body(),
                 TextStyle::Small => text.text_body_sm(),
+                TextStyle::Large => text.text_body_lg(),
                 TextStyle::Label => text.text_label(),
                 TextStyle::Title => text.text_title(),
                 TextStyle::Heading => text.text_heading(),
                 TextStyle::Code => text.text_mono(),
             };
-            match tone_color(*tone, &c) {
+            let text = match tone_color(*tone, &c) {
                 Some(color) => text.text_color(color),
                 None => text,
+            };
+            match tooltip {
+                Some(tooltip) => text
+                    .id(element_id("text"))
+                    .tooltip(buzz_ui::Tooltip::text(tooltip.clone()))
+                    .into_any_element(),
+                None => text.into_any_element(),
             }
-            .into_any_element()
         }
         Node::Markdown { text } => match &draw.community {
             Some(community) => markdown::text(text, draw.place, community.read(cx), cx),
@@ -621,8 +700,13 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 .child(button.on_click(move |_, _, cx| send(&id, "click", None, cx)))
                 .into_any_element()
         }
-        Node::Link { label, url } => {
+        Node::Link {
+            label,
+            url,
+            external,
+        } => {
             let url = url.clone();
+            let external = *external;
             div()
                 .id(element_id("link"))
                 .text_body()
@@ -633,6 +717,10 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 .on_click(move |event, window, cx| {
                     if url.starts_with("buzz://") {
                         navigation::open_url(&url, window, cx);
+                    } else if external
+                        && (url.starts_with("https://") || url.starts_with("http://"))
+                    {
+                        cx.open_url(&url);
                     } else if url.starts_with("https://") || url.starts_with("http://") {
                         navigation::open_web_link(&url, event.modifiers(), window, cx);
                     }
@@ -817,17 +905,36 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 .into_any_element(),
             None => div().into_any_element(),
         },
-        Node::Avatar { pubkey, size } => avatar_of(
+        Node::Avatar {
             pubkey,
-            match size {
+            url,
+            name,
+            size,
+        } => {
+            let size = match size {
                 AvatarSize::Small => buzz_ui::AvatarSize::Small,
                 AvatarSize::Default => buzz_ui::AvatarSize::Default,
                 AvatarSize::Large => buzz_ui::AvatarSize::Large,
-            },
-            draw,
-            cx,
-        )
-        .into_any_element(),
+            };
+            match url {
+                // A picture from the web, such as a GitHub user's.
+                Some(url) if url.starts_with("https://") => {
+                    let mut avatar =
+                        Avatar::new(name.clone().unwrap_or_else(|| "?".to_owned())).size(size);
+                    if let Some(media) = media_of(draw, cx) {
+                        avatar = avatar.image(crate::ui::media::image(url, &media));
+                    }
+                    avatar.into_any_element()
+                }
+                // A name without a picture shows its initial.
+                _ if pubkey.is_empty() => {
+                    Avatar::new(name.clone().unwrap_or_else(|| "?".to_owned()))
+                        .size(size)
+                        .into_any_element()
+                }
+                _ => avatar_of(pubkey, size, draw, cx).into_any_element(),
+            }
+        }
         Node::Switch { id, checked, label } => {
             let send = draw.send.clone();
             let id = id.clone();
@@ -1062,6 +1169,354 @@ pub fn node(node: &Node, path: &str, draw: &Draw, cx: &App) -> AnyElement {
                 ));
             }
             place.into_any_element()
+        }
+        Node::Document { text, html, base } => {
+            let Some(media) = media_of(draw, cx) else {
+                return div().text_body_sm().child(text.clone()).into_any_element();
+            };
+            let body = document(text, html.as_deref(), base.as_deref().unwrap_or_default());
+            let drawn = crate::ui::document::view::draw(
+                &body,
+                &crate::ui::document::view::Context {
+                    id: element_id("document"),
+                    media,
+                },
+                cx,
+            );
+            div()
+                .w_full()
+                .min_w_0()
+                .pt(px(drawn.top))
+                .pb(px(drawn.bottom))
+                .child(drawn.element)
+                .into_any_element()
+        }
+        Node::Collapsible {
+            id,
+            open,
+            marker,
+            marker_tooltip,
+            header,
+            preview,
+            fit,
+            expandable,
+            children: body,
+            below,
+            actions,
+            footer,
+        } => {
+            let key = element_id("collapsible");
+            let width = width_of(&key);
+            // The header's text width, less the room for the caret.
+            let fits = fit.as_deref().is_some_and(|text| {
+                draw.window
+                    .is_some_and(|window| fits_one_line(text, width - 24., window))
+            });
+            let expandable = *expandable && !(fit.is_some() && fits);
+            let open = expandable && *open;
+            let toggle = {
+                let send = draw.send.clone();
+                let id = id.clone();
+                Rc::new(move |cx: &mut App| send(&id, "toggle", Some(json!(!open)), cx))
+            };
+            let group: SharedString = format!("{key}-group").into();
+            let mut marker_place = div()
+                .id(SharedString::from(format!("{key}-marker")))
+                .flex()
+                .flex_none()
+                .justify_center()
+                .w(px(32.))
+                .children(children(marker, &format!("{path}-m"), draw, cx));
+            if expandable {
+                let toggle = toggle.clone();
+                marker_place = marker_place
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| toggle(cx));
+                if let Some(tooltip) = marker_tooltip {
+                    marker_place = marker_place.tooltip(buzz_ui::Tooltip::text(tooltip.clone()));
+                }
+            }
+            let has_body = !body.is_empty();
+            // Room at the end for the caret and the actions.
+            let mut head = div()
+                .id(SharedString::from(format!("{key}-header")))
+                .relative()
+                .min_w_0()
+                .child(div().pr(px(24.)).children(children(
+                    header,
+                    &format!("{path}-h"),
+                    draw,
+                    cx,
+                )));
+            if expandable && !open {
+                head = head.child(
+                    div()
+                        .pt(px(4.))
+                        .pr(px(24.))
+                        .text_body_sm()
+                        .truncate()
+                        .child(preview.clone().unwrap_or_default()),
+                );
+            }
+            if !expandable && has_body {
+                head = head.child(
+                    div()
+                        .pt(px(4.))
+                        .pr(px(24.))
+                        .text_body_sm()
+                        .children(children(body, &format!("{path}-b"), draw, cx)),
+                );
+            }
+            if expandable {
+                let toggle = toggle.clone();
+                head = head
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| toggle(cx))
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(4.))
+                            .right(px(3.))
+                            .text_color(c.text_subtle)
+                            .child(
+                                Icon::new(if open {
+                                    IconName::CaretUp
+                                } else {
+                                    IconName::CaretDown
+                                })
+                                .size(14.),
+                            ),
+                    );
+            }
+            if !actions.is_empty() {
+                let at_top = !expandable || !has_body;
+                let place = div().absolute().right_0();
+                let place = if at_top {
+                    place.top_0()
+                } else {
+                    place.bottom_0()
+                };
+                head = head.child(
+                    place
+                        .opacity(0.)
+                        .group_hover(group.clone(), |style| style.opacity(1.))
+                        .flex()
+                        .gap(space::S1)
+                        .children(children(actions, &format!("{path}-a"), draw, cx)),
+                );
+            }
+            let measure_key = key.clone();
+            let content = div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    canvas(
+                        move |bounds, _, cx| remember_width(&measure_key, bounds.size.width, cx),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h(px(1.)),
+                )
+                .child(head)
+                .when(!open && !below.is_empty(), |content| {
+                    content.child(div().mt(px(8.)).children(children(
+                        below,
+                        &format!("{path}-x"),
+                        draw,
+                        cx,
+                    )))
+                })
+                .when(open, |content| {
+                    content
+                        .child(
+                            div()
+                                .pt(px(4.))
+                                .pr(px(24.))
+                                .text_body_sm()
+                                .children(children(body, &format!("{path}-b"), draw, cx)),
+                        )
+                        .when(!footer.is_empty(), |content| {
+                            content.child(div().mt(px(8.)).flex().children(children(
+                                footer,
+                                &format!("{path}-f"),
+                                draw,
+                                cx,
+                            )))
+                        })
+                });
+            div()
+                .id(SharedString::from(format!("{key}-message")))
+                .group(group)
+                .flex()
+                .gap(px(12.))
+                .py(px(8.))
+                .map(|row| {
+                    if has_body {
+                        row.items_start()
+                    } else {
+                        row.items_center()
+                    }
+                })
+                .child(marker_place)
+                .child(content)
+                .into_any_element()
+        }
+        Node::Thumbnails { images, .. } => {
+            let Some(media) = media_of(draw, cx) else {
+                return div().into_any_element();
+            };
+            let key = element_id("thumbnails");
+            let available = width_of(&key).max(40.);
+            let capacity = (((available + 4.) / 44.).floor() as usize).max(1);
+            let visible = images.len().min(capacity);
+            let hidden = images.len() - visible;
+            let measure_key = key.clone();
+            div()
+                .relative()
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .child(
+                    canvas(
+                        move |bounds, _, cx| remember_width(&measure_key, bounds.size.width, cx),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h(px(1.)),
+                )
+                .children(images.iter().take(visible).enumerate().map(|(index, src)| {
+                    let attachment = buzz_relay_client::fold::Attachment {
+                        url: src.clone(),
+                        kind: buzz_relay_client::fold::AttachmentKind::Image,
+                        mime: None,
+                        size: None,
+                        name: None,
+                        duration: None,
+                        waveform: None,
+                        voice_note: false,
+                        dimensions: None,
+                        blurhash: None,
+                        preview_url: None,
+                        insecure: false,
+                    };
+                    let opener = media.clone();
+                    div()
+                        .id(SharedString::from(format!("{key}-{index}")))
+                        .relative()
+                        .flex_none()
+                        .size(px(40.))
+                        .rounded(px(12.))
+                        .overflow_hidden()
+                        .bg(c.surface_inset)
+                        .cursor(CursorStyle::PointingHand)
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            crate::ui::media::open_media(attachment.clone(), &opener, window, cx)
+                        })
+                        .child(crate::ui::media::thumbnail(src, None, &media))
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(12.))
+                                .border_1()
+                                .border_color(c.border_standard),
+                        )
+                        .when(index + 1 == visible && hidden > 0, |tile| {
+                            tile.child(
+                                div()
+                                    .absolute()
+                                    .right_0()
+                                    .bottom_0()
+                                    .px(px(4.))
+                                    .py(px(2.))
+                                    .rounded_tl(px(12.))
+                                    .bg(c.surface_panel)
+                                    .text_caption()
+                                    .text_color(c.text_standard)
+                                    .child(format!("+{hidden}")),
+                            )
+                        })
+                }))
+                .into_any_element()
+        }
+        Node::Tabs { id, value, options } => {
+            let mut tabs = buzz_ui::Tabs::new(buzz_ui::TabVariant::Panel);
+            for (index, option) in options.iter().take(20).enumerate() {
+                let send = draw.send.clone();
+                let (id, chosen) = (id.clone(), option.value.clone());
+                tabs = tabs.tab(
+                    buzz_ui::Tab::new(
+                        SharedString::from(format!("{}-{index}", element_id("tabs"))),
+                        option.label.clone(),
+                    )
+                    .selected(value.as_ref() == Some(&option.value))
+                    .on_click(move |_, _, cx| send(&id, "change", Some(json!(chosen)), cx)),
+                );
+            }
+            tabs.into_any_element()
+        }
+        Node::Ring { segments, size } => {
+            let total: f32 = segments.iter().map(|segment| segment.value.max(0.)).sum();
+            let arcs: Vec<(f32, Hsla)> = segments
+                .iter()
+                .filter(|segment| segment.value > 0. && total > 0.)
+                .map(|segment| {
+                    let color = match segment.tone {
+                        Tone::Danger => c.text_danger,
+                        Tone::Warning => c.text_warning,
+                        Tone::Success | Tone::Complete => c.text_success,
+                        Tone::Accent | Tone::Progress => c.text_accent,
+                        Tone::Default | Tone::Subtle => c.border_standard,
+                    };
+                    (segment.value / total, color)
+                })
+                .collect();
+            let size = size.unwrap_or(32).clamp(16, 128) as f32;
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let scale = f32::from(bounds.size.width) / 32.;
+                    let center = bounds.center();
+                    let radius = 13. * scale;
+                    let mut start = 0f32;
+                    for (fraction, color) in &arcs {
+                        let sweep = fraction * std::f32::consts::TAU;
+                        let steps = ((sweep / 0.05).ceil() as usize).max(2);
+                        let mut path = PathBuilder::stroke(px(3. * scale));
+                        for step in 0..=steps {
+                            let angle = start + sweep * step as f32 / steps as f32
+                                - std::f32::consts::FRAC_PI_2;
+                            let at = point(
+                                center.x + px(radius * angle.cos()),
+                                center.y + px(radius * angle.sin()),
+                            );
+                            if step == 0 {
+                                path.move_to(at);
+                            } else {
+                                path.line_to(at);
+                            }
+                        }
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, *color);
+                        }
+                        start += sweep;
+                    }
+                },
+            )
+            .flex_none()
+            .size(px(size))
+            .into_any_element()
         }
         Node::Empty {
             icon,

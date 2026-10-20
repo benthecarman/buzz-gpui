@@ -6,7 +6,7 @@ export type Gap = "none" | "sm" | "md" | "lg";
 export type Tone = "default" | "subtle" | "accent" | "success" | "warning" | "danger" | "complete" | "progress";
 export type Justify = "start" | "center" | "end" | "between";
 export type Align = "start" | "center" | "end" | "stretch";
-export type TextStyle = "body" | "small" | "label" | "title" | "heading" | "code";
+export type TextStyle = "body" | "small" | "large" | "label" | "title" | "heading" | "code";
 export type ButtonVariant = "prominent" | "subtle" | "ghost" | "outline" | "destructive";
 export type Background = "inset" | "panel";
 
@@ -66,7 +66,10 @@ export function header(title: string, props: { icon?: string; subtitle?: string;
   return element("header", { title, icon: props.icon, subtitle: props.subtitle, children: kids(props.actions ?? []) });
 }
 
-export function text(value: string, props: { style?: TextStyle; tone?: Tone; truncate?: boolean } = {}): Element {
+export function text(
+  value: string,
+  props: { style?: TextStyle; tone?: Tone; truncate?: boolean; tooltip?: string } = {},
+): Element {
   return element("text", { text: value, ...props });
 }
 
@@ -90,8 +93,9 @@ export function button(id: string, label: string, props: ButtonProps = {}): Elem
   return element("button", { id, label, ...props });
 }
 
-export function link(label: string, url: string): Element {
-  return element("link", { label, url });
+/** Opens like a link in a message, or with `external`, always in the browser. */
+export function link(label: string, url: string, props: { external?: boolean } = {}): Element {
+  return element("link", { label, url, ...props });
 }
 
 export interface InputProps {
@@ -141,7 +145,11 @@ export function image(url: string, props: { width?: number; height?: number; alt
   return element("image", { url, ...props });
 }
 
-export function avatar(pubkey: string, props: { size?: "small" | "default" | "large" } = {}): Element {
+/** Someone's picture by `pubkey`, or with `url`, a picture from the web with `name`'s initial. */
+export function avatar(
+  pubkey: string,
+  props: { size?: "small" | "default" | "large"; url?: string; name?: string } = {},
+): Element {
   return element("avatar", { pubkey, ...props });
 }
 
@@ -188,6 +196,58 @@ export function select(
   props: { value?: string; placeholder?: string; disabled?: boolean; width?: number } = {},
 ): Element {
   return element("select", { id, options, ...props });
+}
+
+export interface CollapsibleProps {
+  open?: boolean;
+  marker?: Child[];
+  markerTooltip?: string;
+  header?: Child[];
+  /** One line shown while closed. */
+  preview?: string;
+  /** When this text fits the header on one line, it does not open and shows `children` in place of the preview. */
+  fit?: string;
+  expandable?: boolean;
+  below?: Child[];
+  actions?: Child[];
+  footer?: Child[];
+}
+
+/** A message that opens to show `children`; clicking it sends `toggle`. */
+export function collapsible(id: string, children: Child[], props: CollapsibleProps = {}): Element {
+  return element("collapsible", {
+    id,
+    open: props.open,
+    marker: props.marker && kids(props.marker),
+    markerTooltip: props.markerTooltip,
+    header: props.header && kids(props.header),
+    preview: props.preview,
+    fit: props.fit,
+    expandable: props.expandable,
+    children: kids(children),
+    below: props.below && kids(props.below),
+    actions: props.actions && kids(props.actions),
+    footer: props.footer && kids(props.footer),
+  });
+}
+
+/** GitHub-flavoured Markdown, as GitHub shows a body; `html` is what GitHub rendered for it, `base` what links resolve against. */
+export function document(value: string, props: { html?: string; base?: string } = {}): Element {
+  return element("document", { text: value, ...props });
+}
+
+/** As many square thumbnails as fit, the last counting the rest. */
+export function thumbnails(images: string[], props: { label?: string } = {}): Element {
+  return element("thumbnails", { images, ...props });
+}
+
+export function tabs(id: string, options: { value: string; label: string }[], value?: string): Element {
+  return element("tabs", { id, options, value });
+}
+
+/** Coloured arcs, one per segment. */
+export function ring(segments: { value: number; tone?: Tone }[], props: { size?: number } = {}): Element {
+  return element("ring", { segments, ...props });
 }
 
 /** A small button that shows a note under it. */

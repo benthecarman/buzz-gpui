@@ -137,6 +137,7 @@ fn trees_parse_with_defaults_and_unknown_elements() {
             style: TextStyle::Heading,
             tone: Tone::Default,
             truncate: false,
+            tooltip: None,
         }
     );
     assert!(matches!(
