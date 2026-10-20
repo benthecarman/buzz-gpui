@@ -55,19 +55,22 @@ pub struct Connection {
 }
 
 /// The Node that runs `node` commands: `BUZZ_NODE`, else the one
-/// installed beside the app (`../lib/buzz-gpui/node/bin/node`). `None`
+/// installed beside the app (`../lib/buzz-gpui/node/bin/node` on Linux
+/// and Windows, `../Resources/node/bin/node` in a macOS app). `None`
 /// finds it on `PATH`.
 fn bundled_node() -> Option<std::path::PathBuf> {
     if let Some(node) = std::env::var_os("BUZZ_NODE") {
         return Some(node.into());
     }
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
-    let node = exe
-        .parent()?
-        .parent()?
-        .join("lib/buzz-gpui/node/bin")
-        .join(if cfg!(windows) { "node.exe" } else { "node" });
-    node.is_file().then_some(node)
+    let root = exe.parent()?.parent()?;
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    [
+        root.join("lib/buzz-gpui/node/bin").join(name),
+        root.join("Resources/node/bin").join(name),
+    ]
+    .into_iter()
+    .find(|node| node.is_file())
 }
 
 impl Connection {

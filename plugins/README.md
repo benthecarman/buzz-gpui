@@ -34,8 +34,11 @@ A debug build of the app loads the plugins from this folder and restarts
 one when its files change, so rebuilding is enough to see a change. Set
 `BUZZ_BUNDLED_PLUGINS` to load them from another folder, and `BUZZ_NODE` to
 choose the `node` that runs them. An installed app loads them from
-`share/buzz-gpui/plugins` and runs them with its own Node from
-`lib/buzz-gpui/node`.
+`share/buzz-gpui/plugins` beside its `bin` folder and runs them with its
+own Node from `lib/buzz-gpui/node` (`Contents/Resources/plugins` and
+`Contents/Resources/node` in the macOS app). The packaging scripts pin
+that Node, check its checksum, build the plugins and run
+`scripts/check-plugins.mjs` to see each one start.
 
 They are Buzz's own: they may use `buzz.` ids, get the permissions their
 manifest asks for, and are switched on and off by their Built in row in

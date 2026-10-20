@@ -304,10 +304,11 @@ fn read_bundled_manifest(folder: &Path) -> Result<Manifest, String> {
 }
 
 /// Where Buzz's own plugin programs are, and whether to watch them:
-/// `BUZZ_BUNDLED_PLUGINS` (watched, for working on them), else
-/// `../share/buzz-gpui/plugins` beside the executable (an installed
-/// app), else, in a debug build, the checkout's `plugins` folder
-/// (watched). Each holds one folder per plugin.
+/// `BUZZ_BUNDLED_PLUGINS` (watched, for working on them), else beside the
+/// installed executable (`../share/buzz-gpui/plugins` on Linux and
+/// Windows, `../Resources/plugins` in a macOS app), else, in a debug
+/// build, the checkout's `plugins` folder (watched). Each holds one folder
+/// per plugin.
 pub fn bundled_plugins_dir() -> Option<(PathBuf, bool)> {
     if let Some(dir) = std::env::var_os("BUZZ_BUNDLED_PLUGINS") {
         return Some((PathBuf::from(dir), true));
@@ -315,8 +316,15 @@ pub fn bundled_plugins_dir() -> Option<(PathBuf, bool)> {
     let installed = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.canonicalize().ok())
-        .and_then(|exe| Some(exe.parent()?.parent()?.join("share/buzz-gpui/plugins")))
-        .filter(|dir| dir.is_dir());
+        .and_then(|exe| {
+            let root = exe.parent()?.parent()?;
+            [
+                root.join("share/buzz-gpui/plugins"),
+                root.join("Resources/plugins"),
+            ]
+            .into_iter()
+            .find(|dir| dir.is_dir())
+        });
     if let Some(dir) = installed {
         return Some((dir, false));
     }
