@@ -36,6 +36,8 @@ const MAX_READS: usize = 4;
 const MAX_WIDTH: f32 = 432.;
 const IMAGE_WIDTH: f32 = 400.;
 const THUMBNAIL: f32 = 80.;
+/// Images wider or taller than this are not decoded.
+const MAX_PIXELS_SIDE: u32 = 8192;
 
 /// What a page says about itself.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -260,15 +262,49 @@ async fn load_page(http: reqwest::Client, url: String) -> Result<Page, String> {
     Ok(page)
 }
 
-async fn load_image(http: reqwest::Client, url: String) -> Result<Arc<Image>, String> {
+async fn load_image(http: reqwest::Client, url: String) -> Result<Vec<u8>, String> {
     let (_, bytes) = get(&http, &url, "image/*", MAX_IMAGE + 1, |_| false).await?;
     if bytes.len() > MAX_IMAGE {
         return Err("image too large".into());
     }
     match super::super::media::image_format(&bytes) {
         Some(ImageFormat::Svg) | None => Err("not a supported image".into()),
-        Some(format) => Ok(Arc::new(Image::from_bytes(format, bytes))),
+        Some(_) => Ok(bytes),
     }
+}
+
+/// Decodes an image and scales it down to `size` device pixels (its width,
+/// or for a square its shorter side). The GPU samples images without
+/// mipmaps, so one drawn much smaller than it is comes out jagged.
+fn scaled(bytes: &[u8], size: u32, square: bool) -> Result<Arc<RenderImage>, String> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_PIXELS_SIDE);
+    limits.max_image_height = Some(MAX_PIXELS_SIDE);
+    reader.limits(limits);
+    let image = reader.decode().map_err(|e| e.to_string())?.to_rgba8();
+    let (width, height) = image.dimensions();
+    let side = if square { width.min(height) } else { width };
+    let image = if side > size {
+        let ratio = size as f64 / side as f64;
+        let to = |n: u32| ((n as f64 * ratio).round() as u32).max(1);
+        image::imageops::resize(
+            &image,
+            to(width),
+            to(height),
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        image
+    };
+    let (width, height) = image.dimensions();
+    let mut pixels = image.into_raw();
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    super::super::media::render_image(width, height, pixels).ok_or_else(|| "bad image".into())
 }
 
 fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
@@ -396,21 +432,28 @@ impl Asset for WebPage {
     }
 }
 
+/// A page's image at the size it is drawn.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Scaled {
+    url: SharedString,
+    /// Device pixels: the width, or a square's side.
+    size: u32,
+    square: bool,
+}
+
 enum WebImage {}
 
 impl Asset for WebImage {
-    type Source = SharedString;
-    type Output = Result<Arc<Image>, SharedString>;
+    type Source = Scaled;
+    type Output = Result<Arc<RenderImage>, SharedString>;
 
     #[allow(clippy::manual_async_fn)]
-    fn load(
-        url: SharedString,
-        cx: &mut App,
-    ) -> impl Future<Output = Self::Output> + Send + 'static {
+    fn load(source: Scaled, cx: &mut App) -> impl Future<Output = Self::Output> + Send + 'static {
         let reader = Reader::global(cx);
         async move {
-            let load = load_image(reader.http.clone(), url.to_string());
-            reader.run(load).await
+            let load = load_image(reader.http.clone(), source.url.to_string());
+            let bytes = reader.run(load).await?;
+            scaled(&bytes, source.size, source.square).map_err(SharedString::from)
         }
     }
 }
@@ -440,13 +483,20 @@ where
         .detach();
 }
 
-/// The page's image, `None` while it loads or when it fails.
-fn image_source(url: SharedString) -> ImageSource {
+/// The page's image, scaled for `width` logical pixels (or a `square` of
+/// that side) on this window's display; `None` while it loads.
+fn image_source(url: SharedString, width: f32, square: bool) -> ImageSource {
     ImageSource::Custom(Arc::new(move |window, cx| {
-        match window.use_asset::<WebImage>(&url, cx)? {
-            Ok(image) => image.use_render_image(window, cx).map(Ok),
+        let source = Scaled {
+            url: url.clone(),
+            size: (width * window.scale_factor()).ceil() as u32,
+            square,
+        };
+        match window.use_asset::<WebImage>(&source, cx)? {
+            Ok(image) => Some(Ok(image)),
             Err(error) => {
-                retry_later::<WebImage>(url.clone(), url.to_string(), window, cx);
+                let key = format!("{url}@{}", source.size);
+                retry_later::<WebImage>(source, key, window, cx);
                 Some(Err(ImageCacheError::Asset(error)))
             }
         }
@@ -516,15 +566,18 @@ impl RenderOnce for Embed {
                     open(event.modifiers(), window, cx)
                 })
         };
-        let image = page.image.clone().map(|image| {
-            img(image_source(image.into()))
-                .rounded(px(4.))
-                .object_fit(ObjectFit::Cover)
-                .with_fallback(|| div().into_any_element())
-        });
-        let (thumbnail, large) = match image {
-            Some(image) if page.large => (None, Some(image)),
-            image => (image, None),
+        let image = |width: f32, square: bool| {
+            page.image.clone().map(|image| {
+                img(image_source(image.into(), width, square))
+                    .rounded(px(4.))
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(|| div().into_any_element())
+            })
+        };
+        let (thumbnail, large) = if page.large {
+            (None, image(IMAGE_WIDTH, false))
+        } else {
+            (image(THUMBNAIL, true), None)
         };
         let text = div()
             .flex()
@@ -701,6 +754,32 @@ mod tests {
         assert_eq!(page.color, Some(0xffaa00));
         assert_eq!(hex_color("red"), None);
         assert_eq!(hex_color("#12345"), None);
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::RgbaImage::new(width, height)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn scales_images_down_to_their_drawn_size_only() {
+        let size = |image: Arc<RenderImage>| {
+            let size = image.size(0);
+            (size.width.0, size.height.0)
+        };
+        assert_eq!(
+            size(scaled(&png(1200, 600), 400, false).unwrap()),
+            (400, 200)
+        );
+        assert_eq!(size(scaled(&png(300, 200), 80, true).unwrap()), (120, 80));
+        assert_eq!(size(scaled(&png(100, 50), 400, false).unwrap()), (100, 50));
+        assert!(scaled(b"not an image", 400, false).is_err());
     }
 
     #[test]
