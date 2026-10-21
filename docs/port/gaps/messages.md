@@ -27,7 +27,7 @@ Counts are of the rows in the tables. What is left:
 
 ## 1. Message rows, Markdown, links, embeds and diffs
 
-Note: Confirmed in buzz-app: there are no OpenGraph/unfurl cards and no YouTube embeds. Links get only a host icon. The only link "previews" are hover cards for Buzz message and channel links. Code blocks have no syntax highlighting or copy button. Edited messages show no "(edited)" marker.
+Note: Confirmed in buzz-app: there are no OpenGraph/unfurl cards and no YouTube embeds. Links get only a host icon. The only link "previews" are hover cards for Buzz message and channel links. The port adds hover cards on web links as a native extra: the page's OpenGraph site name, title, description and image, read on hover from public addresses only (`crates/app/src/ui/link_preview/web.rs`). Code blocks have no syntax highlighting or copy button. Edited messages show no "(edited)" marker.
 
 Rows: DONE 60, DIFFERENT 1, SKIPPED 2.
 

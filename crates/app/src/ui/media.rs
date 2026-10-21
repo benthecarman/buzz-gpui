@@ -372,7 +372,7 @@ fn tabular() -> FontFeatures {
 
 /// Sniffs the formats GPUI decodes from their magic bytes. Senders' MIME
 /// claims are not trusted.
-fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
+pub(crate) fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     let starts = |magic: &[u8]| bytes.starts_with(magic);
     if starts(b"\x89PNG\r\n\x1a\n") {
         Some(ImageFormat::Png)

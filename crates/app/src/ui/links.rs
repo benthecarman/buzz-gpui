@@ -537,9 +537,14 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     let preview = link
         .as_ref()
         .and_then(|l| l.message.map(|m| (l.channel.clone(), m)));
+    let external = !matches!(
+        kind,
+        LinkKind::Channel | LinkKind::Message | LinkKind::Thread
+    );
+    // Web links' hover cards name their address, so they need no tooltip.
     let tooltip = if withheld {
         Some("Private channel. You aren’t a member, or it no longer exists.".to_string())
-    } else if preview.is_none() && named.is_none() {
+    } else if preview.is_none() && named.is_none() && !external {
         Some(url.to_string())
     } else {
         None
@@ -571,10 +576,6 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         .size(icon_size)
         .color(c.text_link);
     let id = chip.id.clone();
-    let external = !matches!(
-        kind,
-        LinkKind::Channel | LinkKind::Message | LinkKind::Thread
-    );
     let gap = if kind == LinkKind::Channel { 0. } else { 3. };
     let body: AnyElement = if let Some(custom) = custom {
         custom
@@ -634,6 +635,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     };
     let target = url.to_string();
     let origin = chip.origin.clone();
+    let card_origin = origin.clone();
     let middle = target.clone();
     let internal = !external;
     // "This Buzz link couldn’t be opened here." after a failed open.
@@ -774,8 +776,9 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         });
     }
     // Hover cards: message links preview the message; channel links the
-    // channel's public details.
-    let card: Option<AnyElement> = if let Some((channel, message)) = &preview {
+    // channel's public details; web links their page, read only once the
+    // card opens.
+    let mut card: Option<AnyElement> = if let Some((channel, message)) = &preview {
         directory.session.clone().map(|session| {
             link_preview::message_card(
                 SharedString::from(format!("{id}-card")),
@@ -793,7 +796,7 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     } else {
         None
     };
-    let hovering = card.is_some();
+    let hovering = card.is_some() || external;
     if hovering {
         let state = hover_state.clone();
         element = element.on_hover(move |hovered, window, cx| {
@@ -801,6 +804,14 @@ pub fn chip(chip: Chip<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
         });
     }
     let shown = hover_state.read(cx).open;
+    if shown && external {
+        let card_id = SharedString::from(format!("{id}-card"));
+        let target = url.to_string();
+        let open = move |modifiers, window: &mut Window, cx: &mut App| {
+            open_web(mode, &target, modifiers, card_origin.clone(), window, cx)
+        };
+        card = Some(link_preview::web::card(card_id, url, open, window, cx));
+    }
     let mut wrapper = div()
         .relative()
         .flex()
