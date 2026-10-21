@@ -146,6 +146,48 @@ pub fn in_place<T>(thread: bool, draw: impl FnOnce() -> T) -> T {
     drawn
 }
 
+/// The most links a message shows embeds for.
+const MAX_EMBEDS: usize = 3;
+
+/// Previews of the body's web links under it, as chat apps unfurl them:
+/// the first few links that are not the message's own attachments.
+pub fn embeds(row: &Arc<MessageRow>, directory: &Directory) -> Option<AnyElement> {
+    let document = prepared(row, directory);
+    let urls: Vec<String> = document
+        .links
+        .iter()
+        .filter(|url| !row.attachments.iter().any(|a| a.url == **url))
+        .take(MAX_EMBEDS)
+        .cloned()
+        .collect();
+    if urls.is_empty() {
+        return None;
+    }
+    let origin = (!NO_ORIGIN.get()).then(|| navigation::LinkOrigin {
+        thread: IN_THREAD.get(),
+        ..navigation::LinkOrigin::of(row)
+    });
+    let mode = links::mode();
+    let id = row.id.to_hex();
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .children(urls.into_iter().enumerate().map(|(index, url)| {
+                let (target, origin) = (url.clone(), origin.clone());
+                let open = move |modifiers, window: &mut Window, cx: &mut App| {
+                    links::open_web(mode, &target, modifiers, origin.clone(), window, cx)
+                };
+                super::link_preview::web::Embed::new(
+                    SharedString::from(format!("embed-{id}-{index}")),
+                    url,
+                    open,
+                )
+            }))
+            .into_any_element(),
+    )
+}
+
 /// Renders a row's body.
 pub fn body(row: &Arc<MessageRow>, directory: &Directory, cx: &App) -> AnyElement {
     let document = prepared(row, directory);
@@ -349,6 +391,8 @@ struct Prepared {
     body: Document,
     /// Each spoiler's inner one-paragraph Markdown, by index.
     spoilers: Arc<[SharedString]>,
+    /// The body's web links in order, once each, leaving out spoilers'.
+    links: Arc<[String]>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -586,6 +630,7 @@ fn prepare(row: &MessageRow, directory: &Directory) -> Prepared {
     let plain = |body| Prepared {
         body,
         spoilers: Arc::from([]),
+        links: Arc::from([]),
     };
     if is_emoji_only(&row.content, &row.emoji) {
         return plain(Document::Emoji(emoji_parts(row.content.trim(), &row.emoji)));
@@ -636,6 +681,8 @@ fn prepare(row: &MessageRow, directory: &Directory) -> Prepared {
         footnote_order: Vec::new(),
         spoilers: Vec::new(),
         in_link: false,
+        links: Vec::new(),
+        in_spoiler: false,
     };
     let mut blocks = prep.blocks(tree.children().map_or(&[][..], Vec::as_slice));
     // Footnotes follow the body, in the order they were first referenced.
@@ -663,6 +710,7 @@ fn prepare(row: &MessageRow, directory: &Directory) -> Prepared {
     Prepared {
         body: Document::Blocks(blocks),
         spoilers: prep.spoilers.into_iter().map(SharedString::from).collect(),
+        links: prep.links.into(),
     }
 }
 
@@ -730,6 +778,10 @@ struct Prep<'a> {
     spoilers: Vec<String>,
     /// Inside a link label: text is escaped and nothing more.
     in_link: bool,
+    /// Web links seen so far, for the embeds under the body.
+    links: Vec<String>,
+    /// Inside a spoiler, whose links get no embed.
+    in_spoiler: bool,
 }
 
 impl Prep<'_> {
@@ -819,7 +871,9 @@ impl Prep<'_> {
                 Piece::Text(value, start) => self.text(value, *start, out),
                 Piece::Spoiler(inner) => {
                     let mut markdown = String::new();
+                    let was = std::mem::replace(&mut self.in_spoiler, true);
                     self.pieces(inner, &mut markdown);
+                    self.in_spoiler = was;
                     let plain = plain_markdown(&markdown);
                     let index = self.spoilers.len();
                     self.spoilers.push(markdown);
@@ -984,6 +1038,12 @@ impl Prep<'_> {
 
     /// A link keeps its label's formatting; text inside is only escaped.
     fn link(&mut self, children: &[Node], url: &str, out: &mut String) {
+        if !self.in_spoiler
+            && (url.starts_with("https://") || url.starts_with("http://"))
+            && !self.links.iter().any(|seen| seen == url)
+        {
+            self.links.push(url.to_string());
+        }
         let was = std::mem::replace(&mut self.in_link, true);
         let mut inner = String::new();
         for child in children {
@@ -2692,6 +2752,18 @@ pub(super) mod tests {
         assert_eq!(
             paragraph("see [**bold** and `code`](https://x.test)"),
             "see [**bold** and `code`](<https://x.test>)"
+        );
+    }
+
+    #[test]
+    fn collects_web_links_for_embeds_but_not_spoilers_or_code() {
+        let row = row("see https://a.example/x and [b](https://b.example) \
+            and https://a.example/x again, ||secret https://hidden.example now||, \
+            `https://code.example` and buzz://channel/general");
+        let links = prepare(&row, &directory()).links;
+        assert_eq!(
+            links.as_ref(),
+            ["https://a.example/x", "https://b.example"].map(String::from)
         );
     }
 

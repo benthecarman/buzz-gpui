@@ -1,15 +1,14 @@
-//! Hover cards on web links: the page's site name, title, description
-//! and image from its OpenGraph (or plain `<title>`) tags. A page is read
-//! only once its card opens, then kept for the session; a failed read is
-//! tried again on a later hover.
+//! Web link embeds under messages: the page's site name, title,
+//! description, image and theme colour from its OpenGraph (or plain
+//! `<title>`) tags. A page is read when its message first shows, then kept
+//! for the session; a failed read is tried once more a little later.
 //!
 //! Message links are untrusted, so the reader reaches only the public
 //! internet: names resolving to loopback, private, link-local or
 //! carrier-grade NAT (Tailscale) addresses are refused, on every redirect
 //! as on the first request. Requests carry no cookies or credentials.
 
-use super::super::links::{self, LinkKind};
-use buzz_ui::{ActiveTheme, Icon, MaterialStyled, TypeStyled};
+use buzz_ui::{ActiveTheme, TypeStyled};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use html5ever::tendril::TendrilSink;
@@ -17,6 +16,7 @@ use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,11 +27,15 @@ const MAX_IMAGE: usize = 8 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const MAX_TITLE: usize = 200;
 const MAX_DESCRIPTION: usize = 400;
-/// How long a failed read stays failed before a hover tries it again.
+/// How long a failed read stays failed before it is tried once more.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
-/// The card's content width, as the Buzz link cards.
-const WIDTH: f32 = 340.;
-const IMAGE_HEIGHT: f32 = 160.;
+/// Reads running at once, so a channel full of links queues its pages.
+const MAX_READS: usize = 4;
+/// An embed's width at most, with its bar and padding, and its large
+/// image's width inside that.
+const MAX_WIDTH: f32 = 432.;
+const IMAGE_WIDTH: f32 = 400.;
+const THUMBNAIL: f32 = 80.;
 
 /// What a page says about itself.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -41,6 +45,11 @@ pub struct Page {
     pub description: Option<String>,
     /// An `https://` image, resolved against the page's final address.
     pub image: Option<String>,
+    /// Whether the image is a large one under the text (the default)
+    /// rather than a thumbnail beside it (`twitter:card` `summary`).
+    pub large: bool,
+    /// The page's `theme-color`, as `0xRRGGBB`.
+    pub color: Option<u32>,
 }
 
 impl Page {
@@ -135,6 +144,7 @@ impl Resolve for PublicOnly {
 struct Reader {
     http: reqwest::Client,
     runtime: tokio::runtime::Handle,
+    reads: Arc<tokio::sync::Semaphore>,
 }
 
 impl Global for Reader {}
@@ -166,19 +176,23 @@ impl Reader {
         let reader = Self {
             http,
             runtime: crate::runtime::Runtime::handle(cx),
+            reads: Arc::new(tokio::sync::Semaphore::new(MAX_READS)),
         };
         cx.set_global(reader.clone());
         reader
     }
 
-    /// Runs `load` on the network runtime under the time limit.
+    /// Runs `load` on the network runtime, at most [`MAX_READS`] at once,
+    /// under the time limit.
     fn run<T: Send + 'static>(
         &self,
         load: impl Future<Output = Result<T, String>> + Send + 'static,
     ) -> impl Future<Output = Result<T, SharedString>> + Send + 'static {
-        let task = self
-            .runtime
-            .spawn(async move { tokio::time::timeout(TIMEOUT, load).await });
+        let reads = self.reads.clone();
+        let task = self.runtime.spawn(async move {
+            let _read = reads.acquire_owned().await;
+            tokio::time::timeout(TIMEOUT, load).await
+        });
         async move {
             match task.await {
                 Ok(Ok(result)) => result.map_err(SharedString::from),
@@ -338,6 +352,24 @@ pub fn parse(html: &str, base: &url::Url) -> Page {
         description: first(&["og:description", "twitter:description", "description"])
             .and_then(|d| tidy(&d, MAX_DESCRIPTION)),
         image,
+        large: first(&["twitter:card"]).is_none_or(|card| card.trim() != "summary"),
+        color: first(&["theme-color"]).and_then(|color| hex_color(&color)),
+    }
+}
+
+/// `#rgb` or `#rrggbb` as `0xRRGGBB`.
+fn hex_color(value: &str) -> Option<u32> {
+    let hex = value.trim().strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    match hex.len() {
+        6 => u32::from_str_radix(hex, 16).ok(),
+        3 => {
+            let doubled: String = hex.chars().flat_map(|c| [c, c]).collect();
+            u32::from_str_radix(&doubled, 16).ok()
+        }
+        _ => None,
     }
 }
 
@@ -383,28 +415,27 @@ impl Asset for WebImage {
     }
 }
 
-/// Failed reads waiting to be forgotten, by asset and source.
+/// Failed reads already tried again, by asset and source.
 #[derive(Default)]
-struct Retrying(Arc<Mutex<HashSet<(&'static str, String)>>>);
+struct Retried(Arc<Mutex<HashSet<(&'static str, String)>>>);
 
-impl Global for Retrying {}
+impl Global for Retried {}
 
-/// Forgets a failed asset after [`RETRY_AFTER`], so a later look reads it
-/// again rather than keeping the failure for the session.
+/// Forgets a failed asset after [`RETRY_AFTER`], so the next draw reads
+/// it again; a second failure is kept for the session.
 fn retry_later<A: Asset>(source: A::Source, key: String, window: &Window, cx: &mut App)
 where
     A::Source: Send + 'static,
 {
     let entry = (std::any::type_name::<A>(), key);
-    let set = cx.default_global::<Retrying>().0.clone();
-    if !set.lock().expect("retrying").insert(entry.clone()) {
+    let set = cx.default_global::<Retried>().0.clone();
+    if !set.lock().expect("retried").insert(entry) {
         return;
     }
     window
         .spawn(cx, async move |cx| {
             cx.background_executor().timer(RETRY_AFTER).await;
             let _ = cx.update(|_, cx| cx.remove_asset::<A>(&source));
-            set.lock().expect("retrying").remove(&entry);
         })
         .detach();
 }
@@ -422,34 +453,7 @@ fn image_source(url: SharedString) -> ImageSource {
     }))
 }
 
-/// A card's surface; a click opens the link as clicking it does.
-fn frame(
-    id: SharedString,
-    open: impl Fn(Modifiers, &mut Window, &mut App) + 'static,
-    cx: &App,
-) -> Stateful<Div> {
-    let c = *cx.colors();
-    div()
-        .id(id)
-        .flex()
-        .flex_col()
-        .gap(px(8.))
-        .w(px(WIDTH))
-        .max_h(px(360.))
-        .overflow_hidden()
-        .p(px(12.))
-        .floating_surface(&c)
-        .rounded(px(16.))
-        .text_body()
-        .text_color(c.text_standard)
-        .cursor_pointer()
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            open(event.modifiers(), window, cx)
-        })
-}
-
-/// The host a card names when the page names no site.
+/// The host an embed names when the page names no site.
 fn host(url: &str) -> String {
     url::Url::parse(url)
         .ok()
@@ -460,68 +464,87 @@ fn host(url: &str) -> String {
         .unwrap_or_else(|| url.to_string())
 }
 
-/// The card's top line: the link's service icon and the site's name.
-fn site_line(url: &str, site: Option<&str>, cx: &App) -> Div {
-    let c = cx.colors();
-    let kind = links::link_kind(url).unwrap_or(LinkKind::Web);
-    div()
-        .flex()
-        .items_center()
-        .gap(px(4.))
-        .text_body_sm()
-        .text_color(c.text_subtle)
-        .child(Icon::new(links::icon(kind, false)).size(13.))
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .child(site.map_or_else(|| host(url), str::to_string)),
-        )
+type Open = Rc<dyn Fn(Modifiers, &mut Window, &mut App)>;
+
+/// A web link's preview under its message: a bar in the page's theme
+/// colour beside its site, linked title, description and image. Nothing
+/// shows while the page loads or when it has nothing to show.
+#[derive(IntoElement)]
+pub struct Embed {
+    id: SharedString,
+    url: String,
+    open: Open,
 }
 
-/// The card for a web link, reading the page the first time it shows;
-/// `open` opens the link, as clicking it does.
-pub fn card(
-    id: SharedString,
-    url: &str,
-    open: impl Fn(Modifiers, &mut Window, &mut App) + 'static,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let c = *cx.colors();
-    let source = SharedString::from(url.to_string());
-    let page = window.use_asset::<WebPage>(&source, cx);
-    if let Some(Err(_)) = &page {
-        retry_later::<WebPage>(source.clone(), url.to_string(), window, cx);
+impl Embed {
+    /// `open` opens the link, as clicking it in the body does.
+    pub fn new(
+        id: SharedString,
+        url: String,
+        open: impl Fn(Modifiers, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            id,
+            url,
+            open: Rc::new(open),
+        }
     }
-    let frame = frame(id, open, cx);
-    let address = div()
-        .text_body_sm()
-        .text_color(c.text_subtle)
-        .line_clamp(2)
-        .text_ellipsis()
-        .child(url.to_string());
-    match page {
-        None => frame
-            .child(site_line(url, None, cx))
+}
+
+impl RenderOnce for Embed {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let source = SharedString::from(self.url.clone());
+        let page = match window.use_asset::<WebPage>(&source, cx) {
+            Some(Ok(page)) => page,
+            Some(Err(_)) => {
+                retry_later::<WebPage>(source, self.url.clone(), window, cx);
+                return div().into_any_element();
+            }
+            None => return div().into_any_element(),
+        };
+        let c = *cx.colors();
+        let bar = page
+            .color
+            .map_or(c.border_prominent, |color| rgb(color).into());
+        let clickable = |id: &str, open: &Open| {
+            let open = open.clone();
+            div()
+                .id(SharedString::from(format!("{}-{id}", self.id)))
+                .cursor_pointer()
+                .on_click(move |event, window, cx| {
+                    cx.stop_propagation();
+                    open(event.modifiers(), window, cx)
+                })
+        };
+        let image = page.image.clone().map(|image| {
+            img(image_source(image.into()))
+                .rounded(px(4.))
+                .object_fit(ObjectFit::Cover)
+                .with_fallback(|| div().into_any_element())
+        });
+        let (thumbnail, large) = match image {
+            Some(image) if page.large => (None, Some(image)),
+            image => (image, None),
+        };
+        let text = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .flex_1()
+            .min_w_0()
             .child(
                 div()
-                    .text_body_sm()
+                    .text_caption()
                     .text_color(c.text_subtle)
-                    .child("Loading preview…"),
+                    .truncate()
+                    .child(page.site.clone().unwrap_or_else(|| host(&self.url))),
             )
-            .into_any_element(),
-        // No preview: the card is the address, as the tooltip was.
-        Some(Err(_)) => frame
-            .child(site_line(url, None, cx))
-            .child(address)
-            .into_any_element(),
-        Some(Ok(page)) => frame
-            .child(site_line(url, page.site.as_deref(), cx))
             .when_some(page.title.clone(), |d, title| {
                 d.child(
-                    div()
+                    clickable("title", &self.open)
                         .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(c.text_link)
+                        .hover(|s| s.underline())
                         .line_clamp(2)
                         .text_ellipsis()
                         .child(title),
@@ -531,23 +554,49 @@ pub fn card(
                 d.child(
                     div()
                         .text_body_sm()
-                        .text_color(c.text_subtle)
-                        .line_clamp(3)
+                        .text_color(c.text_standard)
+                        .line_clamp(4)
                         .text_ellipsis()
                         .child(description),
                 )
-            })
-            .when_some(page.image.clone(), |d, image| {
+            });
+        div()
+            .id(self.id.clone())
+            .mt(px(6.))
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .max_w(px(MAX_WIDTH))
+            .pt(px(8.))
+            .pr(px(16.))
+            .pb(px(16.))
+            .pl(px(12.))
+            .rounded(px(4.))
+            .border_l_4()
+            .border_color(bar)
+            .bg(c.surface_inset)
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(16.))
+                    .child(text)
+                    .when_some(thumbnail, |d, thumbnail| {
+                        d.child(
+                            clickable("thumbnail", &self.open)
+                                .flex_none()
+                                .child(thumbnail.size(px(THUMBNAIL))),
+                        )
+                    }),
+            )
+            .when_some(large, |d, image| {
                 d.child(
-                    img(image_source(image.into()))
-                        .w_full()
-                        .h(px(IMAGE_HEIGHT))
-                        .rounded(px(8.))
-                        .object_fit(ObjectFit::Cover)
-                        .with_fallback(|| div().into_any_element()),
+                    clickable("image", &self.open)
+                        .max_w_full()
+                        .child(image.w(px(IMAGE_WIDTH)).max_w_full().max_h(px(300.))),
                 )
             })
-            .into_any_element(),
+            .into_any_element()
     }
 }
 
@@ -578,6 +627,8 @@ mod tests {
                 title: Some("Open Graph title".into()),
                 description: Some("OG description".into()),
                 image: Some("https://example.com/card.png".into()),
+                large: true,
+                color: None,
             }
         );
     }
@@ -632,6 +683,24 @@ mod tests {
         ] {
             assert!(allowed(&url::Url::parse(url).unwrap()), "{url}");
         }
+    }
+
+    #[test]
+    fn reads_the_card_kind_and_theme_colour() {
+        let html = "<meta name=twitter:card content=summary>\
+            <meta name=theme-color content='#1e2327'>\
+            <meta property=og:title content=T>";
+        let page = parse(html, &base());
+        assert!(!page.large);
+        assert_eq!(page.color, Some(0x1e2327));
+        let page = parse(
+            "<meta name=theme-color content='#fa0'><title>T</title>",
+            &base(),
+        );
+        assert!(page.large);
+        assert_eq!(page.color, Some(0xffaa00));
+        assert_eq!(hex_color("red"), None);
+        assert_eq!(hex_color("#12345"), None);
     }
 
     #[test]
