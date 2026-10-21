@@ -1,7 +1,9 @@
 //! Web link embeds under messages: the page's site name, title,
 //! description, image and theme colour from its OpenGraph (or plain
-//! `<title>`) tags. A page is read when its message first shows, then kept
-//! for the session; a failed read is tried once more a little later.
+//! `<title>`) tags. A page is read when its message first shows and kept
+//! on disk with its image, so later launches show it at once and read it
+//! again behind after a day. A page with nothing to show is kept as such;
+//! a network failure is tried once more a little later.
 //!
 //! Message links are untrusted, so the reader reaches only the public
 //! internet: names resolving to loopback, private, link-local or
@@ -29,8 +31,11 @@ const MAX_TITLE: usize = 200;
 const MAX_DESCRIPTION: usize = 400;
 /// How long a failed read stays failed before it is tried once more.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
-/// Reads running at once, so a channel full of links queues its pages.
-const MAX_READS: usize = 4;
+/// Network reads running at once, so a channel full of links queues its
+/// pages; kept ones never wait.
+const MAX_READS: usize = 6;
+/// Kept pages and images older than this are read again after showing.
+const FRESH: Duration = Duration::from_secs(24 * 3600);
 /// An embed's width at most, with its bar and padding, and its large
 /// image's width inside that.
 const MAX_WIDTH: f32 = 432.;
@@ -40,7 +45,7 @@ const THUMBNAIL: f32 = 80.;
 const MAX_PIXELS_SIDE: u32 = 8192;
 
 /// What a page says about itself.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Page {
     pub site: Option<String>,
     pub title: Option<String>,
@@ -184,25 +189,62 @@ impl Reader {
         reader
     }
 
-    /// Runs `load` on the network runtime, at most [`MAX_READS`] at once,
-    /// under the time limit.
-    fn run<T: Send + 'static>(
-        &self,
-        load: impl Future<Output = Result<T, String>> + Send + 'static,
-    ) -> impl Future<Output = Result<T, SharedString>> + Send + 'static {
-        let reads = self.reads.clone();
-        let task = self.runtime.spawn(async move {
-            let _read = reads.acquire_owned().await;
-            tokio::time::timeout(TIMEOUT, load).await
-        });
+    /// Runs `task` on the network runtime.
+    fn spawn<T, F>(&self, task: F) -> impl Future<Output = Result<T, SharedString>> + use<T, F>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, String>> + Send + 'static,
+    {
+        let task = self.runtime.spawn(task);
         async move {
             match task.await {
-                Ok(Ok(result)) => result.map_err(SharedString::from),
-                Ok(Err(_)) => Err("timed out".into()),
+                Ok(result) => result.map_err(SharedString::from),
                 Err(_) => Err("load failed".into()),
             }
         }
     }
+
+    /// Runs `load` at most [`MAX_READS`] at once, under the time limit.
+    async fn network<T>(
+        &self,
+        load: impl Future<Output = Result<T, Failure>>,
+    ) -> Result<T, Failure> {
+        let _read = self.reads.acquire().await;
+        tokio::time::timeout(TIMEOUT, load)
+            .await
+            .unwrap_or_else(|_| Err(Failure::Transient("timed out".into())))
+    }
+}
+
+/// Why a read showed nothing.
+#[derive(Debug)]
+enum Failure {
+    /// The site answered with nothing to preview, which is kept as an
+    /// answer.
+    Final(String),
+    /// The network failed, so a later read tries again.
+    Transient(String),
+}
+
+impl Failure {
+    fn message(self) -> String {
+        match self {
+            Self::Final(message) | Self::Transient(message) => message,
+        }
+    }
+}
+
+/// Reads kept on disk for `key`, with their age; blocking work runs off
+/// the runtime's threads.
+async fn read_kept(key: String) -> Option<(Vec<u8>, Duration)> {
+    tokio::task::spawn_blocking(move || buzz_relay_client::read_kept(&key))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn keep(key: String, bytes: Vec<u8>) {
+    tokio::task::spawn_blocking(move || buzz_relay_client::keep(&key, &bytes));
 }
 
 /// GETs `url`, keeping at most `limit` bytes; `stop` ends the read early.
@@ -212,22 +254,35 @@ async fn get(
     accept: &str,
     limit: usize,
     stop: impl Fn(&[u8]) -> bool,
-) -> Result<(reqwest::Response, Vec<u8>), String> {
-    let parsed = url::Url::parse(url).map_err(|_| "not a URL".to_string())?;
+) -> Result<(reqwest::Response, Vec<u8>), Failure> {
+    let parsed = url::Url::parse(url).map_err(|_| Failure::Final("not a URL".into()))?;
     if !allowed(&parsed) {
-        return Err("not a public address".into());
+        return Err(Failure::Final("not a public address".into()));
     }
     let mut response = http
         .get(parsed)
         .header("Accept", accept)
         .send()
         .await
-        .map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("status {}", response.status().as_u16()));
+        .map_err(|error| Failure::Transient(error.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        let message = format!("status {}", status.as_u16());
+        // Gone or refused stays so; busy or broken may not.
+        return Err(
+            if status.is_client_error() && !matches!(status.as_u16(), 408 | 429) {
+                Failure::Final(message)
+            } else {
+                Failure::Transient(message)
+            },
+        );
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| Failure::Transient(e.to_string()))?
+    {
         let room = limit - body.len();
         body.extend_from_slice(&chunk[..chunk.len().min(room)]);
         if body.len() >= limit || stop(&body) {
@@ -237,7 +292,7 @@ async fn get(
     Ok((response, body))
 }
 
-async fn load_page(http: reqwest::Client, url: String) -> Result<Page, String> {
+async fn load_page(http: reqwest::Client, url: String) -> Result<Page, Failure> {
     let (response, body) = get(
         &http,
         &url,
@@ -253,23 +308,94 @@ async fn load_page(http: reqwest::Client, url: String) -> Result<Page, String> {
         .map(|value| value.to_ascii_lowercase())
         .is_none_or(|value| value.contains("html"));
     if !html {
-        return Err("not a page".into());
+        return Err(Failure::Final("not a page".into()));
     }
     let page = parse(&String::from_utf8_lossy(&body), response.url());
     if page.is_empty() {
-        return Err("nothing to show".into());
+        return Err(Failure::Final("nothing to show".into()));
     }
     Ok(page)
 }
 
-async fn load_image(http: reqwest::Client, url: String) -> Result<Vec<u8>, String> {
+async fn load_image(http: reqwest::Client, url: String) -> Result<Vec<u8>, Failure> {
     let (_, bytes) = get(&http, &url, "image/*", MAX_IMAGE + 1, |_| false).await?;
     if bytes.len() > MAX_IMAGE {
-        return Err("image too large".into());
+        return Err(Failure::Final("image too large".into()));
     }
     match super::super::media::image_format(&bytes) {
-        Some(ImageFormat::Svg) | None => Err("not a supported image".into()),
+        Some(ImageFormat::Svg) | None => Err(Failure::Final("not a supported image".into())),
         Some(_) => Ok(bytes),
+    }
+}
+
+/// A page's preview, `None` for a page with nothing to show: kept on disk,
+/// shown from there, and read again behind once it is a day old.
+async fn page(reader: Reader, url: String) -> Result<Option<Page>, String> {
+    let key = format!("buzz-link-preview:page:{url}");
+    let kept = read_kept(key.clone())
+        .await
+        .and_then(|(bytes, age)| Some((serde_json::from_slice(&bytes).ok()?, age)));
+    let fetch = {
+        let reader = reader.clone();
+        let (url, key) = (url.clone(), key.clone());
+        async move {
+            let page = match reader
+                .network(load_page(reader.http.clone(), url.clone()))
+                .await
+            {
+                Ok(page) => Some(page),
+                Err(Failure::Final(error)) => {
+                    tracing::debug!(%url, %error, "no link preview");
+                    None
+                }
+                Err(Failure::Transient(error)) => {
+                    tracing::debug!(%url, %error, "link preview failed");
+                    return Err(error);
+                }
+            };
+            if let Ok(bytes) = serde_json::to_vec(&page) {
+                keep(key, bytes);
+            }
+            Ok(page)
+        }
+    };
+    match kept {
+        Some((page, age)) => {
+            if age >= FRESH {
+                tokio::spawn(fetch);
+            }
+            Ok(page)
+        }
+        None => fetch.await,
+    }
+}
+
+/// An image's bytes, kept on disk like pages.
+async fn image_bytes(reader: Reader, url: String) -> Result<Vec<u8>, String> {
+    let key = format!("buzz-link-preview:image:{url}");
+    let kept = read_kept(key.clone()).await;
+    let fetch = {
+        let reader = reader.clone();
+        let (url, key) = (url.clone(), key.clone());
+        async move {
+            let bytes = reader
+                .network(load_image(reader.http.clone(), url))
+                .await
+                .map_err(Failure::message)?;
+            keep(key, bytes.clone());
+            Ok(bytes)
+        }
+    };
+    match kept {
+        Some((bytes, age)) => {
+            if age >= FRESH {
+                tokio::spawn(async move {
+                    let _: Result<_, String> = fetch.await;
+                });
+            }
+            Ok(bytes)
+        }
+        None => fetch.await,
     }
 }
 
@@ -421,14 +547,8 @@ impl Asset for WebPage {
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         let reader = Reader::global(cx);
-        async move {
-            let load = load_page(reader.http.clone(), url.to_string());
-            let page = reader.run(load).await;
-            if let Err(error) = &page {
-                tracing::debug!(%url, %error, "no link preview");
-            }
-            page.map(Arc::new)
-        }
+        let load = reader.spawn(page(reader.clone(), url.to_string()));
+        async move { load.await?.map(Arc::new).ok_or_else(|| "no preview".into()) }
     }
 }
 
@@ -450,9 +570,9 @@ impl Asset for WebImage {
     #[allow(clippy::manual_async_fn)]
     fn load(source: Scaled, cx: &mut App) -> impl Future<Output = Self::Output> + Send + 'static {
         let reader = Reader::global(cx);
+        let load = reader.spawn(image_bytes(reader.clone(), source.url.to_string()));
         async move {
-            let load = load_image(reader.http.clone(), source.url.to_string());
-            let bytes = reader.run(load).await?;
+            let bytes = load.await?;
             scaled(&bytes, source.size, source.square).map_err(SharedString::from)
         }
     }
@@ -780,6 +900,15 @@ mod tests {
         assert_eq!(size(scaled(&png(300, 200), 80, true).unwrap()), (120, 80));
         assert_eq!(size(scaled(&png(100, 50), 400, false).unwrap()), (100, 50));
         assert!(scaled(b"not an image", 400, false).is_err());
+    }
+
+    #[test]
+    fn keeps_pages_and_pages_without_previews() {
+        let page = Some(parse("<title>Kept</title>", &base()));
+        let kept = serde_json::to_vec(&page).unwrap();
+        assert_eq!(serde_json::from_slice::<Option<Page>>(&kept).unwrap(), page);
+        let none = serde_json::to_vec(&None::<Page>).unwrap();
+        assert_eq!(serde_json::from_slice::<Option<Page>>(&none).unwrap(), None);
     }
 
     #[test]
