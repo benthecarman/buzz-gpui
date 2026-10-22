@@ -1104,7 +1104,8 @@ impl Render for ThreadPanel {
         };
         if self.joining && matches!(access, Access::Member) {
             self.joining = false;
-            ThreadPanel::focus_composer(&cx.entity(), window, cx);
+            // The panel is mid-render, so its input is focused directly.
+            self.input.update(cx, |state, cx| state.focus(window, cx));
         }
         if let Some(channel) = &preview
             && self.join.is_none()
