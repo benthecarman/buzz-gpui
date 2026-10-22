@@ -299,8 +299,13 @@ impl ThreadPanel {
         subscriptions.push(cx.observe_self(|this, cx| this.reveal_target(cx)));
         let weak = cx.entity().downgrade();
         list.set_scroll_handler(move |event, _, cx| {
+            // The list is still borrowed while it reports a scroll, and
+            // paging stops its tail-following, so page once it is free.
             if event.visible_range.start < LOAD_OLDER_WITHIN && event.is_scrolled {
-                let _ = weak.update(cx, |this, _| this.load_older());
+                let weak = weak.clone();
+                cx.defer(move |cx| {
+                    let _ = weak.update(cx, |this, _| this.load_older());
+                });
             }
         });
         let tasks = vec![
