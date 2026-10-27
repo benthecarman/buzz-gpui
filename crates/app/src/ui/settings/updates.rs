@@ -221,6 +221,9 @@ fn notes(cx: &App) -> Option<AnyElement> {
         .with_link(c.text_link)
         .with_border(c.border_standard)
         .with_code_background(c.affordance_subtle)
+        // The default's inline code is the light palette's; without it,
+        // code spans take the code background above.
+        .with_inline_code(HighlightStyle::default())
         .with_selection(c.text_link.opacity(0.25));
     let view_on_github = button("update-release-page", "View on GitHub")
         .icon_end(IconName::ArrowSquareOut)

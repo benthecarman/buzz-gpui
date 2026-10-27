@@ -2064,6 +2064,9 @@ fn text_style(color: Hsla, c: &buzz_ui::Colors) -> TextViewStyle {
         .with_link(c.text_link)
         .with_border(c.border_standard)
         .with_code_background(c.affordance_subtle)
+        // The default's inline code is the light palette's; without it,
+        // code spans take the code background above.
+        .with_inline_code(HighlightStyle::default())
         .with_selection(c.text_link.opacity(0.25))
         .with_paragraph_gap(rems(0.))
 }
