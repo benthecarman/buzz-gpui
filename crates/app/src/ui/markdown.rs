@@ -2095,7 +2095,7 @@ fn inline(source: &SharedString, path: &str, color: Hsla, wrap: bool, out: &Out)
 // Inline objects
 
 /// Bumped when [`Objects::parse`] changes.
-const PARSER_REVISION: u64 = 0xb022_0002;
+const PARSER_REVISION: u64 = 0xb022_0003;
 /// Longer code spans stay in the text flow so they can wrap; shorter ones
 /// get the padded chip.
 const CODE_CHIP_MAX: usize = 40;
@@ -2119,20 +2119,29 @@ struct Objects {
 }
 
 enum Object {
-    Link { url: String, label: StyledLabel },
-    Image { url: String, alt: String },
+    /// The label stays parsed: its code background is the theme's,
+    /// known only when drawn.
+    Link {
+        url: String,
+        label: Vec<Node>,
+    },
+    Image {
+        url: String,
+        alt: String,
+    },
     Code(String),
 }
 
-/// A label's text and styles, from its parsed children.
-fn styled_label(nodes: &[Node], c: &buzz_ui::Colors) -> StyledLabel {
-    fn walk(nodes: &[Node], style: HighlightStyle, out: &mut StyledLabel, c: &buzz_ui::Colors) {
+/// A label's text and styles, from its parsed children; `code_bg` backs
+/// its code spans.
+fn styled_label(nodes: &[Node], code_bg: Hsla) -> StyledLabel {
+    fn walk(nodes: &[Node], style: HighlightStyle, out: &mut StyledLabel, code_bg: Hsla) {
         for node in nodes {
             let mut style = style;
             let text = match node {
                 Node::Text(text) => text.value.clone(),
                 Node::InlineCode(code) => {
-                    style.background_color = Some(c.affordance_subtle);
+                    style.background_color = Some(code_bg);
                     style.font_weight = style.font_weight.or(None);
                     code.value.clone()
                 }
@@ -2155,7 +2164,7 @@ fn styled_label(nodes: &[Node], c: &buzz_ui::Colors) -> StyledLabel {
                         node.children().map_or(&[][..], Vec::as_slice),
                         style,
                         out,
-                        c,
+                        code_bg,
                     );
                     continue;
                 }
@@ -2171,7 +2180,7 @@ fn styled_label(nodes: &[Node], c: &buzz_ui::Colors) -> StyledLabel {
         }
     }
     let mut out = StyledLabel::default();
-    walk(nodes, HighlightStyle::default(), &mut out, c);
+    walk(nodes, HighlightStyle::default(), &mut out, code_bg);
     out
 }
 
@@ -2181,15 +2190,14 @@ impl MarkdownPlugin for Objects {
     }
 
     fn parse(&self, node: &mdast::Node, _: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
-        let colors = buzz_ui::Colors::light();
         let (object, text) = match node {
             Node::Link(link) => {
-                let label = styled_label(&link.children, &colors);
-                let copy = copy_text(&link.url, &label.text, &self.directory);
+                let label = styled_label(&link.children, Hsla::default()).text;
+                let copy = copy_text(&link.url, &label, &self.directory);
                 (
                     Object::Link {
                         url: link.url.clone(),
-                        label,
+                        label: link.children.clone(),
                     },
                     copy,
                 )
@@ -2339,9 +2347,10 @@ impl MarkdownPlugin for Objects {
                     self.row,
                     node.source_range().map_or(0, |r| r.start)
                 ));
+                let label = styled_label(label, c.affordance_subtle);
                 let element = links::with_mode(self.link_mode, || {
                     super::renderers::with_plain(self.plain, || {
-                        self.link(url, label, id, size, line, window, cx)
+                        self.link(url, &label, id, size, line, window, cx)
                     })
                 })?;
                 Some(InlineElement::new(element).with_baseline(baseline))
@@ -2756,6 +2765,21 @@ pub(super) mod tests {
             paragraph("see [**bold** and `code`](https://x.test)"),
             "see [**bold** and `code`](<https://x.test>)"
         );
+    }
+
+    #[test]
+    fn link_label_code_takes_the_drawn_background() {
+        let tree = markdown::to_mdast("[see `code`](https://x.test)", &Default::default())
+            .expect("parses");
+        let Some(Node::Link(link)) = tree.children().and_then(|c| c[0].children()?.first()) else {
+            panic!("no link");
+        };
+        let dark = buzz_ui::Colors::dark().affordance_subtle;
+        let label = styled_label(&link.children, dark);
+        assert_eq!(label.text, "see code");
+        assert_eq!(label.runs.len(), 1);
+        assert_eq!(label.runs[0].0, 4..8);
+        assert_eq!(label.runs[0].1.background_color, Some(dark));
     }
 
     #[test]
