@@ -5634,13 +5634,8 @@ impl Composer {
                     .when(disabled.is_some(), |row| row.opacity(0.5))
                     .children(leading.as_ref().map(|(name, picture)| {
                         let mut avatar = Avatar::new(name.clone()).size(AvatarSize::Small);
-                        let image = match picture {
-                            Some(data) if data.starts_with("data:") => media::inline_image(data),
-                            Some(url) => Some(media::avatar(url, &media)),
-                            None => None,
-                        };
-                        if let Some(image) = image {
-                            avatar = avatar.image(image);
+                        if let Some(picture) = picture {
+                            avatar = avatar.image(media::avatar(picture, &media));
                         }
                         avatar
                     }))
